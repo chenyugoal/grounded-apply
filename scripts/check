@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+cd "$REPO_DIR"
+
+CHECK_RUNTIME_ROOT="${TMPDIR:-/tmp}/grounded-apply-check-$$"
+if [ -e "$CHECK_RUNTIME_ROOT" ]; then
+    echo "Refusing to reuse check path: $CHECK_RUNTIME_ROOT" >&2
+    exit 2
+fi
+
+PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 GROUNDED_APPLY_HOME="$CHECK_RUNTIME_ROOT" \
+    ./scripts/gapply doctor --json >/dev/null
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+    python3 -m unittest discover -s tests -v

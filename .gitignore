@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+site/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Grounded Apply private runtime data
+.grounded-apply/
+grounded_apply.db
+grounded_apply.db-*
+artifacts/
+job-snapshots/
+generated/
+browser-sessions/
+backups/
+support-bundle*.zip
+
+# Generated application materials (fixtures belong under tests/fixtures)
+applications/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
