@@ -13,9 +13,10 @@ working-tree checkpoint and next exact task.
 - **Planned** means design intent only.
 - **Blocked** names a concrete dependency or unresolved decision.
 
-As of August 11, 2026, the repository is in **Phase 0**. The design basis,
+As of September 3, 2026, the repository is in **Phase 0**. The design basis,
 resumability contract, executable scaffold, deterministic truth policies, and
-initial SQLite persistence slice are implemented and verified. Profile import,
+initial SQLite persistence slice are implemented and verified. Safe structured
+text-import proposals and the first synthetic profile fixture are implemented;
 review UX, registered derivations, data lifecycle tools, and all end-user
 application workflows in Phases 1–5 remain planned or in progress.
 
@@ -36,9 +37,9 @@ facts and provenance without placing private data in the repository.
 | `NeedInfo`, `Contradiction`, and claim-packet resolution | Implemented | Missing/conflicting/stale/sensitive cases fail closed |
 | SQLite schema and migration mechanism | Implemented | Atomic fresh/concurrent init, future refusal, and checksum validation pass |
 | Repository/service boundaries for validated mutation | In progress | Claim/evidence service round trips; CLI review/approval flow remains |
-| Resume import, extraction proposal, and human review | Planned | Synthetic import creates reviewable claims, never silent verification |
+| Resume import, extraction proposal, and human review | In progress | Structured text proposals are exact, pending, and idempotent; file import and human review remain |
 | Redacted logging, backup, export, and deletion | Planned | Privacy and round-trip tests pass on synthetic data |
-| Synthetic candidate/job fixtures and adversarial corpus | Planned | Full suite requires no real profile or network access |
+| Synthetic candidate/job fixtures and adversarial corpus | In progress | One adversarial synthetic profile fixture exists; broader candidate/job corpus remains |
 
 Phase 0 exits only when the canonical commands pass from a clean checkout, real
 data is unnecessary, and the truth/privacy invariants have automated coverage.

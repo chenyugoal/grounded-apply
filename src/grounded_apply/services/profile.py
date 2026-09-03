@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any
 
 from grounded_apply.domain import (
@@ -23,8 +26,36 @@ from grounded_apply.domain import (
     Sensitivity,
     SourceType,
     resolve_claims,
+    to_jsonable,
 )
-from grounded_apply.repositories import Record, RecordNotFoundError, SQLiteRepository
+from grounded_apply.repositories import (
+    Record,
+    RecordNotFoundError,
+    RepositoryError,
+    SQLiteRepository,
+)
+
+
+_PROFILE_IMPORT_WORKFLOW = "profile_import_proposal"
+_PROFILE_IMPORT_CLAIM_TYPES = frozenset(
+    {
+        "achievement",
+        "certification",
+        "education",
+        "education_degree",
+        "education_field",
+        "employment_dates",
+        "employment_description",
+        "employment_title",
+        "language",
+        "portfolio_item",
+        "project_contribution",
+        "project_outcome",
+        "publication",
+        "skill_use",
+    }
+)
+_EXTRACTION_METHOD_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 
 def utc_now() -> datetime:
@@ -80,6 +111,33 @@ def _optional_text(record: Record, field_name: str) -> str | None:
     return value
 
 
+def _require_text(value: object, field_name: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be text")
+    if not value.strip():
+        raise ValueError(f"{field_name} must not be blank")
+
+
+def _validate_json_value(value: object, path: str = "value") -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path} must not contain NaN or infinity")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_value(item, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} object keys must be strings")
+            _validate_json_value(item, f"{path}.{key}")
+        return
+    raise TypeError(f"{path} contains a non-JSON value: {type(value).__name__}")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CreateClaim:
     claim_type: str
@@ -117,6 +175,195 @@ class CreateEvidence:
     checksum: str | None = None
     confirmed_by: str | None = None
     evidence_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TextSourceSpan:
+    """An exact 0-based, half-open range of Unicode code points."""
+
+    start: int
+    end: int
+    text: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.start, bool) or not isinstance(self.start, int):
+            raise TypeError("span start must be an integer")
+        if isinstance(self.end, bool) or not isinstance(self.end, int):
+            raise TypeError("span end must be an integer")
+        if self.start < 0:
+            raise ValueError("span start must not be negative")
+        if self.end <= self.start:
+            raise ValueError("span end must be greater than span start")
+        _require_text(self.text, "span text")
+        if self.end - self.start != len(self.text):
+            raise ValueError("span offsets must describe the supplied span text")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProposedImportClaim:
+    """One untrusted extraction candidate awaiting explicit user review."""
+
+    claim_type: str
+    value: JsonValue
+    canonical_text: str
+    span: TextSourceSpan
+    confidence: float = 1.0
+    sensitivity: Sensitivity = Sensitivity.PERSONAL
+    scope: Scope = field(default_factory=Scope)
+    subject_type: str = "person"
+    subject_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.claim_type, "claim_type")
+        _require_text(self.canonical_text, "canonical_text")
+        if not isinstance(self.span, TextSourceSpan):
+            raise TypeError("span must be a TextSourceSpan")
+        if (
+            isinstance(self.confidence, bool)
+            or not isinstance(self.confidence, (int, float))
+            or not math.isfinite(self.confidence)
+            or not 0.0 <= self.confidence <= 1.0
+        ):
+            raise ValueError("confidence must be a finite value from 0.0 through 1.0")
+        if not isinstance(self.sensitivity, Sensitivity):
+            raise TypeError("sensitivity must be a Sensitivity")
+        if not isinstance(self.scope, Scope):
+            raise TypeError("scope must be a Scope")
+        _require_text(self.subject_type, "subject_type")
+        if self.subject_id is not None:
+            _require_text(self.subject_id, "subject_id")
+        _validate_json_value(self.value)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CreateImportProposal:
+    """A typed batch of extracted facts and the source text that anchors them."""
+
+    idempotency_key: str
+    source_ref: str
+    source_text: str
+    proposals: tuple[ProposedImportClaim, ...]
+    extraction_method: str
+    artifact_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.idempotency_key, "idempotency_key")
+        _require_text(self.source_ref, "source_ref")
+        _require_text(self.source_text, "source_text")
+        _require_text(self.extraction_method, "extraction_method")
+        if _EXTRACTION_METHOD_PATTERN.fullmatch(self.extraction_method) is None:
+            raise ValueError("extraction_method must be a versioned identifier such as name@1")
+        if not isinstance(self.proposals, tuple):
+            raise TypeError("proposals must be a tuple")
+        if not self.proposals:
+            raise ValueError("proposals must not be empty")
+        if any(not isinstance(item, ProposedImportClaim) for item in self.proposals):
+            raise TypeError("proposals must contain only ProposedImportClaim values")
+        if self.artifact_id is not None:
+            _require_text(self.artifact_id, "artifact_id")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ImportProposalResult:
+    """Persisted, review-only claims and their exact pending evidence."""
+
+    workflow_run_id: str
+    source_sha256: str
+    claims: tuple[Claim, ...]
+    evidence: tuple[Evidence, ...]
+
+    def __post_init__(self) -> None:
+        _require_text(self.workflow_run_id, "workflow_run_id")
+        if (
+            len(self.source_sha256) != 64
+            or self.source_sha256 != self.source_sha256.lower()
+            or any(character not in "0123456789abcdef" for character in self.source_sha256)
+        ):
+            raise ValueError("source_sha256 must contain a SHA-256 digest")
+        if not self.claims or len(self.claims) != len(self.evidence):
+            raise ValueError("import result requires one evidence record per claim")
+        if any(
+            claim.id != evidence.claim_id
+            or evidence.id not in claim.evidence_ids
+            for claim, evidence in zip(self.claims, self.evidence, strict=True)
+        ):
+            raise ValueError("import result evidence must align with its claims")
+        if any(
+            claim.status is not ClaimStatus.NEEDS_REVIEW
+            or claim.approval_status is not ApprovalStatus.PENDING
+            or claim.verified_at is not None
+            or claim.verified_by is not None
+            or claim.source_type is not SourceType.IMPORTED_RESUME
+            for claim in self.claims
+        ):
+            raise ValueError("import result claims must remain pending user review")
+        if any(
+            item.confirmation_status is not EvidenceConfirmationStatus.PENDING
+            or item.source_type is not SourceType.IMPORTED_RESUME
+            for item in self.evidence
+        ):
+            raise ValueError("import result evidence must remain pending user review")
+
+
+def _text_sha256(value: str) -> str:
+    return sha256(value.encode("utf-8")).hexdigest()
+
+
+def _text_span_locator(span: TextSourceSpan, source_sha256: str) -> dict[str, JsonValue]:
+    return {
+        "schema_version": 1,
+        "kind": "text_span",
+        "unit": "unicode_codepoint",
+        "start": span.start,
+        "end": span.end,
+        "end_exclusive": True,
+        "source_sha256": source_sha256,
+    }
+
+
+def _json_identity(value: JsonValue) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _import_request_sha256(request: CreateImportProposal) -> str:
+    payload = json.dumps(
+        to_jsonable(request),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _text_sha256(payload)
+
+
+def _validated_source_spans(request: CreateImportProposal) -> tuple[str, ...]:
+    source_length = len(request.source_text)
+    result: list[str] = []
+    for index, proposal in enumerate(request.proposals):
+        if proposal.claim_type not in _PROFILE_IMPORT_CLAIM_TYPES:
+            raise ValueError(
+                f"proposal {index} claim type is not allowed for profile import"
+            )
+        span = proposal.span
+        if span.end > source_length:
+            raise ValueError(f"proposal {index} source span is outside the source text")
+        exact_text = request.source_text[span.start : span.end]
+        if exact_text != span.text:
+            raise ValueError(f"proposal {index} source span does not match the source text")
+        result.append(exact_text)
+    return tuple(result)
+
+
+def _import_sensitivity(proposal: ProposedImportClaim) -> Sensitivity:
+    if proposal.sensitivity is Sensitivity.PUBLIC:
+        return Sensitivity.PERSONAL
+    return proposal.sensitivity
 
 
 class ProfileService:
@@ -243,6 +490,114 @@ class ProfileService:
         )
         return evidence
 
+    def create_import_proposal(
+        self,
+        request: CreateImportProposal,
+        *,
+        now: datetime | None = None,
+    ) -> ImportProposalResult:
+        """Atomically persist exact imported spans as review-only claims.
+
+        The typed request deliberately exposes no status, approval, confirmation,
+        or verification fields. Imported content and extractor confidence can
+        therefore never authorize a claim for use. A successful idempotent retry
+        reloads the original records instead of duplicating them.
+        """
+
+        created_at = now or utc_now()
+        created_at_text = _timestamp(created_at)
+        assert created_at_text is not None
+        exact_spans = _validated_source_spans(request)
+        source_sha256 = _text_sha256(request.source_text)
+        request_sha256 = _import_request_sha256(request)
+        stored_idempotency_key = _text_sha256(request.idempotency_key)
+        workflow_input = {
+            "request_schema_version": 1,
+            "proposal_count": len(request.proposals),
+            "source_sha256": source_sha256,
+        }
+
+        with self._repository.transaction():
+            existing = self._repository.get_workflow_run_by_idempotency_key(
+                _PROFILE_IMPORT_WORKFLOW,
+                stored_idempotency_key,
+            )
+            workflow = self._repository.add_workflow_run(
+                workflow_type=_PROFILE_IMPORT_WORKFLOW,
+                status="running",
+                idempotency_key=stored_idempotency_key,
+                input_hash_sha256=request_sha256,
+                input_data=workflow_input,
+                current_step="persist_reviewable_claims",
+                created_at=created_at_text,
+            )
+            if existing is not None:
+                return self._import_result_from_workflow(
+                    workflow,
+                    request=request,
+                    exact_spans=exact_spans,
+                    source_sha256=source_sha256,
+                )
+
+            claim_ids: list[str] = []
+            evidence_items: list[Evidence] = []
+            generated_records: list[dict[str, str]] = []
+            for proposal, exact_text in zip(
+                request.proposals, exact_spans, strict=True
+            ):
+                claim = self.create_claim(
+                    CreateClaim(
+                        claim_type=proposal.claim_type,
+                        value=proposal.value,
+                        canonical_text=proposal.canonical_text,
+                        source_type=SourceType.IMPORTED_RESUME,
+                        source_ref=request.source_ref,
+                        status=ClaimStatus.NEEDS_REVIEW,
+                        approval_status=ApprovalStatus.PENDING,
+                        subject_type=proposal.subject_type,
+                        subject_id=proposal.subject_id,
+                        confidence=proposal.confidence,
+                        sensitivity=_import_sensitivity(proposal),
+                        scope=proposal.scope,
+                    ),
+                    now=created_at,
+                )
+                evidence = self.create_evidence(
+                    CreateEvidence(
+                        claim_id=claim.id,
+                        source_type=SourceType.IMPORTED_RESUME,
+                        source_ref=request.source_ref,
+                        source_text=exact_text,
+                        locator=_text_span_locator(proposal.span, source_sha256),
+                        extraction_method=request.extraction_method,
+                        confirmation_status=EvidenceConfirmationStatus.PENDING,
+                        artifact_id=request.artifact_id,
+                        checksum=_text_sha256(exact_text),
+                    ),
+                    now=created_at,
+                )
+                claim_ids.append(claim.id)
+                evidence_items.append(evidence)
+                generated_records.append(
+                    {"claim_id": claim.id, "evidence_id": evidence.id}
+                )
+
+            self._repository.update_workflow_run(
+                _required_text(workflow, "id"),
+                status="succeeded",
+                current_step="awaiting_review",
+                completed_steps=("validate_source_spans", "persist_reviewable_claims"),
+                generated_artifacts=generated_records,
+                finished_at=created_at_text,
+            )
+            claims = tuple(self.get_claim(claim_id) for claim_id in claim_ids)
+            return ImportProposalResult(
+                workflow_run_id=_required_text(workflow, "id"),
+                source_sha256=source_sha256,
+                claims=claims,
+                evidence=tuple(evidence_items),
+            )
+
     def get_claim(self, claim_id: str) -> Claim:
         record = self._repository.get_claim(claim_id)
         if record is None:
@@ -284,6 +639,101 @@ class ProfileService:
             evidence=evidence,
             question=require_question,
             requested_sensitivity=requested_sensitivity,
+        )
+
+    def _import_result_from_workflow(
+        self,
+        workflow: Record,
+        *,
+        request: CreateImportProposal,
+        exact_spans: tuple[str, ...],
+        source_sha256: str,
+    ) -> ImportProposalResult:
+        workflow_id = _required_text(workflow, "id")
+        if workflow.get("status") != "succeeded":
+            raise RepositoryError(
+                f"Profile import proposal is not safely retryable: {workflow_id}"
+            )
+        stored_items = _json_value(
+            workflow.get("generated_artifacts_json"),
+            field_name="generated_artifacts_json",
+        )
+        if (
+            not isinstance(stored_items, list)
+            or len(stored_items) != len(request.proposals)
+        ):
+            raise RepositoryError(
+                f"Profile import proposal result does not match its request: {workflow_id}"
+            )
+
+        claims: list[Claim] = []
+        evidence_items: list[Evidence] = []
+        seen_claim_ids: set[str] = set()
+        seen_evidence_ids: set[str] = set()
+        for item, proposal, exact_text in zip(
+            stored_items,
+            request.proposals,
+            exact_spans,
+            strict=True,
+        ):
+            if not isinstance(item, dict):
+                raise RepositoryError(
+                    f"Profile import proposal result is malformed: {workflow_id}"
+                )
+            claim_id = item.get("claim_id")
+            evidence_id = item.get("evidence_id")
+            if not isinstance(claim_id, str) or not isinstance(evidence_id, str):
+                raise RepositoryError(
+                    f"Profile import proposal result is malformed: {workflow_id}"
+                )
+            if claim_id in seen_claim_ids or evidence_id in seen_evidence_ids:
+                raise RepositoryError(
+                    f"Profile import proposal result contains duplicates: {workflow_id}"
+                )
+            seen_claim_ids.add(claim_id)
+            seen_evidence_ids.add(evidence_id)
+            claim = self.get_claim(claim_id)
+            evidence = next(
+                (
+                    candidate
+                    for candidate in self._evidence_for_claim(claim_id)
+                    if candidate.id == evidence_id
+                ),
+                None,
+            )
+            if evidence is None:
+                raise RepositoryError(
+                    f"Profile import proposal evidence is missing: {workflow_id}"
+                )
+            expected_locator = _text_span_locator(proposal.span, source_sha256)
+            if (
+                claim.claim_type != proposal.claim_type
+                or _json_identity(claim.value_json) != _json_identity(proposal.value)
+                or claim.canonical_text != proposal.canonical_text
+                or claim.subject_type != proposal.subject_type
+                or claim.subject_id != proposal.subject_id
+                or claim.confidence != proposal.confidence
+                or claim.sensitivity is not _import_sensitivity(proposal)
+                or claim.scope != proposal.scope
+                or claim.source_ref != request.source_ref
+                or evidence.artifact_id != request.artifact_id
+                or evidence.locator != expected_locator
+                or evidence.source_text != exact_text
+                or evidence.extraction_method != request.extraction_method
+                or evidence.checksum != _text_sha256(exact_text)
+                or evidence.source_ref != request.source_ref
+            ):
+                raise RepositoryError(
+                    f"Profile import proposal result failed integrity checks: {workflow_id}"
+                )
+            claims.append(claim)
+            evidence_items.append(evidence)
+
+        return ImportProposalResult(
+            workflow_run_id=workflow_id,
+            source_sha256=source_sha256,
+            claims=tuple(claims),
+            evidence=tuple(evidence_items),
         )
 
     def _claim_from_record(self, record: Record) -> Claim:

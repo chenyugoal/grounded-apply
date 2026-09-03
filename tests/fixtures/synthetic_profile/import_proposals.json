@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "source_ref": "fixture://synthetic-profile/avery-quill/resume.txt",
+  "extraction_method": "synthetic-fixture@1",
+  "span_index_base": 0,
+  "span_unit": "unicode_codepoint",
+  "span_end": "exclusive",
+  "proposals": [
+    {
+      "claim_type": "employment_title",
+      "value": {
+        "employer": "Example Robotics LLC",
+        "title": "Software Engineer"
+      },
+      "canonical_text": "Software Engineer at Example Robotics LLC",
+      "confidence": 0.99,
+      "span": {
+        "start": 87,
+        "end": 127,
+        "text": "Example Robotics LLC — Software Engineer"
+      }
+    },
+    {
+      "claim_type": "employment_dates",
+      "value": {
+        "start": "2022-01",
+        "end": "2025-03"
+      },
+      "canonical_text": "Worked at Example Robotics LLC from January 2022 through March 2025",
+      "confidence": 0.98,
+      "span": {
+        "start": 128,
+        "end": 151,
+        "text": "January 2022–March 2025"
+      }
+    },
+    {
+      "claim_type": "skill_use",
+      "value": "Python",
+      "canonical_text": "Built a Python service for fictional warehouse robots",
+      "confidence": 0.97,
+      "span": {
+        "start": 154,
+        "end": 208,
+        "text": "Built a Python service for fictional warehouse robots."
+      }
+    },
+    {
+      "claim_type": "project_outcome",
+      "value": {
+        "before_minutes": 30,
+        "after_minutes": 10,
+        "activity": "synthetic test setup"
+      },
+      "canonical_text": "Reduced synthetic test setup from 30 minutes to 10 minutes by scripting fixtures",
+      "confidence": 0.96,
+      "span": {
+        "start": 211,
+        "end": 292,
+        "text": "Reduced synthetic test setup from 30 minutes to 10 minutes by scripting fixtures."
+      }
+    },
+    {
+      "claim_type": "project_contribution",
+      "value": {
+        "project": "Moonshot Compiler",
+        "contribution": "Rust parsing code",
+        "ownership": "contributed"
+      },
+      "canonical_text": "Contributed Rust parsing code to the fictional Moonshot Compiler project; did not lead it",
+      "confidence": 0.99,
+      "span": {
+        "start": 335,
+        "end": 391,
+        "text": "Contributed Rust parsing code; did not lead the project."
+      }
+    }
+  ]
+}
