@@ -37,6 +37,7 @@ from grounded_apply.repositories import (
 
 
 _PROFILE_IMPORT_WORKFLOW = "profile_import_proposal"
+_MAX_IMPORT_PROPOSALS = 1000
 _PROFILE_IMPORT_CLAIM_TYPES = frozenset(
     {
         "achievement",
@@ -56,6 +57,10 @@ _PROFILE_IMPORT_CLAIM_TYPES = frozenset(
     }
 )
 _EXTRACTION_METHOD_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9_.-]*")
+_IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
+_SOURCE_REF_PATTERN = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\x00-\x1f\x7f]+"
+)
 
 
 def utc_now() -> datetime:
@@ -116,10 +121,20 @@ def _require_text(value: object, field_name: str) -> None:
         raise TypeError(f"{field_name} must be text")
     if not value.strip():
         raise ValueError(f"{field_name} must not be blank")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{field_name} must contain valid Unicode text") from None
 
 
 def _validate_json_value(value: object, path: str = "value") -> None:
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError(f"{path} must contain valid Unicode text") from None
         return
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -133,7 +148,11 @@ def _validate_json_value(value: object, path: str = "value") -> None:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError(f"{path} object keys must be strings")
-            _validate_json_value(item, f"{path}.{key}")
+            try:
+                key.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError(f"{path} object keys must contain valid Unicode") from None
+            _validate_json_value(item, f"{path}[object]")
         return
     raise TypeError(f"{path} contains a non-JSON value: {type(value).__name__}")
 
@@ -251,12 +270,23 @@ class CreateImportProposal:
         _require_text(self.source_ref, "source_ref")
         _require_text(self.source_text, "source_text")
         _require_text(self.extraction_method, "extraction_method")
+        if _IDEMPOTENCY_KEY_PATTERN.fullmatch(self.idempotency_key) is None:
+            raise ValueError("idempotency_key must be an opaque identifier")
+        if (
+            len(self.source_ref) > 512
+            or _SOURCE_REF_PATTERN.fullmatch(self.source_ref) is None
+        ):
+            raise ValueError("source_ref must be a bounded absolute source URI")
+        if len(self.extraction_method) > 128:
+            raise ValueError("extraction_method must not exceed 128 characters")
         if _EXTRACTION_METHOD_PATTERN.fullmatch(self.extraction_method) is None:
             raise ValueError("extraction_method must be a versioned identifier such as name@1")
         if not isinstance(self.proposals, tuple):
             raise TypeError("proposals must be a tuple")
         if not self.proposals:
             raise ValueError("proposals must not be empty")
+        if len(self.proposals) > _MAX_IMPORT_PROPOSALS:
+            raise ValueError("proposals must not contain more than 1000 items")
         if any(not isinstance(item, ProposedImportClaim) for item in self.proposals):
             raise TypeError("proposals must contain only ProposedImportClaim values")
         if self.artifact_id is not None:
@@ -303,6 +333,92 @@ class ImportProposalResult:
             for item in self.evidence
         ):
             raise ValueError("import result evidence must remain pending user review")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ImportProposalPreview:
+    """Persistence-independent request validation containing no candidate text.
+
+    Counts describe a new import batch. This preview deliberately does not inspect
+    artifact foreign keys, schema state, or prior use of the idempotency key.
+    """
+
+    source_sha256: str
+    proposal_count: int
+    planned_claim_count: int
+    planned_evidence_count: int
+    review_required: bool = field(default=True, init=False)
+
+    def __post_init__(self) -> None:
+        if (
+            len(self.source_sha256) != 64
+            or self.source_sha256 != self.source_sha256.lower()
+            or any(character not in "0123456789abcdef" for character in self.source_sha256)
+        ):
+            raise ValueError("source_sha256 must contain a SHA-256 digest")
+        if isinstance(self.proposal_count, bool) or not isinstance(
+            self.proposal_count, int
+        ):
+            raise TypeError("proposal_count must be an integer")
+        if isinstance(self.planned_claim_count, bool) or not isinstance(
+            self.planned_claim_count, int
+        ):
+            raise TypeError("planned_claim_count must be an integer")
+        if isinstance(self.planned_evidence_count, bool) or not isinstance(
+            self.planned_evidence_count, int
+        ):
+            raise TypeError("planned_evidence_count must be an integer")
+        if self.proposal_count <= 0:
+            raise ValueError("proposal_count must be positive")
+        if (
+            self.planned_claim_count != self.proposal_count
+            or self.planned_evidence_count != self.proposal_count
+        ):
+            raise ValueError("an import preview requires one claim and evidence per proposal")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProfileReviewItem:
+    """One pending claim and its supporting evidence for read-only review."""
+
+    claim: Claim
+    evidence: tuple[Evidence, ...]
+    content_trust: str = field(default="untrusted", init=False)
+    usable: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.claim, Claim):
+            raise TypeError("review claim must be a Claim")
+        if not isinstance(self.evidence, tuple) or any(
+            not isinstance(item, Evidence) for item in self.evidence
+        ):
+            raise TypeError("review evidence must be a tuple of Evidence records")
+        if (
+            self.claim.status is not ClaimStatus.NEEDS_REVIEW
+            or self.claim.approval_status is not ApprovalStatus.PENDING
+        ):
+            raise ValueError("review items must contain pending needs-review claims")
+        evidence_ids = tuple(item.id for item in self.evidence)
+        if len(set(evidence_ids)) != len(evidence_ids):
+            raise ValueError("review evidence must be unique")
+        if any(
+            item.claim_id != self.claim.id or item.id not in self.claim.evidence_ids
+            for item in self.evidence
+        ):
+            raise ValueError("review evidence must be linked to its claim")
+        if self.claim.source_type is SourceType.IMPORTED_RESUME and (
+            not self.evidence
+            or set(evidence_ids) != set(self.claim.evidence_ids)
+            or any(
+                item.source_type is not SourceType.IMPORTED_RESUME
+                or item.source_ref != self.claim.source_ref
+                or item.confirmation_status is not EvidenceConfirmationStatus.PENDING
+                for item in self.evidence
+            )
+        ):
+            raise ValueError(
+                "imported review claims require complete pending imported evidence"
+            )
 
 
 def _text_sha256(value: str) -> str:
@@ -598,6 +714,21 @@ class ProfileService:
                 evidence=tuple(evidence_items),
             )
 
+    @staticmethod
+    def preview_import_proposal(request: CreateImportProposal) -> ImportProposalPreview:
+        """Validate a proposed import without consulting or mutating persistence."""
+
+        if not isinstance(request, CreateImportProposal):
+            raise TypeError("request must be a CreateImportProposal")
+        _validated_source_spans(request)
+        proposal_count = len(request.proposals)
+        return ImportProposalPreview(
+            source_sha256=_text_sha256(request.source_text),
+            proposal_count=proposal_count,
+            planned_claim_count=proposal_count,
+            planned_evidence_count=proposal_count,
+        )
+
     def get_claim(self, claim_id: str) -> Claim:
         record = self._repository.get_claim(claim_id)
         if record is None:
@@ -617,6 +748,21 @@ class ProfileService:
             approval_status=None if approval_status is None else approval_status.value,
         )
         return tuple(self._claim_from_record(record) for record in records)
+
+    def list_review_items(self) -> tuple[ProfileReviewItem, ...]:
+        """Return the pending review queue without changing trust state."""
+
+        claims = self.list_claims(
+            status=ClaimStatus.NEEDS_REVIEW,
+            approval_status=ApprovalStatus.PENDING,
+        )
+        return tuple(
+            ProfileReviewItem(
+                claim=claim,
+                evidence=self._evidence_for_claim(claim.id),
+            )
+            for claim in claims
+        )
 
     def resolve(
         self,

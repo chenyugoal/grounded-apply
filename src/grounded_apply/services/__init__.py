@@ -4,8 +4,10 @@ from .profile import (
     CreateClaim,
     CreateEvidence,
     CreateImportProposal,
+    ImportProposalPreview,
     ImportProposalResult,
     ProfileService,
+    ProfileReviewItem,
     ProposedImportClaim,
     TextSourceSpan,
 )
@@ -14,8 +16,10 @@ __all__ = [
     "CreateClaim",
     "CreateEvidence",
     "CreateImportProposal",
+    "ImportProposalPreview",
     "ImportProposalResult",
     "ProfileService",
+    "ProfileReviewItem",
     "ProposedImportClaim",
     "TextSourceSpan",
 ]

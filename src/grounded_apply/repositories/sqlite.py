@@ -73,16 +73,36 @@ class SQLiteRepository:
         *,
         migrations_dir: str | os.PathLike[str] | None = None,
         timeout: float = 5.0,
+        read_only: bool = False,
+        existing_only: bool = False,
     ) -> None:
         if timeout < 0:
             raise ValueError("timeout must not be negative")
+        if not isinstance(read_only, bool):
+            raise TypeError("read_only must be a boolean")
+        if not isinstance(existing_only, bool):
+            raise TypeError("existing_only must be a boolean")
 
         self._database = os.fspath(database)
         self._migrations_dir = Path(migrations_dir) if migrations_dir is not None else None
+        self._read_only = read_only
+        self._existing_only = existing_only or read_only
+        connection_target = self._database
+        use_uri = False
+        if self._existing_only:
+            if self._database == ":memory:" or self._database.startswith("file:"):
+                raise ValueError("existing repositories require a filesystem database path")
+            database_path = Path(self._database)
+            if not database_path.is_file():
+                raise sqlite3.OperationalError("unable to open existing database")
+            mode = "ro" if read_only else "rw"
+            connection_target = f"{database_path.resolve().as_uri()}?mode={mode}"
+            use_uri = True
         self._connection = sqlite3.connect(
-            self._database,
+            connection_target,
             timeout=timeout,
             isolation_level=None,
+            uri=use_uri,
         )
         self._connection.row_factory = sqlite3.Row
         self._closed = False
@@ -99,7 +119,13 @@ class SQLiteRepository:
             self._closed = True
             raise RepositoryError("SQLite foreign-key enforcement could not be enabled")
 
-        if self._database != ":memory:" and not self._database.startswith("file:"):
+        if read_only:
+            self._connection.execute("PRAGMA query_only = ON")
+        elif (
+            not self._existing_only
+            and self._database != ":memory:"
+            and not self._database.startswith("file:")
+        ):
             Path(self._database).chmod(0o600)
 
     @property
@@ -116,18 +142,24 @@ class SQLiteRepository:
         return read_schema_version(self._connection)
 
     def initialize(self) -> Self:
-        """Idempotently validate and migrate the database to this code version.
+        """Validate the schema, migrating only when creation is permitted.
 
         Databases from newer code and databases with inconsistent or edited
-        migration history are rejected before migrations run.
+        migration history are rejected before migrations run. Read-only and
+        existing-only repositories require the current version and never apply
+        migrations.
         """
 
         self._ensure_open()
         migrations_dir = self._migrations_dir or default_migrations_directory()
-        version = initialize_schema(self._connection, migrations_dir)
+        version = (
+            validate_schema(self._connection, migrations_dir)
+            if self._existing_only
+            else initialize_schema(self._connection, migrations_dir)
+        )
         if version != LATEST_SCHEMA_VERSION:
             raise SchemaError(
-                f"Expected schema version {LATEST_SCHEMA_VERSION}, initialized {version}"
+                f"Expected schema version {LATEST_SCHEMA_VERSION}, found {version}"
             )
         self._initialized = True
         return self
@@ -161,6 +193,8 @@ class SQLiteRepository:
         """Run mutations atomically, nesting with SQLite savepoints."""
 
         self._require_initialized()
+        if self._read_only:
+            raise RepositoryError("Cannot start a mutation transaction in read-only mode")
         outermost = self._transaction_depth == 0
         savepoint: str | None = None
         if outermost:

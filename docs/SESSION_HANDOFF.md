@@ -6,113 +6,167 @@ architecture rationale in ADRs.
 
 ## Checkpoint
 
-- **Last updated:** 2026-09-03 17:00 CDT
+- **Last updated:** 2026-09-03 17:48 CDT
 - **Branch:** `codex/phase-0-truth-layer`
-- **HEAD:** `9ae8523` (`build phase 0 truth layer foundation`)
-- **Milestone:** Phase 0 — safe structured text-import proposals
-- **Status:** Service milestone implemented and verified in the working tree;
-  Phase 0 continues
-- **Expected working tree:** Uncommitted milestone changes in
-  `src/grounded_apply/services/`, `tests/fixtures/synthetic_profile/`,
-  `tests/test_profile_import.py`, `docs/ROADMAP.md`, and this file
+- **HEAD:** `d0726ba` (`Add safe structured profile import proposals`)
+- **Milestone:** Phase 0 — strict file/stdin import and read-only pending review
+- **Status:** CLI milestone implemented and verified in the working tree; Phase 0
+  continues and the product is not ready for real candidate data
+- **Expected working tree:** Uncommitted milestone changes in `AGENTS.md`, `README.md`,
+  `docs/DEVELOPMENT.md`, `docs/ROADMAP.md`, this file,
+  `src/grounded_apply/cli.py`, `src/grounded_apply/config.py`,
+  `src/grounded_apply/repositories/sqlite.py`,
+  `src/grounded_apply/services/`, `tests/test_cli.py`,
+  `tests/test_config.py`, `tests/test_profile_import.py`, and
+  `tests/test_repository.py`
+
+The prior checkpoint was stale at session start: it described the structured
+import service as uncommitted at `9ae8523`; that work was already committed in a
+clean tree as `d0726ba`.
 
 ## Implemented and verified
 
-The committed `9ae8523` foundation still provides the zero-install CLI, private
-runtime paths, typed truth policy, schema v1, migration checks, repository, and
-validated profile service described in the prior checkpoint. This working tree
-adds:
+The committed `d0726ba` service milestone remains intact. This working tree adds:
 
-- Typed import inputs for atomic claim proposals and exact 0-based, half-open
-  Unicode-codepoint spans. A supplied quote must equal its source slice.
-- `ProfileService.create_import_proposal`, which writes only `needs_review`,
-  approval-pending claims and confirmation-pending supporting evidence. The
-  request exposes no trust-state or verification controls.
-- SHA-256 anchoring for full source text and each selected evidence span. The
-  service persists selected spans, not the full imported text.
-- A default-deny import claim-type policy. Sensitive eligibility, sponsorship,
-  clearance, legal, disability, veteran/demographic, identity, signature, and
-  unknown claim types are rejected without writes. Imported claims cannot be
-  classified less restrictively than `personal` before review.
-- Atomic and concurrent-safe idempotency. Stored idempotency keys are opaque
-  hashes, workflow metadata excludes imported text and proposed values, changed
-  input fails closed, and replay manifests are integrity checked.
-- A conspicuously fictional `example.com`/555-number profile fixture with exact
-  metrics, an ownership qualifier, Unicode offsets, and inert prompt-injection
-  text.
+- `gapply profile import --source-file PATH|- --proposals-file PATH|-`
+  with `--idempotency-key OPAQUE [--dry-run] [--json]`. Candidate source and proposal
+  values have no inline argument, and at most one input may use stdin.
+- A strict schema-v1 JSON adapter: exact field sets, duplicate-key and non-finite
+  rejection, zero-based/end-exclusive Unicode-codepoint spans, exact span text,
+  bounded regular-file/stdin input, valid Unicode, bounded provenance metadata,
+  an opaque idempotency key, and a 1,000-proposal ceiling. Trust, approval,
+  scope, sensitivity, subject, and other unknown fields are rejected at the CLI
+  boundary.
+- Persistence-independent `ProfileService.preview_import_proposal`. Dry-run does
+  not open SQLite, create runtime paths, consume an idempotency key, or imply
+  storage validation; output explicitly reports `storage_checked: false`.
+- Persisted CLI import routed through `ProfileService`, retaining the atomic,
+  concurrent-safe idempotency and review-only trust state. Import requires an
+  already initialized, current schema. It opens the existing database in SQLite
+  `mode=rw`, validates without migration on the same connection used to write,
+  and cannot create or migrate a missing, empty, or input-time-replaced database.
+  Output contains hashes, counts, and opaque IDs, not candidate text.
+- `gapply profile review [--json]`, backed by
+  `ProfileService.list_review_items`. It shows both canonical and structured
+  values plus exact supporting evidence, scope, sensitivity, and provenance;
+  every item is marked `content_trust: untrusted` and `usable: false`.
+- A SQLite repository read-only/query-only mode. Review validates the current
+  schema without migration, chmod, or database-byte/mtime changes; missing and
+  empty databases are not created or adopted.
+- Non-mutating storage privacy preflight for import and review. The data directory
+  and database must retain user-only permissions, database targets must remain
+  inside private data and outside Git worktrees, and portable runtime children
+  must remain beneath `GROUNDED_APPLY_HOME`. Escapes and permission drift fail
+  without repair or content disclosure.
+- Terminal-safe human review rendering for control and bidirectional-format
+  characters. Imported prompt-like text remains explicitly untrusted data.
+- Updated README, development command contract, and roadmap evidence.
 
 ## Verification
 
-All verification used synthetic data and no network access.
+All verification used synthetic `example.com`/555 data and no network access.
 
 ```text
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
-  -m unittest tests.test_profile_import -v
-PASS — 17/17 focused import tests
+  -m unittest tests.test_cli tests.test_profile_import tests.test_repository \
+  tests.test_config -v
+PASS — 79/79 focused CLI/import/repository/config tests
 
 ./scripts/check
-PASS — CLI help + isolated doctor smoke + 67/67 unittest cases
+PASS — CLI help + isolated doctor smoke + 106/106 unittest cases
 
 ./scripts/gapply --help
+./scripts/gapply profile import --help
+./scripts/gapply profile review --help
 PASS
 
-GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-doctor-codex-20260903-1702 \
+GROUNDED_APPLY_HOME=<fresh-/private/tmp-path>/profile-home \
   ./scripts/gapply doctor --json
-PASS — read-only result; no repository or personal runtime data used
+PASS — read-only uninitialized result; no runtime data created
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
   python3 -m unittest discover -s tests -v
-PASS — Ran 67 tests, OK
+PASS — Ran 106 tests, OK
+
+GROUNDED_APPLY_HOME=<fresh-/private/tmp-path>/profile-home \
+  ./scripts/gapply profile init --json
+GROUNDED_APPLY_HOME=<same-path> ./scripts/gapply profile import \
+  --source-file tests/fixtures/synthetic_profile/resume.txt \
+  --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
+  --idempotency-key synthetic-smoke-import-1 --dry-run --json
+GROUNDED_APPLY_HOME=<same-path> ./scripts/gapply profile import \
+  --source-file tests/fixtures/synthetic_profile/resume.txt \
+  --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
+  --idempotency-key synthetic-smoke-import-1 --json
+GROUNDED_APPLY_HOME=<same-path> ./scripts/gapply profile review --json
+PASS — 5 pending/unusable claims and 5 pending exact evidence spans
 
 git diff --check
 PASS
 ```
 
+The new tests cover file and either-stdin input, CRLF preservation, input size and
+regular-file limits, strict JSON/schema/trust-field failures, valid Unicode,
+metadata and batch bounds, true no-write dry-run against absent and initialized
+homes, same-connection existing-only validation, input-time database replacement,
+refusal to initialize storage implicitly, permission drift and database/portable
+path escapes, idempotent replay and changed input, minimized errors/output, empty
+and populated review queues, complete pending imported evidence, canonical/value
+disagreement, terminal control text, and byte/mode/mtime-stable read-only SQLite
+access.
+
 Complete-diff review and changed-path credential/PII scans found no secrets or
-real candidate data; only the explicitly fictional `example.com`/555 fixture
-matched the identity patterns.
+real candidate data; identity-like strings are explicitly fictional fixture and
+assertion values.
 
-The import suite covers exact Unicode source spans and checksums, pending-only
-trust state, unsupported sensitive categories, conservative sensitivity,
-prompt-injection inertness, full-source minimization, atomic rollback,
-identical/changed/concurrent idempotent calls, replay-manifest corruption,
-runtime input validation, JSON serialization, and refusal to resolve proposed
-claims into a `ClaimPacket`.
+## Known limitations and release blockers
 
-## Known limitations and deliberate fail-closed behavior
-
-- This is an application-service boundary, not an end-user resume importer. No
-  file/stdin CLI, PDF/DOCX/text extractor, review display, or approval mutation
-  exists yet. Do not use this checkpoint with real candidate data.
-- Import claim types are an intentionally narrow allowlist. Expansion requires
-  an explicit truth/sensitivity decision and adversarial tests.
-- Failed synchronous import batches use atomic restart semantics: their workflow
-  row, claims, and evidence all roll back, so no durable failure checkpoint is
-  retained. A retry starts the batch from the beginning.
-- The caller remains responsible for protected raw-artifact storage. This service
-  holds full source text only in memory and stores selected evidence spans plus
-  hashes and an optional existing artifact ID.
-- Derived claims remain unusable until a registered evaluator recomputes them.
-- Memory approval/reuse, redacted logging, backup, export, deletion, and artifact
-  lifecycle services remain planned.
+- This milestone is a structured proposal ingestion boundary, not a resume
+  extractor. There is no PDF/DOCX/LaTeX parser, model adapter, or artifact
+  lifecycle service. Do not use it with real candidate data.
+- Allowed claim types still accept flexible JSON values. A malicious or mistaken
+  extractor could hide sensitive eligibility or secret-shaped data under an
+  allowed type. Per-type value schemas and sensitive-field rejection are required
+  before real-data import or approval.
+- Proposal-supplied `source_ref` and `extraction_method` are syntax-bounded but
+  are not bound to a protected artifact or registered extractor identity.
+- Review is deliberately display-only. No approve, edit, reject, contradiction
+  resolution, evidence revalidation, or audit decision exists. Review lists the
+  full pending queue and has no workflow filter or pagination.
+- Dry-run validates request semantics only. Because `storage_checked` is false,
+  it does not predict idempotent replay/conflict, schema compatibility, or
+  artifact foreign-key success.
+- Raw source remains caller-managed and in memory; only selected spans and hashes
+  persist. Redacted structured logging, backup, export, deletion, and protected
+  artifact retention remain planned.
 - Native Windows runtime-directory conventions and installed-wheel migration
-  discovery remain unverified.
-- Argparse usage errors are still plain text even when a later argument is
-  `--json`; migration transaction-control restrictions are not mechanically
-  linted.
+  discovery remain unverified. Argparse usage failures are still plain text.
+- Initialized storage does not yet reject a multiply linked database inode; a
+  hard link could alias the same SQLite file outside the validated runtime path.
+  Single-link or equivalent file-identity enforcement is required before real
+  candidate data.
+- Derived claims remain unusable until a registered evaluator recomputes them.
 
 ## Next exact tasks
 
-1. Start with `./scripts/check`; do not proceed if the 67-test baseline regresses.
-2. Start in `tests/test_cli.py`: specify a file/stdin-only `profile import` and
-   `profile review` CLI contract with JSON envelopes, true no-write `--dry-run`,
-   private-text-free arguments, and no approval without an explicit review
-   action; then route it through `ProfileService` rather than repository calls.
-3. Add idempotent memory-proposal approval through `ProfileService`, including
-   contradiction detection and audit fields.
-4. Add redacted structured logging and synthetic tests proving source text,
-   proposed values, credentials, and sensitive answers never enter normal logs.
-5. Verify an installed wheel in an isolated environment when Hatchling is
+1. Start with `tests/test_profile_import.py`: define a registered value schema for
+   every currently allowed import claim type and add adversarial cases for work
+   authorization, government identifiers, credentials/tokens, and whole-document
+   evidence hidden under an allowed type; fail before any write.
+2. Start with `tests/test_cli.py`: replace proposal-authored extractor/source
+   identity with an application-owned source digest and registered extractor
+   identifier, while retaining private-path-free provenance and replay integrity.
+3. Start with `tests/test_profile_service.py`: add an explicit, idempotent review
+   decision service that revalidates evidence checksum/locator integrity, detects
+   contradictions, records actor/time/audit fields, and cannot approve sensitive
+   or malformed proposals.
+4. Start with `tests/test_config.py`: reject multiply linked profile databases
+   without modifying either alias, then preserve that invariant across import and
+   review.
+5. Start with a new redacted-logging test module: prove source text, proposed
+   values, credentials, sensitive answers, and private paths never enter normal
+   logs or public error metadata.
+6. Verify an installed wheel in an isolated environment when Hatchling is
    available, specifically bundled migration discovery and the `gapply` entry
    point.
 
@@ -124,13 +178,18 @@ claims into a `ClaimPacket`.
 
 ## Key decisions
 
-- Imported extraction output is untrusted data and can create only reviewable
-  proposals; confidence never upgrades trust.
-- Text span offsets are versioned as zero-based, end-exclusive Unicode codepoint
-  indexes, with both full-source and exact-span hashes.
-- The import service fails closed on every unregistered claim type and raises
-  public sensitivity to `personal`; future allowlist changes require tests.
-- Synchronous import proposal creation is one atomic transaction. Idempotent
-  replay validates the original semantic request and persisted result manifest.
-- Raw source text and proposed values are hashed in memory for idempotency but
-  excluded from workflow metadata.
+- CLI import accepts separate explicitly authorized source/proposal files or one
+  stdin stream; imported content cannot add authority fields or authorize reads.
+- Dry-run is a persistence-independent request validation, so its output uses
+  planned counts and truthfully reports that storage was not checked.
+- Normal import and review require a current schema created by explicit
+  `profile init`; import validates an existing writable connection without schema
+  changes, and data commands do not silently initialize or migrate it.
+- Import and review revalidate private permissions and resolved-path containment;
+  they never repair unsafe storage as a side effect.
+- Review content is intentionally visible private output but remains marked
+  untrusted and unusable. The read path is physically read-only, and there is no
+  approval side effect.
+- The narrow CLI manifest fixes imported claims to conservative service defaults:
+  person subject, global scope, at least personal sensitivity, pending approval,
+  and pending evidence confirmation.

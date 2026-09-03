@@ -4,11 +4,13 @@ import sqlite3
 import stat
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
-from grounded_apply.repositories.sqlite import (
+from grounded_apply.repositories import (
     RepositoryError,
     RepositoryNotInitializedError,
+    SchemaError,
     SQLiteRepository,
 )
 
@@ -126,6 +128,107 @@ class SQLiteRepositoryTests(unittest.TestCase):
                         input_hash_sha256="b" * 64,
                         input_data={"artifact_id": "different"},
                     )
+
+    def test_read_only_repository_reads_without_changing_the_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "profile.db"
+            with SQLiteRepository(database) as repository:
+                repository.add_claim(
+                    claim_id="pending-synthetic-claim",
+                    claim_type="skill_use",
+                    value="Python",
+                    canonical_text="Used Python in a fictional project",
+                    source_type="user_statement",
+                    source_ref="synthetic answer",
+                )
+            before_bytes = database.read_bytes()
+            before_stat = database.stat()
+            before_paths = set(Path(directory).iterdir())
+
+            with SQLiteRepository(database, read_only=True) as repository:
+                self.assertEqual(len(repository.list_claims()), 1)
+                with self.assertRaisesRegex(RepositoryError, "read-only"):
+                    repository.add_claim(
+                        claim_type="skill_use",
+                        value="Rust",
+                        canonical_text="Used Rust",
+                        source_type="user_statement",
+                        source_ref="synthetic answer",
+                    )
+
+            after_stat = database.stat()
+            self.assertEqual(database.read_bytes(), before_bytes)
+            self.assertEqual(stat.S_IMODE(after_stat.st_mode), stat.S_IMODE(before_stat.st_mode))
+            self.assertEqual(after_stat.st_mtime_ns, before_stat.st_mtime_ns)
+            self.assertEqual(set(Path(directory).iterdir()), before_paths)
+
+    def test_read_only_repository_does_not_create_or_migrate_a_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.db"
+
+            with self.assertRaises(sqlite3.OperationalError):
+                SQLiteRepository(missing, read_only=True)
+            self.assertFalse(missing.exists())
+
+            empty = Path(directory) / "empty.db"
+            sqlite3.connect(empty).close()
+            before = empty.read_bytes()
+            repository = SQLiteRepository(empty, read_only=True)
+            self.addCleanup(repository.close)
+            with self.assertRaises(SchemaError):
+                repository.initialize()
+            self.assertEqual(empty.read_bytes(), before)
+
+    def test_existing_only_repository_does_not_create_or_migrate_a_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.db"
+
+            with self.assertRaises(sqlite3.OperationalError):
+                SQLiteRepository(missing, existing_only=True)
+            self.assertFalse(missing.exists())
+
+            empty = Path(directory) / "empty.db"
+            sqlite3.connect(empty).close()
+            before = empty.read_bytes()
+            repository = SQLiteRepository(empty, existing_only=True)
+            try:
+                with self.assertRaises(SchemaError):
+                    repository.initialize()
+            finally:
+                repository.close()
+
+            self.assertEqual(empty.read_bytes(), before)
+            with closing(sqlite3.connect(empty)) as connection:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 0)
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT count(*) FROM sqlite_schema WHERE type = 'table'"
+                    ).fetchone()[0],
+                    0,
+                )
+
+    def test_existing_only_repository_is_writable_on_a_current_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "profile.db"
+            with SQLiteRepository(database):
+                pass
+
+            with SQLiteRepository(database, existing_only=True) as repository:
+                created = repository.add_claim(
+                    claim_id="existing-only-synthetic-claim",
+                    claim_type="skill_use",
+                    value="Python",
+                    canonical_text="Used Python in a fictional project",
+                    source_type="user_statement",
+                    source_ref="synthetic answer",
+                )
+
+            with SQLiteRepository(database, existing_only=True) as repository:
+                stored = repository.get_claim(str(created["id"]))
+
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored["canonical_text"], created["canonical_text"])
 
 
 if __name__ == "__main__":

@@ -172,6 +172,8 @@ The current zero-install interface is:
 ./scripts/check
 ./scripts/gapply --help
 ./scripts/gapply doctor --json
+./scripts/gapply profile import --help
+./scripts/gapply profile review --help
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 

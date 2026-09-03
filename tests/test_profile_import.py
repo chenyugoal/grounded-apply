@@ -31,6 +31,7 @@ from grounded_apply.services import (
     CreateEvidence,
     ImportProposalResult,
     ProfileService,
+    ProfileReviewItem,
     ProposedImportClaim,
     TextSourceSpan,
 )
@@ -107,6 +108,62 @@ class ProfileImportProposalTests(unittest.TestCase):
         ).initialize()
         self.addCleanup(self.repository.close)
         self.service = ProfileService(self.repository)
+
+    def test_preview_validates_without_reserving_records_or_idempotency(self) -> None:
+        request = import_request()
+
+        preview = self.service.preview_import_proposal(request)
+
+        self.assertEqual(preview.proposal_count, len(request.proposals))
+        self.assertEqual(preview.planned_claim_count, len(request.proposals))
+        self.assertEqual(preview.planned_evidence_count, len(request.proposals))
+        self.assertEqual(
+            preview.source_sha256,
+            hashlib.sha256(request.source_text.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(self.repository.list_claims(), [])
+        self.assertEqual(self.repository.list_evidence(), [])
+        self.assertEqual(self.repository.list_workflow_runs(), [])
+
+        result = self.service.create_import_proposal(request, now=NOW)
+        self.assertEqual(result.source_sha256, preview.source_sha256)
+        self.assertEqual(len(result.claims), preview.proposal_count)
+
+    def test_review_items_expose_only_pending_claims_and_exact_support(self) -> None:
+        result = self.service.create_import_proposal(import_request(), now=NOW)
+
+        items = self.service.list_review_items()
+
+        self.assertEqual(len(items), len(result.claims))
+        self.assertEqual(
+            {item.claim.id for item in items},
+            {claim.id for claim in result.claims},
+        )
+        for item in items:
+            self.assertEqual(item.claim.status, ClaimStatus.NEEDS_REVIEW)
+            self.assertEqual(item.claim.approval_status, ApprovalStatus.PENDING)
+            self.assertEqual(len(item.evidence), 1)
+            self.assertEqual(item.evidence[0].claim_id, item.claim.id)
+            self.assertEqual(item.evidence[0].source_ref, item.claim.source_ref)
+        json.dumps(to_jsonable(items), ensure_ascii=False)
+
+    def test_import_review_item_rejects_nonpending_or_incomplete_evidence(self) -> None:
+        result = self.service.create_import_proposal(import_request(), now=NOW)
+        claim = result.claims[0]
+        evidence = result.evidence[0]
+
+        with self.assertRaisesRegex(ValueError, "complete pending"):
+            ProfileReviewItem(claim=claim, evidence=())
+        with self.assertRaisesRegex(ValueError, "complete pending"):
+            ProfileReviewItem(
+                claim=claim,
+                evidence=(
+                    replace(
+                        evidence,
+                        confirmation_status=EvidenceConfirmationStatus.CONFIRMED,
+                    ),
+                ),
+            )
 
     def test_fixture_import_creates_only_reviewable_claims_with_exact_evidence(self) -> None:
         source_text, data = load_fixture()
@@ -498,6 +555,39 @@ class ProfileImportProposalTests(unittest.TestCase):
                     )
                 self.assertEqual(self.repository.list_claims(), [])
                 self.assertEqual(self.repository.list_evidence(), [])
+
+    def test_import_metadata_requires_bounded_opaque_identifiers(self) -> None:
+        valid = import_request()
+        invalid_values = (
+            {"idempotency_key": "candidate private sentence with spaces"},
+            {"idempotency_key": "x" * 257},
+            {"source_ref": "/Users/example/private-resume.txt"},
+            {"source_ref": "fixture://resume\nprivate-data"},
+            {"source_ref": f"fixture://{'x' * 503}"},
+            {"extraction_method": f"extractor@{'x' * 128}"},
+        )
+
+        for changed in invalid_values:
+            with self.subTest(changed=changed):
+                with self.assertRaises(ValueError):
+                    self.service.preview_import_proposal(replace(valid, **changed))
+                self.assertEqual(self.repository.list_claims(), [])
+                self.assertEqual(self.repository.list_evidence(), [])
+                self.assertEqual(self.repository.list_workflow_runs(), [])
+
+    def test_import_rejects_unbounded_batches_and_invalid_unicode(self) -> None:
+        valid = import_request()
+
+        with self.assertRaisesRegex(ValueError, "more than 1000"):
+            replace(valid, proposals=(valid.proposals[0],) * 1001)
+        with self.assertRaisesRegex(ValueError, "valid Unicode"):
+            replace(valid.proposals[0], value={"private-field": "\ud800"})
+        with self.assertRaisesRegex(ValueError, "valid Unicode"):
+            replace(valid.proposals[0], canonical_text="\ud800")
+
+        self.assertEqual(self.repository.list_claims(), [])
+        self.assertEqual(self.repository.list_evidence(), [])
+        self.assertEqual(self.repository.list_workflow_runs(), [])
 
 
 if __name__ == "__main__":

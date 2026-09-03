@@ -22,6 +22,8 @@ Run commands from the repository root.
 | Full repository gate | `./scripts/check` | Supported now |
 | CLI help | `./scripts/gapply --help` | Supported now |
 | Environment/path diagnostics | `./scripts/gapply doctor --json` | Supported now |
+| Structured profile proposal import | `./scripts/gapply profile import --source-file FILE --proposals-file FILE --idempotency-key KEY [--dry-run] [--json]` | Supported for synthetic data |
+| Pending profile review | `./scripts/gapply profile review [--json]` | Supported, read-only |
 | Full test suite | `PYTHONPATH=src python3 -m unittest discover -s tests -v` | Supported now |
 
 The full gate runs both CLI smokes and the test suite without creating bytecode
@@ -33,6 +35,52 @@ GROUNDED_APPLY_HOME=/tmp/grounded-apply-dev ./scripts/gapply doctor --json
 ```
 
 Do not use real candidate data in repository development.
+
+### Structured profile import and review
+
+The current import boundary consumes two separate UTF-8 inputs: exact source text
+and a schema-version-1 proposal manifest. Each option accepts a regular file or
+`-` for stdin; at most one may use stdin. There are intentionally no inline
+arguments for source text, canonical text, values, source references, or
+extraction metadata. The opaque idempotency key permits only a bounded identifier
+alphabet and must not contain candidate data.
+
+The manifest must use zero-based, end-exclusive Unicode-codepoint spans. Its
+top-level fields are exactly `schema_version`, `source_ref`,
+`extraction_method`, `span_index_base`, `span_unit`, `span_end`, and `proposals`.
+Each proposal contains exactly `claim_type`, `value`, `canonical_text`, `span`,
+and optional `confidence`; each span contains `start`, `end`, and exact `text`.
+Duplicate JSON fields, non-finite numbers, unknown fields, authority fields, more
+than 1,000 proposals, non-UTF-8 input, non-regular files, and mismatched spans
+fail closed. Source input is limited to 16 MiB and proposal input to 4 MiB.
+
+`profile import --dry-run` performs service-owned request validation without
+opening a repository or creating runtime state. Its `storage_checked: false`
+field makes clear that it does not validate schema, artifact references, or prior
+idempotency-key use. A persisted import requires an already initialized current
+schema. It opens that database in existing-only SQLite `mode=rw`, validates the
+current schema on the same connection used for the write, and never creates or
+migrates storage implicitly. Missing, empty, or input-time-replaced databases
+fail closed.
+
+Import and review also revalidate runtime privacy without repairing it as a side
+effect: the data directory and database must retain user-only permissions, the
+resolved database target must remain inside the private data directory and
+outside Git worktrees, and every portable runtime child must remain beneath
+`GROUNDED_APPLY_HOME`. Permission drift and path escapes fail unchanged.
+
+Persisted imports contain only `needs_review`/`pending` claims and pending exact
+evidence spans. Import result output is minimized to hashes, counts, and opaque
+record IDs. `profile review` opens SQLite in read-only/query-only mode and lists
+the pending queue with exact supporting evidence, structured values, scope,
+sensitivity, and explicit `content_trust: untrusted` / `usable: false` markers.
+It has no mutation or approval option. Prompt-like imported content is data, never
+an instruction.
+
+This boundary is currently for synthetic development data only. Per-claim-type
+value schemas, sensitive-value detection, trusted extractor registration,
+contradiction-aware approval, redacted logging, and data lifecycle commands are
+still required before real candidate use.
 
 ### Planned command hardening
 

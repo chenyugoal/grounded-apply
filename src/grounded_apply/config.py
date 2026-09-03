@@ -14,7 +14,7 @@ HOME_ENV_VAR = "GROUNDED_APPLY_HOME"
 
 
 class UnsafeRuntimePathError(ValueError):
-    """Runtime data would be stored inside the public source repository."""
+    """Runtime data would use an unsafe location, type, or permission mode."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +79,7 @@ class RuntimePaths:
 
         if self.portable_root is not None:
             _ensure_dedicated_portable_root(self.portable_root)
+            _validate_portable_children(self)
         for directory in self.private_directories():
             if directory == self.portable_root:
                 continue
@@ -199,14 +200,62 @@ def _ensure_dedicated_portable_root(root: Path) -> None:
     resolved.chmod(0o700)
 
 
+def _validate_portable_children(paths: RuntimePaths) -> None:
+    root = paths.portable_root
+    if root is None:
+        return
+    try:
+        resolved_root = root.resolve()
+        resolved_children = tuple(
+            directory.resolve()
+            for directory in paths.private_directories()
+            if directory != root
+        )
+    except (OSError, RuntimeError) as error:
+        raise UnsafeRuntimePathError(
+            f"{HOME_ENV_VAR} child directories could not be resolved safely"
+        ) from error
+    if any(
+        child == resolved_root or not child.is_relative_to(resolved_root)
+        for child in resolved_children
+    ):
+        raise UnsafeRuntimePathError(
+            f"Every {HOME_ENV_VAR} child directory must resolve beneath its private root"
+        )
+
+
+def _require_private_existing_path(
+    path: Path,
+    *,
+    label: str,
+    directory: bool,
+) -> None:
+    try:
+        metadata = path.stat()
+    except (OSError, RuntimeError) as error:
+        raise UnsafeRuntimePathError(
+            f"Initialized {label} is not safely accessible"
+        ) from error
+
+    expected_kind = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected_kind(metadata.st_mode):
+        kind = "directory" if directory else "regular file"
+        raise UnsafeRuntimePathError(f"Initialized {label} must be a {kind}")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise UnsafeRuntimePathError(
+            f"Initialized {label} must already be private with no group or other access"
+        )
+
+
 def require_runtime_outside_repository(
     paths: RuntimePaths,
     repository_root: Path | None = None,
 ) -> None:
-    """Refuse any private runtime root beneath a detected source checkout."""
+    """Refuse private runtime paths that escape into an unsafe location."""
 
     if paths.portable_root is not None:
         _validate_dedicated_portable_root(paths.portable_root)
+        _validate_portable_children(paths)
     runtime_roots = (paths.config_dir, paths.data_dir, paths.cache_dir, paths.state_dir)
     if repository_root is not None:
         repository_roots = {repository_root.resolve()}
@@ -233,3 +282,49 @@ def require_runtime_outside_repository(
         raise UnsafeRuntimePathError(
             f"Private runtime paths must be outside Git worktrees ({roots}): {rendered}"
         )
+
+    try:
+        database = paths.database.resolve()
+        data_dir = paths.data_dir.resolve()
+    except (OSError, RuntimeError) as error:
+        raise UnsafeRuntimePathError(
+            "Private database path could not be resolved safely"
+        ) from error
+
+    database_worktree = _enclosing_git_worktree(database)
+    database_in_known_repository = any(
+        database == root or database.is_relative_to(root) for root in repository_roots
+    )
+    if database_worktree is not None or database_in_known_repository:
+        raise UnsafeRuntimePathError(
+            "Private database path must be outside Git worktrees"
+        )
+    if database != data_dir and not database.is_relative_to(data_dir):
+        raise UnsafeRuntimePathError(
+            "Private database path must resolve within its private data directory"
+        )
+
+
+def require_initialized_profile_storage(
+    paths: RuntimePaths,
+    repository_root: Path | None = None,
+) -> None:
+    """Validate initialized profile storage and privacy without changing it.
+
+    Profile initialization deliberately does not call this function: its job is
+    to create missing paths and repair their modes. Existing-data workflows use
+    this stricter check so permission drift is never repaired as a side effect of
+    an import or read-only review.
+    """
+
+    require_runtime_outside_repository(paths, repository_root)
+    _require_private_existing_path(
+        paths.data_dir,
+        label="profile data directory",
+        directory=True,
+    )
+    _require_private_existing_path(
+        paths.database,
+        label="profile database",
+        directory=False,
+    )

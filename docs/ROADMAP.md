@@ -16,9 +16,10 @@ working-tree checkpoint and next exact task.
 As of September 3, 2026, the repository is in **Phase 0**. The design basis,
 resumability contract, executable scaffold, deterministic truth policies, and
 initial SQLite persistence slice are implemented and verified. Safe structured
-text-import proposals and the first synthetic profile fixture are implemented;
-review UX, registered derivations, data lifecycle tools, and all end-user
-application workflows in Phases 1–5 remain planned or in progress.
+text-import proposals, a strict file/stdin CLI boundary, read-only pending review,
+and the first synthetic profile fixture are implemented; review decisions,
+registered derivations, data lifecycle tools, and all end-user application
+workflows in Phases 1–5 remain planned or in progress.
 
 ## Phase 0 — Repository and truth layer
 
@@ -32,12 +33,12 @@ facts and provenance without placing private data in the repository.
 | Product design and local-first architecture decision | Implemented | Design document and ADR 0001 exist |
 | Durable resume and handoff protocol | Implemented | `AGENTS.md`, development guide, and live checkpoint agree |
 | Zero-install CLI bootstrap and diagnostics | Implemented | Help, doctor, dry-run, and idempotent private init tests pass |
-| Private runtime path resolution and user-only directories | In progress | POSIX/XDG and override safety pass; native Windows paths remain |
+| Private runtime path resolution and user-only directories | In progress | POSIX/XDG, portable-child/database containment, and permission-drift checks pass; native Windows paths remain |
 | Typed atomic claims, evidence, status, scope, and sensitivity | Implemented | Domain invariants and serialization tests pass |
 | `NeedInfo`, `Contradiction`, and claim-packet resolution | Implemented | Missing/conflicting/stale/sensitive cases fail closed |
-| SQLite schema and migration mechanism | Implemented | Atomic fresh/concurrent init, future refusal, and checksum validation pass |
-| Repository/service boundaries for validated mutation | In progress | Claim/evidence service round trips; CLI review/approval flow remains |
-| Resume import, extraction proposal, and human review | In progress | Structured text proposals are exact, pending, and idempotent; file import and human review remain |
+| SQLite schema and migration mechanism | Implemented | Atomic fresh/concurrent init, future refusal, checksum validation, and existing-only no-migration writes pass |
+| Repository/service boundaries for validated mutation | In progress | Claim/evidence service round trips and CLI import use services; approval mutation remains |
+| Resume import, extraction proposal, and human review | In progress | Strict file/stdin proposals and read-only review are exact, pending, and idempotent; extraction and review decisions remain |
 | Redacted logging, backup, export, and deletion | Planned | Privacy and round-trip tests pass on synthetic data |
 | Synthetic candidate/job fixtures and adversarial corpus | In progress | One adversarial synthetic profile fixture exists; broader candidate/job corpus remains |
 

@@ -16,6 +16,11 @@ development scaffold, not an end-to-end job application tool. Do not use it with
 real candidate data until the relevant privacy, persistence, export, and deletion
 controls are implemented and verified.
 
+The current scaffold can validate and persist strictly structured text-import
+proposals, then display their pending claims and exact selected evidence through a
+read-only review command. It does not extract claims from a resume, approve or
+reject proposals, or make imported facts usable.
+
 The single live checkpoint is [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md).
 It records what is actually implemented, the last verification results, known
 issues, and the next exact task. The longer-term scope in
@@ -54,6 +59,46 @@ Never point `GROUNDED_APPLY_HOME` at the repository or commit anything created
 under a real runtime-data directory. An existing override root must already be
 private (`0700`); broad directories such as `/`, the user home, and the shared
 temporary directory are rejected.
+
+### Synthetic structured-import demo
+
+The checked-in proposal manifest and resume are conspicuously fictional. Use only
+these synthetic fixtures while Phase 0's real-data safeguards remain incomplete:
+
+```bash
+GROUNDED_APPLY_HOME=/tmp/grounded-apply-synthetic-demo \
+  ./scripts/gapply profile init --json
+
+GROUNDED_APPLY_HOME=/tmp/grounded-apply-synthetic-demo \
+  ./scripts/gapply profile import \
+  --source-file tests/fixtures/synthetic_profile/resume.txt \
+  --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
+  --idempotency-key synthetic-readme-import-1 \
+  --dry-run --json
+
+GROUNDED_APPLY_HOME=/tmp/grounded-apply-synthetic-demo \
+  ./scripts/gapply profile import \
+  --source-file tests/fixtures/synthetic_profile/resume.txt \
+  --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
+  --idempotency-key synthetic-readme-import-1 --json
+
+GROUNDED_APPLY_HOME=/tmp/grounded-apply-synthetic-demo \
+  ./scripts/gapply profile review --json
+```
+
+`--source-file` and `--proposals-file` accept a regular UTF-8 file or `-` for
+stdin, but only one input may use stdin. Candidate text and proposed values have
+no inline command-line option. Dry-run performs persistence-independent request
+validation and reports `storage_checked: false`; it does not create or open
+profile storage. A real import requires an earlier `profile init`, remains
+idempotent under its opaque key, and creates only pending, unusable records.
+Import and review fail unchanged if the private data directory or database gains
+group/other access, if the database target escapes its data directory, or if a
+portable runtime child escapes `GROUNDED_APPLY_HOME`.
+
+`profile review` is physically read-only. Its output contains untrusted candidate
+content for inspection, clearly marks every item unusable, and cannot record an
+approval or rejection.
 
 ## Product shape
 
