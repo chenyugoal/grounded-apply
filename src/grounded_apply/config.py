@@ -11,6 +11,7 @@ from pathlib import Path
 
 APP_DIR_NAME = "grounded-apply"
 HOME_ENV_VAR = "GROUNDED_APPLY_HOME"
+_SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 
 
 class UnsafeRuntimePathError(ValueError):
@@ -241,9 +242,159 @@ def _require_private_existing_path(
     if not expected_kind(metadata.st_mode):
         kind = "directory" if directory else "regular file"
         raise UnsafeRuntimePathError(f"Initialized {label} must be a {kind}")
+    if not directory:
+        _require_single_link(metadata, label=label)
     if stat.S_IMODE(metadata.st_mode) & 0o077:
         raise UnsafeRuntimePathError(
             f"Initialized {label} must already be private with no group or other access"
+        )
+
+
+def _require_single_link(metadata: os.stat_result, *, label: str) -> None:
+    if metadata.st_nlink != 1:
+        raise UnsafeRuntimePathError(
+            f"Existing {label} must have exactly one hard link"
+        )
+
+
+def _require_existing_database_link_safety(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    except (OSError, RuntimeError) as error:
+        raise UnsafeRuntimePathError(
+            "Private database link count could not be validated safely"
+        ) from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise UnsafeRuntimePathError(
+            "Existing profile database must be a regular non-symlink file"
+        )
+    _require_single_link(metadata, label="profile database")
+    return True
+
+
+def _require_existing_sqlite_sidecar_safety(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    except (OSError, RuntimeError) as error:
+        raise UnsafeRuntimePathError(
+            "Private database sidecar metadata could not be validated safely"
+        ) from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise UnsafeRuntimePathError(
+            "Existing profile database sidecar must be a regular non-symlink file"
+        )
+    _require_single_link(metadata, label="profile database sidecar")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise UnsafeRuntimePathError(
+            "Existing profile database sidecar must already be private with no group "
+            "or other access"
+        )
+    return True
+
+
+def _require_existing_sqlite_sidecars_safe(
+    database_path: Path,
+    *,
+    resolved_database_path: Path,
+    database_exists: bool,
+) -> None:
+    database_spellings = dict.fromkeys((database_path, resolved_database_path))
+    sidecar_exists = False
+    for candidate in database_spellings:
+        for suffix in _SQLITE_SIDECAR_SUFFIXES:
+            sidecar_exists = (
+                _require_existing_sqlite_sidecar_safety(Path(f"{candidate}{suffix}"))
+                or sidecar_exists
+            )
+    if sidecar_exists and not database_exists:
+        raise UnsafeRuntimePathError(
+            "SQLite sidecar files cannot exist without the main profile database"
+        )
+
+
+def _require_sqlite_sidecars_absent_for_read_only(
+    database_path: Path,
+    *,
+    resolved_database_path: Path,
+) -> None:
+    database_spellings = dict.fromkeys((database_path, resolved_database_path))
+    for candidate in database_spellings:
+        for suffix in _SQLITE_SIDECAR_SUFFIXES:
+            sidecar = Path(f"{candidate}{suffix}")
+            try:
+                sidecar.lstat()
+            except FileNotFoundError:
+                continue
+            except (OSError, RuntimeError) as error:
+                raise UnsafeRuntimePathError(
+                    "Read-only profile storage sidecars could not be checked safely"
+                ) from error
+            raise UnsafeRuntimePathError(
+                "Read-only profile access requires SQLite sidecar files to be absent"
+            )
+
+
+def _require_rollback_journal_mode_for_read_only(path: Path) -> None:
+    try:
+        before = path.stat()
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+            os,
+            "O_NONBLOCK",
+            0,
+        )
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or opened.st_nlink != 1
+                or not stat.S_ISREG(opened.st_mode)
+            ):
+                raise UnsafeRuntimePathError(
+                    "Read-only profile database identity changed during validation"
+                )
+            header = os.read(descriptor, 20)
+            after = os.fstat(descriptor)
+            if (
+                (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+                or after.st_nlink != 1
+                or after.st_size != opened.st_size
+                or after.st_mtime_ns != opened.st_mtime_ns
+                or after.st_ctime_ns != opened.st_ctime_ns
+            ):
+                raise UnsafeRuntimePathError(
+                    "Read-only profile database changed during validation"
+                )
+        finally:
+            os.close(descriptor)
+        current = path.stat()
+    except UnsafeRuntimePathError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise UnsafeRuntimePathError(
+            "Read-only profile database header could not be validated safely"
+        ) from error
+    if (
+        (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+        or current.st_nlink != 1
+        or current.st_size != before.st_size
+        or current.st_mtime_ns != before.st_mtime_ns
+        or current.st_ctime_ns != before.st_ctime_ns
+    ):
+        raise UnsafeRuntimePathError(
+            "Read-only profile database identity changed during validation"
+        )
+    if (
+        len(header) >= 20
+        and header[:16] == b"SQLite format 3\x00"
+        and (header[18] == 2 or header[19] == 2)
+    ):
+        raise UnsafeRuntimePathError(
+            "Read-only profile access does not support persistent SQLite WAL mode"
         )
 
 
@@ -303,11 +454,19 @@ def require_runtime_outside_repository(
         raise UnsafeRuntimePathError(
             "Private database path must resolve within its private data directory"
         )
+    database_exists = _require_existing_database_link_safety(paths.database)
+    _require_existing_sqlite_sidecars_safe(
+        paths.database,
+        resolved_database_path=database,
+        database_exists=database_exists,
+    )
 
 
 def require_initialized_profile_storage(
     paths: RuntimePaths,
     repository_root: Path | None = None,
+    *,
+    read_only: bool = False,
 ) -> None:
     """Validate initialized profile storage and privacy without changing it.
 
@@ -317,6 +476,8 @@ def require_initialized_profile_storage(
     an import or read-only review.
     """
 
+    if not isinstance(read_only, bool):
+        raise TypeError("read_only must be a boolean")
     require_runtime_outside_repository(paths, repository_root)
     _require_private_existing_path(
         paths.data_dir,
@@ -328,3 +489,9 @@ def require_initialized_profile_storage(
         label="profile database",
         directory=False,
     )
+    if read_only:
+        _require_sqlite_sidecars_absent_for_read_only(
+            paths.database,
+            resolved_database_path=paths.database.resolve(),
+        )
+        _require_rollback_journal_mode_for_read_only(paths.database)

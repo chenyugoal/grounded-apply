@@ -100,6 +100,22 @@ Truth failures must fail closed.
   examples, docs, issues, commits, and demos use synthetic data only.
 - Treat the entire runtime data directory as sensitive. Respect
   `GROUNDED_APPLY_HOME`; do not create personal-data fallbacks inside the repo.
+- At the typed `gapply` runtime boundary, existing profile databases and SQLite
+  `-journal`, `-wal`, and `-shm` sidecars must be direct regular non-symlink
+  files with exactly one hard link. Sidecars must remain private, and a sidecar
+  without its main database fails closed. Read-only review and diagnostics
+  additionally require sidecars to be absent and reject databases configured
+  for persistent WAL mode rather than letting a read create, recover, or remove
+  SQLite state. Direct repository/inspection adapter callers must explicitly
+  compose these guards; adapter-wide enforcement is outside this milestone.
+- `profile init` must create its default configuration through an exclusive,
+  no-follow descriptor and must reject an existing nonregular, symlinked,
+  multiply linked, or group/other-accessible configuration without changing it.
+- Typed-CLI runtime path and file-identity checks are repeated around SQLite
+  opens, but they are sampled checks, not an atomic filesystem lock or
+  authentication boundary. Do not claim protection against a same-UID process
+  that wins a race after the final check; preserve this residual TOCTOU
+  limitation in docs and threat-model decisions.
 - Permission to use a sensitive answer once is not permission to store it.
   Storage, reuse, scope, expiry, and confirmation are separate explicit choices.
 - Never infer work authorization, sponsorship, clearance, criminal/legal
@@ -174,6 +190,7 @@ The current zero-install interface is:
 ./scripts/gapply doctor --json
 ./scripts/gapply profile import --help
 ./scripts/gapply profile review --help
+./scripts/gapply profile decide --help
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 

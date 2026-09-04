@@ -20,13 +20,14 @@ Run commands from the repository root.
 | Purpose | Current command | Status |
 |---|---|---|
 | Full repository gate | `./scripts/check` | Supported now |
-| CLI help | `./scripts/gapply --help` | Supported now |
+| CLI help | `./scripts/gapply --help`; `./scripts/gapply profile decide --help` | Supported now |
 | Environment/path diagnostics | `./scripts/gapply doctor --json` | Supported now |
 | Structured profile proposal import | `./scripts/gapply profile import --source-file FILE --proposals-file FILE --idempotency-key KEY [--dry-run] [--json]` | Supported for synthetic data |
 | Pending profile review | `./scripts/gapply profile review [--json]` | Supported, read-only |
+| One profile review decision | `./scripts/gapply profile decide --claim-id CLAIM_ID --review-token TOKEN --decision approve\|reject --actor-id ACTOR_ID --idempotency-key KEY [--confirm] [--json]` | Supported for synthetic data; storage-free syntax preview unless confirmed |
 | Full test suite | `PYTHONPATH=src python3 -m unittest discover -s tests -v` | Supported now |
 
-The full gate runs both CLI smokes and the test suite without creating bytecode
+The full gate runs its CLI smokes and the test suite without creating bytecode
 in the checkout. The wrapper adds `src` to `PYTHONPATH`, so it exercises the
 working tree without an editable install. For a disposable runtime root:
 
@@ -35,6 +36,43 @@ GROUNDED_APPLY_HOME=/tmp/grounded-apply-dev ./scripts/gapply doctor --json
 ```
 
 Do not use real candidate data in repository development.
+
+### Runtime database and sidecar safety
+
+At the typed `gapply` boundary, every storage-opening command and doctor
+inspection validates the private database before SQLite access. An existing
+database must be a direct regular non-symlink file with exactly one hard link and
+a resolved location inside the private data directory and outside Git worktrees.
+Existing-data commands and doctor additionally require the data directory and
+database to have no group/other permissions; initialization may repair modes
+only after the type/link/location checks pass.
+`profile init` also rejects an existing nonregular, symlinked, multiply linked,
+or group/other-accessible `config.toml`. A missing default is created with an
+exclusive no-follow descriptor and verified before initialization proceeds.
+Recognized SQLite `-journal`, `-wal`, and `-shm` sidecars must likewise be direct
+regular non-symlink, single-link, user-private files. A recognized sidecar without
+the main database is treated as potentially recoverable state: initialization,
+`profile init --dry-run`, `profile import --dry-run`, and diagnostics fail closed
+without creating a replacement database or changing the sidecar.
+
+Read-only `profile review` and doctor database inspection require all recognized
+sidecars to be absent. They also inspect the SQLite header without SQLite and
+reject persistent WAL mode even after its transient sidecars have disappeared.
+This prevents a nominally read-only connection from creating, recovering, or
+removing sidecars. Mutating initialization, import, and confirmed decisions may
+allow SQLite to process an otherwise valid private, single-link sidecar.
+
+The CLI repeats validation around SQLite opens and schema inspection and samples
+the database device/inode identity before and after access. These checks narrow
+path-replacement and link-count races; they do not form an atomic filesystem lock
+or authenticate state against another same-UID process. A same-user process can
+still win a TOCTOU race after the final sample, so do not present this boundary as
+protection from a malicious process running under the same account.
+
+These checks are composed by the CLI application boundary. Direct callers of
+`SQLiteRepository` or `inspect_schema` do not receive them automatically and
+must invoke the runtime guards themselves. Moving the same guarantees into every
+adapter entry point is outside this milestone.
 
 ### Structured profile import and review
 
@@ -166,21 +204,25 @@ the same logical line, validation fails closed rather than silently treating a
 truncated suffix as the complete label context.
 
 `profile import --dry-run` performs service-owned request validation without
-opening a repository or creating runtime state. Its `storage_checked: false`
-field makes clear that it does not validate schema, artifact references, or prior
-idempotency-key use. A persisted import requires an already initialized current
-schema. It opens that database in existing-only SQLite `mode=rw`, validates the
+opening a repository or creating runtime state. The CLI still validates runtime
+containment plus database/sidecar type, link, and orphan safety. Its
+`storage_checked: false` field means it does not validate database permissions,
+schema, artifact references, or prior idempotency-key use. A persisted import
+requires an already initialized current schema. It opens that database in
+existing-only SQLite `mode=rw`, validates the
 current schema on the same connection used for the write, and never creates or
 migrates storage implicitly. Missing, empty, or input-time-replaced databases
 fail closed.
 
-Import and review also revalidate runtime privacy without repairing it as a side
-effect: the data directory and database must retain user-only permissions, the
-resolved database target must remain inside the private data directory and
-outside Git worktrees, and every portable runtime child must remain beneath
-`GROUNDED_APPLY_HOME`. Permission drift and path escapes fail unchanged.
+Import, review, confirmed decisions, and diagnostics revalidate runtime privacy
+without repairing existing data as a side effect: the data directory and database
+must retain user-only permissions, the database must remain a direct single-link
+file inside the private data directory and outside Git worktrees, and every
+portable runtime child must remain beneath `GROUNDED_APPLY_HOME`. Permission
+drift, path escapes, database/sidecar symlinks or extra hard links, orphan
+sidecars, and unsafe read-only journal state fail unchanged.
 
-New imports contain only `needs_review`/`pending` claims and pending exact
+Persisted imports contain only `needs_review`/`pending` claims and pending exact
 evidence spans. The public generic claim/evidence service rejects
 `SourceType.IMPORTED_RESUME`; only the import workflow can create those records.
 Claim and evidence UUIDs are deterministically derived from the creating
@@ -204,23 +246,49 @@ content policy, digest-only artifact, registered ingress, locator source/bounds,
 and selected-text checksum. The CLI command has no mutation or approval option.
 Prompt-like imported content is data, never an instruction.
 
-The typed application-service boundary `ProfileService.decide_review_item`
-records one approval or rejection atomically. Requests require the displayed
-review token, an opaque actor ID, and an opaque idempotency key. The decision
-workflow stores only version identifiers, IDs, hashes, decision, actor, and time;
-it does not store raw source, value, evidence, filename, path, or raw idempotency
-key. Approval changes the claim to `verified`/`approved` and its evidence to
+`profile decide` operates on one displayed claim ID and review token. It also
+requires `approve` or `reject`, an opaque actor ID, and an opaque idempotency key;
+the actor ID and idempotency key must not contain candidate data. Without
+`--confirm`, the command validates only the typed input shape without resolving
+runtime paths or opening storage. Its result explicitly reports `dry_run: true`,
+`storage_checked: false`,
+`decision_recorded: false`, and `requires_confirmation: true`. This is not a
+current-item, token-freshness, contradiction, or decision-policy check; use
+`profile review` to inspect the content before confirming. The syntax preview
+records no decision and performs no external action.
+
+`--confirm` is not abbreviable. A confirmed command opens the already initialized
+database for validated mutation and calls `ProfileService.decide_review_item`.
+One transaction revalidates the item, review token, import provenance, current
+content, and policy, then records one approval or rejection. The workflow stores
+only version identifiers, IDs, hashes, decision, actor, and time; it does not
+store raw source, value, evidence, filename, path, or raw idempotency key.
+Approval changes the claim to `verified`/`approved` and its evidence to
 `confirmed` with the same actor/time; rejection changes them to
 `withdrawn`/`rejected` and retains no verification actor. Confidential and highly
 sensitive items cannot be approved. An active same-subject explicitly
-`contradicted` record blocks approval, with non-public conflicts reported through
-a generic non-disclosing error. The decision-time check does not reject a
-distinct value solely because it differs, but existing resolution returns
-`Contradiction` when multiple approved value groups compete for one intent.
-Resolution first revalidates every associated imported projection and terminal
-audit. The unkeyed record digest is a consistency and stale-review control, not
-authentication against a writer able to recompute the entire database
-projection.
+`contradicted` record blocks approval. Public blockers return a minimized
+structured contradiction containing IDs and remediation metadata; non-public
+blockers use a generic non-disclosing error. The decision-time check does not
+reject a distinct value solely because it differs.
+
+Successful CLI output is minimized to decision/audit status and opaque record
+identifiers; confirmed success and structured contradiction data report
+`external_action_taken: false`. Output never returns source text, proposed
+values, review tokens, paths, or raw idempotency keys. The command has no bulk,
+override, edit, submission, or other external-action option. Exact confirmed
+retries return the original result. If rendering fails after commit,
+`PostCommitOutputError` says the decision may already be recorded. A confirmed
+command interrupted before reporting its terminal result gives the same
+conservative recovery instruction: retry the exact same confirmed request and
+idempotency key. The warning is written to stderr because stdout may already
+contain a partial payload and is indeterminate for that attempt. A changed retry
+fails closed.
+Existing resolution still returns `Contradiction`
+when multiple approved value groups compete for one intent, and resolution first
+revalidates every associated imported projection and terminal audit. The unkeyed
+record digest is a consistency and stale-review control, not authentication
+against a writer able to recompute the entire database projection.
 
 Manifest version 1, request-identity versions 1–3, result-manifest versions 1–2,
 content-policy version 1, and the former public `CreateImportProposal`
@@ -293,7 +361,7 @@ authorization, persistence, or state transitions.
 4. Implement through the appropriate domain or application boundary. Avoid
    direct storage mutation from an interface.
 5. Run the narrow test while iterating.
-6. Run the canonical full test command and both CLI smoke commands.
+6. Run the canonical full test command and CLI smoke commands.
 7. Review the complete diff for private data, secrets, scope creep, and stale
    documentation.
 8. Update `docs/SESSION_HANDOFF.md` at the meaningful stopping point.

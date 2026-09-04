@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 import tempfile
 import unittest
@@ -183,7 +184,9 @@ class RuntimePathsTests(unittest.TestCase):
             self.assertTrue(paths.database.is_symlink())
             self.assertEqual(worktree_database.read_text(encoding="utf-8"), sentinel)
 
-    def test_database_symlink_may_remain_within_private_data_directory(self) -> None:
+    def test_database_symlink_is_rejected_even_within_private_data_directory(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             portable_root = root / "private-runtime"
@@ -198,9 +201,83 @@ class RuntimePathsTests(unittest.TestCase):
             private_database.chmod(0o600)
             paths.database.symlink_to(private_database.name)
 
-            require_initialized_profile_storage(paths)
+            with self.assertRaisesRegex(
+                UnsafeRuntimePathError,
+                "database.*regular non-symlink",
+            ):
+                require_initialized_profile_storage(paths)
 
+            self.assertTrue(paths.database.is_symlink())
             self.assertEqual(paths.database.resolve(), private_database)
+            self.assertEqual(
+                private_database.read_text(encoding="utf-8"),
+                "synthetic private data",
+            )
+
+    def test_nonregular_database_is_rejected_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            paths = resolve_runtime_paths(
+                {"GROUNDED_APPLY_HOME": str(root / "private-runtime")}
+            )
+            paths.ensure_private_directories()
+            paths.database.mkdir(mode=0o700)
+            sentinel = paths.database / "synthetic-sentinel.txt"
+            content = "SYNTHETIC NONREGULAR DATABASE CONTENT"
+            sentinel.write_text(content, encoding="utf-8")
+            before = paths.database.stat()
+
+            with self.assertRaisesRegex(
+                UnsafeRuntimePathError,
+                "database.*regular non-symlink",
+            ) as raised:
+                require_runtime_outside_repository(paths)
+
+            after = paths.database.stat()
+            self.assertNotIn(content, str(raised.exception))
+            self.assertTrue(paths.database.is_dir())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), content)
+            self.assertEqual(after.st_mode, before.st_mode)
+            self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+
+    def test_database_symlink_cannot_hide_a_multiply_linked_private_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            portable_root = root / "private-runtime"
+            portable_root.mkdir(mode=0o700)
+            portable_root.chmod(0o700)
+            paths = resolve_runtime_paths(
+                {"GROUNDED_APPLY_HOME": str(portable_root)}
+            )
+            paths.data_dir.mkdir(mode=0o700)
+            private_database = paths.data_dir / "private-database-target.db"
+            content = b"synthetic linked private database"
+            private_database.write_bytes(content)
+            private_database.chmod(0o600)
+            outside_alias = root / "synthetic-profile-alias.db"
+            os.link(private_database, outside_alias)
+            paths.database.symlink_to(private_database.name)
+            before = private_database.stat()
+
+            with self.assertRaisesRegex(
+                UnsafeRuntimePathError,
+                "database.*regular non-symlink",
+            ):
+                require_initialized_profile_storage(paths)
+
+            target_after = private_database.stat()
+            alias_after = outside_alias.stat()
+            self.assertTrue(paths.database.is_symlink())
+            self.assertEqual(private_database.read_bytes(), content)
+            self.assertEqual(outside_alias.read_bytes(), content)
+            self.assertEqual(target_after.st_ino, alias_after.st_ino)
+            self.assertEqual(target_after.st_nlink, 2)
+            self.assertEqual(target_after.st_mode, before.st_mode)
+            self.assertEqual(target_after.st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(target_after.st_ctime_ns, before.st_ctime_ns)
 
     def test_initialized_profile_storage_accepts_private_paths_without_mutation(
         self,
@@ -243,6 +320,246 @@ class RuntimePathsTests(unittest.TestCase):
             self.assertNotIn(sentinel, str(raised.exception))
             self.assertEqual(stat.S_IMODE(paths.database.stat().st_mode), 0o644)
             self.assertEqual(paths.database.read_text(encoding="utf-8"), sentinel)
+
+    def test_multiply_linked_database_is_rejected_without_mutating_either_alias(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            portable_root = root / "private-runtime"
+            paths = resolve_runtime_paths(
+                {"GROUNDED_APPLY_HOME": str(portable_root)}
+            )
+            paths.ensure_private_directories()
+            content = b"synthetic multiply linked database bytes"
+            paths.database.write_bytes(content)
+            paths.database.chmod(0o600)
+            outside_alias = root / "synthetic-profile-alias.db"
+            os.link(paths.database, outside_alias)
+            before = paths.database.stat()
+
+            for operation in (
+                require_runtime_outside_repository,
+                require_initialized_profile_storage,
+            ):
+                with self.subTest(operation=operation.__name__):
+                    with self.assertRaisesRegex(
+                        UnsafeRuntimePathError,
+                        "profile database.*one hard link",
+                    ) as raised:
+                        operation(paths)
+                    self.assertNotIn(content.decode("utf-8"), str(raised.exception))
+
+            database_after = paths.database.stat()
+            alias_after = outside_alias.stat()
+            self.assertEqual(paths.database.read_bytes(), content)
+            self.assertEqual(outside_alias.read_bytes(), content)
+            self.assertEqual(database_after.st_ino, alias_after.st_ino)
+            self.assertEqual(database_after.st_nlink, 2)
+            self.assertEqual(alias_after.st_nlink, 2)
+            self.assertEqual(database_after.st_mode, before.st_mode)
+            self.assertEqual(alias_after.st_mode, before.st_mode)
+            self.assertEqual(database_after.st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(alias_after.st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(database_after.st_ctime_ns, before.st_ctime_ns)
+            self.assertEqual(alias_after.st_ctime_ns, before.st_ctime_ns)
+
+    def test_multiply_linked_sqlite_sidecars_are_rejected_without_mutation(
+        self,
+    ) -> None:
+        for suffix in ("-journal", "-wal", "-shm"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                paths = resolve_runtime_paths(
+                    {"GROUNDED_APPLY_HOME": str(root / "private-runtime")}
+                )
+                paths.ensure_private_directories()
+                paths.database.write_bytes(b"synthetic private database")
+                paths.database.chmod(0o600)
+                sidecar = Path(f"{paths.database}{suffix}")
+                content = f"synthetic {suffix} bytes".encode("utf-8")
+                sidecar.write_bytes(content)
+                sidecar.chmod(0o600)
+                outside_alias = root / f"synthetic-profile{suffix}"
+                os.link(sidecar, outside_alias)
+                before = sidecar.stat()
+
+                with self.assertRaisesRegex(
+                    UnsafeRuntimePathError,
+                    "profile database sidecar.*one hard link",
+                ) as raised:
+                    require_runtime_outside_repository(paths)
+
+                sidecar_after = sidecar.stat()
+                alias_after = outside_alias.stat()
+                self.assertNotIn(content.decode("utf-8"), str(raised.exception))
+                self.assertEqual(sidecar.read_bytes(), content)
+                self.assertEqual(outside_alias.read_bytes(), content)
+                self.assertEqual(sidecar_after.st_ino, alias_after.st_ino)
+                self.assertEqual(sidecar_after.st_nlink, 2)
+                self.assertEqual(sidecar_after.st_mode, before.st_mode)
+                self.assertEqual(sidecar_after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(sidecar_after.st_ctime_ns, before.st_ctime_ns)
+
+    def test_unsafe_sqlite_sidecar_types_and_permissions_fail_unchanged(self) -> None:
+        cases = ("symlink", "world_readable")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                paths = resolve_runtime_paths(
+                    {"GROUNDED_APPLY_HOME": str(root / "private-runtime")}
+                )
+                paths.ensure_private_directories()
+                paths.database.write_bytes(b"synthetic private database")
+                paths.database.chmod(0o600)
+                sidecar = Path(f"{paths.database}-journal")
+                content = b"synthetic rollback journal bytes"
+                if case == "symlink":
+                    outside = root / "synthetic-external-journal"
+                    outside.write_bytes(content)
+                    outside.chmod(0o600)
+                    sidecar.symlink_to(outside)
+                    before = outside.stat()
+                    pattern = "regular non-symlink"
+                else:
+                    sidecar.write_bytes(content)
+                    sidecar.chmod(0o644)
+                    outside = sidecar
+                    before = sidecar.stat()
+                    pattern = "sidecar.*private"
+
+                with self.assertRaisesRegex(UnsafeRuntimePathError, pattern):
+                    require_runtime_outside_repository(paths)
+
+                after = outside.stat()
+                self.assertEqual(outside.read_bytes(), content)
+                self.assertEqual(after.st_mode, before.st_mode)
+                self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+                if case == "symlink":
+                    self.assertTrue(sidecar.is_symlink())
+
+    def test_orphan_sqlite_sidecars_are_rejected_without_mutation(self) -> None:
+        for suffix in ("-journal", "-wal", "-shm"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                paths = resolve_runtime_paths(
+                    {"GROUNDED_APPLY_HOME": str(root / "private-runtime")}
+                )
+                paths.ensure_private_directories()
+                sidecar = Path(f"{paths.database}{suffix}")
+                content = f"synthetic orphan {suffix} bytes".encode("utf-8")
+                sidecar.write_bytes(content)
+                sidecar.chmod(0o600)
+                before = sidecar.stat()
+
+                with self.assertRaisesRegex(
+                    UnsafeRuntimePathError,
+                    "sidecar.*without.*main profile database",
+                ):
+                    require_runtime_outside_repository(paths)
+
+                after = sidecar.stat()
+                self.assertFalse(paths.database.exists())
+                self.assertEqual(sidecar.read_bytes(), content)
+                self.assertEqual(after.st_nlink, 1)
+                self.assertEqual(after.st_mode, before.st_mode)
+                self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+
+    def test_private_single_link_sqlite_sidecars_pass_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            paths = resolve_runtime_paths(
+                {"GROUNDED_APPLY_HOME": str(root / "private-runtime")}
+            )
+            paths.ensure_private_directories()
+            paths.database.write_bytes(b"synthetic private database")
+            paths.database.chmod(0o600)
+            expected: dict[Path, tuple[bytes, os.stat_result]] = {}
+            for suffix in ("-journal", "-wal", "-shm"):
+                sidecar = Path(f"{paths.database}{suffix}")
+                content = f"synthetic safe {suffix} bytes".encode("utf-8")
+                sidecar.write_bytes(content)
+                sidecar.chmod(0o600)
+                expected[sidecar] = (content, sidecar.stat())
+
+            require_runtime_outside_repository(paths)
+
+            for sidecar, (content, before) in expected.items():
+                after = sidecar.stat()
+                self.assertEqual(sidecar.read_bytes(), content)
+                self.assertEqual(after.st_nlink, 1)
+                self.assertEqual(after.st_mode, before.st_mode)
+                self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+
+    def test_read_only_profile_access_rejects_every_sqlite_sidecar_unchanged(
+        self,
+    ) -> None:
+        for suffix in ("-journal", "-wal", "-shm"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                paths = resolve_runtime_paths(
+                    {"GROUNDED_APPLY_HOME": str(root / "private-runtime")}
+                )
+                paths.ensure_private_directories()
+                paths.database.write_bytes(b"synthetic private database")
+                paths.database.chmod(0o600)
+                sidecar = Path(f"{paths.database}{suffix}")
+                content = f"synthetic active {suffix} bytes".encode("utf-8")
+                sidecar.write_bytes(content)
+                sidecar.chmod(0o600)
+                before = sidecar.stat()
+
+                with self.assertRaisesRegex(
+                    UnsafeRuntimePathError,
+                    "Read-only profile access.*sidecar.*absent",
+                ):
+                    require_initialized_profile_storage(paths, read_only=True)
+
+                after = sidecar.stat()
+                self.assertEqual(sidecar.read_bytes(), content)
+                self.assertEqual(after.st_nlink, 1)
+                self.assertEqual(after.st_mode, before.st_mode)
+                self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+
+    def test_database_symlink_is_rejected_before_target_sidecar_access(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            paths = resolve_runtime_paths(
+                {"GROUNDED_APPLY_HOME": str(root / "private-runtime")}
+            )
+            paths.ensure_private_directories()
+            private_database = paths.data_dir / "private-database-target.db"
+            private_database.write_bytes(b"synthetic private database")
+            private_database.chmod(0o600)
+            paths.database.symlink_to(private_database.name)
+            target_sidecar = Path(f"{private_database}-wal")
+            content = b"synthetic linked target WAL bytes"
+            target_sidecar.write_bytes(content)
+            target_sidecar.chmod(0o600)
+            outside_alias = root / "synthetic-profile-wal-alias"
+            os.link(target_sidecar, outside_alias)
+            before = target_sidecar.stat()
+
+            with self.assertRaisesRegex(
+                UnsafeRuntimePathError,
+                "database.*regular non-symlink",
+            ):
+                require_runtime_outside_repository(paths)
+
+            sidecar_after = target_sidecar.stat()
+            alias_after = outside_alias.stat()
+            self.assertTrue(paths.database.is_symlink())
+            self.assertEqual(target_sidecar.read_bytes(), content)
+            self.assertEqual(outside_alias.read_bytes(), content)
+            self.assertEqual(sidecar_after.st_ino, alias_after.st_ino)
+            self.assertEqual(sidecar_after.st_nlink, 2)
+            self.assertEqual(sidecar_after.st_mode, before.st_mode)
+            self.assertEqual(sidecar_after.st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(sidecar_after.st_ctime_ns, before.st_ctime_ns)
 
     def test_initialized_profile_storage_rechecks_default_xdg_data_permissions(
         self,

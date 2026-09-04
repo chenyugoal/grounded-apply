@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import platform
@@ -10,6 +11,7 @@ import stat
 import sys
 import unicodedata
 from collections.abc import Callable, Sequence
+from contextlib import redirect_stderr
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ from grounded_apply import __version__
 from grounded_apply.config import (
     HOME_ENV_VAR,
     RuntimePaths,
+    UnsafeRuntimePathError,
     require_initialized_profile_storage,
     require_runtime_outside_repository,
     resolve_runtime_paths,
@@ -29,6 +32,10 @@ _MAX_PROPOSAL_INPUT_BYTES = 4 * 1024 * 1024
 _IDEMPOTENCY_KEY_CHARACTERS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
 )
+_POST_COMMIT_DECISION_MESSAGE = (
+    "The profile review decision may already be recorded. Retry the exact same "
+    "confirmed request and idempotency key to recover its result."
+)
 
 
 class CliInputError(ValueError):
@@ -37,6 +44,10 @@ class CliInputError(ValueError):
 
 class ProfileStorageNotInitializedError(RuntimeError):
     """A profile data command requires an initialized private database."""
+
+
+class PostCommitOutputError(RuntimeError):
+    """A committed operation could not report its terminal result."""
 
 
 def _add_json_flag(parser: argparse.ArgumentParser) -> None:
@@ -103,11 +114,36 @@ def _repository_for(
 ):  # type: ignore[no-untyped-def]
     from grounded_apply.repositories import SQLiteRepository
 
-    return SQLiteRepository(
-        paths.database,
-        read_only=read_only,
-        existing_only=existing_only,
-    )
+    def validate() -> None:
+        if existing_only or read_only:
+            require_initialized_profile_storage(paths, read_only=read_only)
+        else:
+            require_runtime_outside_repository(paths)
+
+    validate()
+    before_identity: tuple[int, int] | None = None
+    if paths.database.exists():
+        before = paths.database.stat()
+        before_identity = (before.st_dev, before.st_ino)
+
+    repository = None
+    try:
+        repository = SQLiteRepository(
+            paths.database,
+            read_only=read_only,
+            existing_only=existing_only,
+        )
+        validate()
+        after = paths.database.stat()
+        if before_identity is not None and (after.st_dev, after.st_ino) != before_identity:
+            raise UnsafeRuntimePathError(
+                "Profile database identity changed while SQLite was opening"
+            )
+    except Exception:
+        if repository is not None:
+            repository.close()
+        raise
+    return repository
 
 
 def _read_schema_version(paths: RuntimePaths) -> int | None:
@@ -115,14 +151,24 @@ def _read_schema_version(paths: RuntimePaths) -> int | None:
         return None
     from grounded_apply.repositories import inspect_schema
 
+    require_initialized_profile_storage(paths, read_only=True)
+    before = paths.database.stat()
     version = inspect_schema(paths.database)
+    require_initialized_profile_storage(paths, read_only=True)
+    after = paths.database.stat()
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        raise UnsafeRuntimePathError(
+            "Profile database identity changed while SQLite was inspecting it"
+        )
     return None if version == 0 else version
 
 
 def _command_doctor(args: argparse.Namespace) -> int:
     paths = resolve_runtime_paths()
+    runtime_safe = False
     try:
         require_runtime_outside_repository(paths)
+        runtime_safe = True
         runtime_check: dict[str, Any] = {
             "configured_by": HOME_ENV_VAR if os.environ.get(HOME_ENV_VAR) else "xdg_defaults",
             "ok": True,
@@ -143,21 +189,30 @@ def _command_doctor(args: argparse.Namespace) -> int:
         "runtime_home": runtime_check,
     }
     warnings: list[str] = []
-    try:
-        schema_version = _read_schema_version(paths)
+    if not runtime_safe:
         checks["database"] = {
-            "initialized": schema_version is not None,
-            "ok": True,
-            "schema_version": schema_version,
-        }
-        if schema_version is None:
-            warnings.append("Profile storage is not initialized; run `gapply profile init`.")
-    except Exception as error:  # fail closed and report without leaking database contents
-        checks["database"] = {
-            "error": f"{type(error).__name__}: {error}",
-            "initialized": paths.database.exists(),
+            "error": "Database inspection was skipped because runtime paths are unsafe",
+            "initialized": None,
             "ok": False,
         }
+    else:
+        try:
+            schema_version = _read_schema_version(paths)
+            checks["database"] = {
+                "initialized": schema_version is not None,
+                "ok": True,
+                "schema_version": schema_version,
+            }
+            if schema_version is None:
+                warnings.append(
+                    "Profile storage is not initialized; run `gapply profile init`."
+                )
+        except Exception as error:  # fail closed without leaking database contents
+            checks["database"] = {
+                "error": f"{type(error).__name__}: {error}",
+                "initialized": None,
+                "ok": False,
+            }
 
     ok = all(check.get("ok", True) for check in checks.values() if isinstance(check, dict))
     _emit(
@@ -183,17 +238,96 @@ visible_browser = true
 """
 
 
+def _existing_private_config(path: Path) -> os.stat_result | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError) as error:
+        raise UnsafeRuntimePathError(
+            "Private configuration metadata could not be validated safely"
+        ) from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise UnsafeRuntimePathError(
+            "Existing private configuration must be a regular non-symlink file"
+        )
+    if metadata.st_nlink != 1:
+        raise UnsafeRuntimePathError(
+            "Existing private configuration must have exactly one hard link"
+        )
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise UnsafeRuntimePathError(
+            "Existing private configuration must have no group or other access"
+        )
+    return metadata
+
+
 def _ensure_default_config(paths: RuntimePaths) -> bool:
-    if paths.config_file.exists():
+    if _existing_private_config(paths.config_file) is not None:
         return False
-    paths.config_file.write_text(_DEFAULT_CONFIG, encoding="utf-8")
-    paths.config_file.chmod(0o600)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(paths.config_file, flags, 0o600)
+    except FileExistsError:
+        if _existing_private_config(paths.config_file) is not None:
+            return False
+        raise UnsafeRuntimePathError(
+            "Private configuration appeared during exclusive creation"
+        ) from None
+    except OSError as error:
+        raise UnsafeRuntimePathError(
+            "Private configuration could not be created safely"
+        ) from error
+
+    encoded = _DEFAULT_CONFIG.encode("utf-8")
+    try:
+        os.fchmod(descriptor, 0o600)
+        remaining = memoryview(encoded)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("private configuration write made no progress")
+            remaining = remaining[written:]
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_size != len(encoded)
+        ):
+            raise UnsafeRuntimePathError(
+                "Private configuration changed during creation"
+            )
+    except UnsafeRuntimePathError:
+        raise
+    except OSError as error:
+        raise UnsafeRuntimePathError(
+            "Private configuration could not be written safely"
+        ) from error
+    finally:
+        os.close(descriptor)
+
+    current = _existing_private_config(paths.config_file)
+    if current is None or (current.st_dev, current.st_ino) != (
+        opened.st_dev,
+        opened.st_ino,
+    ):
+        raise UnsafeRuntimePathError(
+            "Private configuration identity changed during creation"
+        )
     return True
 
 
 def _command_profile_init(args: argparse.Namespace) -> int:
     paths = resolve_runtime_paths()
     require_runtime_outside_repository(paths)
+    config_exists = _existing_private_config(paths.config_file) is not None
     if args.dry_run:
         _emit(
             args,
@@ -201,7 +335,7 @@ def _command_profile_init(args: argparse.Namespace) -> int:
             data={
                 "database": str(paths.database),
                 "dry_run": True,
-                "would_create_config": not paths.config_file.exists(),
+                "would_create_config": not config_exists,
                 "would_initialize_database": not paths.database.exists(),
             },
             message=f"Would initialize private profile storage at {paths.database}",
@@ -209,6 +343,7 @@ def _command_profile_init(args: argparse.Namespace) -> int:
         return 0
     paths.ensure_private_directories()
     config_created = _ensure_default_config(paths)
+    require_runtime_outside_repository(paths)
     repository = _repository_for(paths)
     try:
         repository.initialize()
@@ -487,7 +622,7 @@ def _open_initialized_profile_repository(
         raise ProfileStorageNotInitializedError(
             "Profile storage is not initialized; run `gapply profile init`."
         )
-    require_initialized_profile_storage(paths)
+    require_initialized_profile_storage(paths, read_only=read_only)
     repository = None
     try:
         repository = _repository_for(
@@ -545,7 +680,9 @@ def _command_profile_import(args: argparse.Namespace) -> int:
             data=data,
             message=(
                 f"Validated a request plan for {preview.proposal_count} review-only "
-                "profile proposals; storage was not checked and no files or records "
+                "profile proposals; runtime containment plus database/sidecar type, "
+                "link, and orphan safety were checked, but the repository, schema, "
+                "and database permissions were not checked, and no files or records "
                 "were changed."
             ),
             warnings=(_REVIEW_WARNING,),
@@ -670,6 +807,129 @@ def _command_profile_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _profile_review_decision_request(args: argparse.Namespace):  # type: ignore[no-untyped-def]
+    from grounded_apply.domain import ApprovalStatus
+    from grounded_apply.services import CreateProfileReviewDecision
+
+    decisions = {
+        "approve": ApprovalStatus.APPROVED,
+        "reject": ApprovalStatus.REJECTED,
+    }
+    decision = decisions.get(args.decision)
+    if decision is None:
+        raise CliInputError("decision must be approve or reject")
+    return CreateProfileReviewDecision(
+        claim_id=args.claim_id,
+        review_token=args.review_token,
+        decision=decision,
+        actor_id=args.actor_id,
+        idempotency_key=args.idempotency_key,
+    )
+
+
+def _command_profile_decide(args: argparse.Namespace) -> int:
+    from grounded_apply.domain import Contradiction, to_jsonable
+    from grounded_apply.services import ProfileService, ProfileReviewDecisionResult
+
+    request = _profile_review_decision_request(args)
+    if not args.confirm:
+        _emit(
+            args,
+            command="profile.decide",
+            data={
+                "actor_id": request.actor_id,
+                "claim_id": request.claim_id,
+                "decision": request.decision.value,
+                "decision_recorded": False,
+                "dry_run": True,
+                "requires_confirmation": True,
+                "storage_checked": False,
+            },
+            message=(
+                f"Validated only the input shape for a {request.decision.value} "
+                f"review-decision preview for claim {request.claim_id}. Storage was "
+                "not opened, so inspect the item with `gapply profile review`; no "
+                "decision or external action was recorded. Re-run with --confirm to "
+                "perform storage and policy checks and record this decision."
+            ),
+        )
+        return 0
+
+    paths = resolve_runtime_paths()
+    require_runtime_outside_repository(paths)
+    repository = _open_initialized_profile_repository(paths, read_only=False)
+    outcome = None
+    try:
+        outcome = ProfileService(repository).decide_review_item(request)
+    finally:
+        try:
+            repository.close()
+        except (Exception, KeyboardInterrupt) as error:
+            if isinstance(outcome, ProfileReviewDecisionResult):
+                raise PostCommitOutputError(_POST_COMMIT_DECISION_MESSAGE) from error
+            raise
+
+    if isinstance(outcome, Contradiction):
+        _emit(
+            args,
+            command="profile.decide",
+            data={
+                "conflicting_claim_ids": list(outcome.conflicting_claim_ids),
+                "decision_recorded": False,
+                "detail": outcome.detail,
+                "external_action_taken": False,
+                "intent": outcome.intent,
+                "kind": outcome.kind.value,
+                "question": outcome.question,
+                "scope": to_jsonable(outcome.requested_scope),
+            },
+            message=(
+                f"The review decision was not recorded: {outcome.question} "
+                "No external action was taken."
+            ),
+            ok=False,
+            error={
+                "message": "Profile review approval is blocked by a contradiction",
+                "type": "Contradiction",
+            },
+        )
+        return 2
+
+    if not isinstance(outcome, ProfileReviewDecisionResult):
+        raise RuntimeError("Profile review decision returned an unsupported result")
+    try:
+        decided_at = to_jsonable(outcome.decided_at)
+        _emit(
+            args,
+            command="profile.decide",
+            data={
+                "actor_id": outcome.actor_id,
+                "claim_approval_status": outcome.claim.approval_status.value,
+                "claim_id": outcome.claim.id,
+                "claim_status": outcome.claim.status.value,
+                "decided_at": decided_at,
+                "decision": outcome.decision.value,
+                "decision_recorded": True,
+                "decision_workflow_run_id": outcome.decision_workflow_run_id,
+                "dry_run": False,
+                "evidence_confirmation_status": (
+                    outcome.evidence.confirmation_status.value
+                ),
+                "evidence_id": outcome.evidence.id,
+                "external_action_taken": False,
+                "import_workflow_run_id": outcome.import_workflow_run_id,
+                "proposal_index": outcome.proposal_index,
+            },
+            message=(
+                f"Recorded the {outcome.decision.value} review decision for claim "
+                f"{outcome.claim.id}. No external action was taken."
+            ),
+        )
+    except (Exception, KeyboardInterrupt) as error:
+        raise PostCommitOutputError(_POST_COMMIT_DECISION_MESSAGE) from error
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gapply",
@@ -736,32 +996,147 @@ def build_parser() -> argparse.ArgumentParser:
         handler=_command_profile_review, command_name="profile.review"
     )
 
+    profile_decide = profile_commands.add_parser(
+        "decide",
+        help="Preview or record one explicit profile review decision.",
+        allow_abbrev=False,
+    )
+    profile_decide.add_argument("--claim-id", required=True, metavar="CLAIM_ID")
+    profile_decide.add_argument(
+        "--review-token",
+        required=True,
+        metavar="OPAQUE_TOKEN",
+        help="Opaque review token from `profile review`; do not include candidate data.",
+    )
+    profile_decide.add_argument(
+        "--decision",
+        required=True,
+        metavar="approve|reject",
+    )
+    profile_decide.add_argument(
+        "--actor-id",
+        required=True,
+        metavar="OPAQUE_ACTOR_ID",
+        help="Opaque audit actor identifier; do not include candidate data.",
+    )
+    profile_decide.add_argument(
+        "--idempotency-key",
+        required=True,
+        metavar="OPAQUE_KEY",
+        help="Opaque retry key; do not include candidate data.",
+    )
+    profile_decide.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Record the decision in private profile storage.",
+    )
+    _add_json_flag(profile_decide)
+    profile_decide.set_defaults(
+        handler=_command_profile_decide, command_name="profile.decide"
+    )
+
     return parser
+
+
+def _command_name_from_argv(argv: Sequence[str]) -> str:
+    if not argv:
+        return "unknown"
+    if argv[0] == "profile" and len(argv) > 1:
+        profile_command = argv[1]
+        if profile_command in {"init", "import", "review", "decide"}:
+            return f"profile.{profile_command}"
+    if argv[0] in {"paths", "doctor"}:
+        return argv[0]
+    return "unknown"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = tuple(sys.argv[1:] if argv is None else argv)
+    parse_stderr = io.StringIO()
+    try:
+        with redirect_stderr(parse_stderr):
+            args = parser.parse_args(raw_argv)
+    except SystemExit as error:
+        if error.code != 2:
+            captured = parse_stderr.getvalue()
+            if captured:
+                print(captured, file=sys.stderr, end="")
+            raise
+        command_name = _command_name_from_argv(raw_argv)
+        if "--json" in raw_argv:
+            parse_args = argparse.Namespace(json=True)
+            _emit(
+                parse_args,
+                command=command_name,
+                data=None,
+                error={
+                    "message": "Invalid command arguments; run the command's --help.",
+                    "type": "CliUsageError",
+                },
+                message="Invalid command arguments.",
+                ok=False,
+            )
+        elif command_name == "profile.decide":
+            print(
+                "Error: Invalid command arguments. No external action was taken.",
+                file=sys.stderr,
+            )
+        else:
+            print(parse_stderr.getvalue(), file=sys.stderr, end="")
+        return 2
     handler: Command = args.handler
     try:
         return handler(args)
     except KeyboardInterrupt:
-        print("Interrupted.", file=sys.stderr)
+        if getattr(args, "command_name", None) == "profile.decide":
+            if getattr(args, "confirm", False):
+                print(
+                    f"Interrupted. {_POST_COMMIT_DECISION_MESSAGE} "
+                    "No external action was taken.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Interrupted. No decision or external action was recorded.",
+                    file=sys.stderr,
+                )
+        else:
+            print("Interrupted.", file=sys.stderr)
         return 130
     except Exception as error:
-        if getattr(args, "json", False):
-            _emit(
-                args,
-                command=getattr(
-                    args, "command_name", getattr(args, "command", "unknown")
-                ),
-                data=None,
-                error={"message": str(error), "type": type(error).__name__},
-                message=f"Error: {error}",
-                ok=False,
+        if isinstance(error, PostCommitOutputError):
+            print(
+                f"Error: {error} No external action was taken.",
+                file=sys.stderr,
             )
+            return 2
+        if getattr(args, "json", False):
+            try:
+                _emit(
+                    args,
+                    command=getattr(
+                        args, "command_name", getattr(args, "command", "unknown")
+                    ),
+                    data=None,
+                    error={"message": str(error), "type": type(error).__name__},
+                    message=f"Error: {error}",
+                    ok=False,
+                )
+            except Exception:
+                suffix = (
+                    " No external action was taken."
+                    if getattr(args, "command_name", None) == "profile.decide"
+                    else ""
+                )
+                print(f"Error: {error}{suffix}", file=sys.stderr)
         else:
-            print(f"Error: {error}", file=sys.stderr)
+            suffix = (
+                " No external action was taken."
+                if getattr(args, "command_name", None) == "profile.decide"
+                else ""
+            )
+            print(f"Error: {error}{suffix}", file=sys.stderr)
         return 2
 
 

@@ -16,12 +16,21 @@ from unittest.mock import patch
 
 from grounded_apply import __version__
 from grounded_apply.cli import main
-from grounded_apply.domain import ApprovalStatus, SourceType
+from grounded_apply.domain import (
+    ApprovalStatus,
+    ClaimStatus,
+    Sensitivity,
+    SourceType,
+)
 from grounded_apply.repositories import SQLiteRepository
 from grounded_apply.services import (
+    CreateClaim,
+    CreateImportProposal,
     CreateProfileReviewDecision,
     PROFILE_IMPORT_EXTRACTOR_ID,
     ProfileService,
+    ProposedImportClaim,
+    TextSourceSpan,
 )
 
 
@@ -101,6 +110,41 @@ REVIEW_ITEM_KEYS = {
     "review_token",
     "usable",
 }
+DECISION_PREVIEW_KEYS = {
+    "actor_id",
+    "claim_id",
+    "decision",
+    "decision_recorded",
+    "dry_run",
+    "requires_confirmation",
+    "storage_checked",
+}
+DECISION_RESULT_KEYS = {
+    "actor_id",
+    "claim_approval_status",
+    "claim_id",
+    "claim_status",
+    "decided_at",
+    "decision",
+    "decision_recorded",
+    "decision_workflow_run_id",
+    "dry_run",
+    "evidence_confirmation_status",
+    "evidence_id",
+    "external_action_taken",
+    "import_workflow_run_id",
+    "proposal_index",
+}
+DECISION_CONTRADICTION_KEYS = {
+    "conflicting_claim_ids",
+    "decision_recorded",
+    "detail",
+    "external_action_taken",
+    "intent",
+    "kind",
+    "question",
+    "scope",
+}
 
 
 class CliTests(unittest.TestCase):
@@ -142,6 +186,93 @@ class CliTests(unittest.TestCase):
         if dry_run:
             arguments += ("--dry-run",)
         return (*arguments, "--json")
+
+    def profile_decide_arguments(
+        self,
+        *,
+        claim_id: str,
+        review_token: str,
+        decision: str = "approve",
+        actor_id: str = "synthetic-cli-reviewer",
+        idempotency_key: str = "synthetic-cli-review-decision",
+        confirm: bool = False,
+    ) -> tuple[str, ...]:
+        arguments = (
+            "profile",
+            "decide",
+            "--claim-id",
+            claim_id,
+            "--review-token",
+            review_token,
+            "--decision",
+            decision,
+            "--actor-id",
+            actor_id,
+            "--idempotency-key",
+            idempotency_key,
+        )
+        if confirm:
+            arguments += ("--confirm",)
+        return (*arguments, "--json")
+
+    def initialize_import_and_review(self, home: Path) -> list[dict[str, object]]:
+        init_result, _, _ = self.invoke(
+            "profile", "init", "--json", home=str(home)
+        )
+        import_result, _, _ = self.invoke(
+            *self.profile_import_arguments(), home=str(home)
+        )
+        review_result, review_stdout, _ = self.invoke(
+            "profile", "review", "--json", home=str(home)
+        )
+        self.assertEqual((init_result, import_result, review_result), (0, 0, 0))
+        items = json.loads(review_stdout)["data"]["items"]
+        self.assertIsInstance(items, list)
+        return items
+
+    @staticmethod
+    def create_service_import(
+        home: Path,
+        *,
+        sensitivity: Sensitivity = Sensitivity.PERSONAL,
+        idempotency_key: str = "synthetic-cli-service-import",
+    ):  # type: ignore[no-untyped-def]
+        source_text = (
+            "Synthetic document header with unrelated material.\n"
+            "Synthetic supporting evidence.\n"
+            "Synthetic document footer with unrelated material."
+        )
+        selected_text = "Synthetic supporting evidence."
+        start = source_text.index(selected_text)
+        request = CreateImportProposal(
+            idempotency_key=idempotency_key,
+            source_text=source_text,
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
+            proposals=(
+                ProposedImportClaim(
+                    claim_type="skill_use",
+                    value="Python",
+                    canonical_text="Used Python on a fictional project",
+                    sensitivity=sensitivity,
+                    span=TextSourceSpan(
+                        start=start,
+                        end=start + len(selected_text),
+                        text=selected_text,
+                    ),
+                ),
+            ),
+        )
+        database = home / "data" / "grounded_apply.db"
+        with SQLiteRepository(database, existing_only=True) as repository:
+            service = ProfileService(repository)
+            imported = service.create_import_proposal(request)
+            return next(
+                item
+                for item in service.list_review_items()
+                if item.claim.id == imported.claims[0].id
+            )
 
     def test_doctor_reports_uninitialized_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -202,6 +333,93 @@ class CliTests(unittest.TestCase):
             self.assertEqual(second["data"]["schema_version"], 2)
             self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+
+    def test_profile_init_rejects_a_dangling_config_symlink_without_writing(
+        self,
+    ) -> None:
+        commands = (
+            ("dry_run", ("profile", "init", "--dry-run", "--json")),
+            ("initialize", ("profile", "init", "--json")),
+        )
+        for command, arguments in commands:
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                home = root / "profile-home"
+                config_dir = home / "config"
+                config_dir.mkdir(mode=0o700, parents=True)
+                home.chmod(0o700)
+                config_dir.chmod(0o700)
+                outside_target = root / "synthetic-external-config.toml"
+                config = config_dir / "config.toml"
+                config.symlink_to(outside_target)
+                link_target = os.readlink(config)
+
+                result, stdout, stderr = self.invoke(
+                    *arguments,
+                    home=str(home),
+                )
+
+                payload = json.loads(stdout)
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                self.assertIn("regular non-symlink", payload["error"]["message"])
+                self.assertTrue(config.is_symlink())
+                self.assertEqual(os.readlink(config), link_target)
+                self.assertFalse(outside_target.exists())
+                self.assertFalse((home / "data").exists())
+                self.assertFalse((home / "cache").exists())
+                self.assertFalse((home / "state").exists())
+
+    def test_profile_init_rejects_other_unsafe_existing_config_files(self) -> None:
+        for case in ("hard_link", "world_readable", "directory"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                home = root / "profile-home"
+                config_dir = home / "config"
+                config_dir.mkdir(mode=0o700, parents=True)
+                home.chmod(0o700)
+                config_dir.chmod(0o700)
+                config = config_dir / "config.toml"
+                content = b"synthetic configuration bytes"
+                outside_alias: Path | None = None
+                if case == "directory":
+                    config.mkdir(mode=0o700)
+                    expected_error = "regular non-symlink"
+                else:
+                    config.write_bytes(content)
+                    config.chmod(0o600 if case == "hard_link" else 0o644)
+                    if case == "hard_link":
+                        outside_alias = root / "synthetic-config-alias.toml"
+                        os.link(config, outside_alias)
+                        expected_error = "one hard link"
+                    else:
+                        expected_error = "group or other access"
+                before = config.stat()
+
+                result, stdout, stderr = self.invoke(
+                    "profile",
+                    "init",
+                    "--json",
+                    home=str(home),
+                )
+
+                payload = json.loads(stdout)
+                after = config.stat()
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                self.assertIn(expected_error, payload["error"]["message"])
+                self.assertEqual(after.st_mode, before.st_mode)
+                self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+                self.assertFalse((home / "data").exists())
+                if case != "directory":
+                    self.assertEqual(config.read_bytes(), content)
+                if outside_alias is not None:
+                    self.assertEqual(outside_alias.read_bytes(), content)
+                    self.assertEqual(outside_alias.stat().st_ino, after.st_ino)
+                    self.assertEqual(after.st_nlink, 2)
 
     def test_profile_import_dry_run_validates_without_creating_runtime_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -338,6 +556,176 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(database.read_bytes(), before_bytes)
                 self.assertEqual(stat.S_IMODE(after_stat.st_mode), 0o644)
                 self.assertEqual(after_stat.st_mtime_ns, before_stat.st_mtime_ns)
+
+    def test_profile_commands_reject_a_multiply_linked_database_without_mutation(
+        self,
+    ) -> None:
+        synthetic_claim_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, "synthetic-hard-link-review-item")
+        )
+        commands = (
+            ("init", ("profile", "init", "--json")),
+            ("import", self.profile_import_arguments()),
+            ("review", ("profile", "review", "--json")),
+            (
+                "decide",
+                self.profile_decide_arguments(
+                    claim_id=synthetic_claim_id,
+                    review_token="a" * 64,
+                    confirm=True,
+                ),
+            ),
+        )
+        for command, arguments in commands:
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                home = root / "profile-home"
+                init_result, _, _ = self.invoke(
+                    "profile", "init", "--json", home=str(home)
+                )
+                self.assertEqual(init_result, 0)
+                if command == "review":
+                    import_result, _, _ = self.invoke(
+                        *self.profile_import_arguments(), home=str(home)
+                    )
+                    self.assertEqual(import_result, 0)
+                database = home / "data" / "grounded_apply.db"
+                outside_alias = root / "synthetic-profile-alias.db"
+                os.link(database, outside_alias)
+                before_bytes = database.read_bytes()
+                before_stat = database.stat()
+
+                result, stdout, stderr = self.invoke(*arguments, home=str(home))
+                payload = json.loads(stdout)
+                database_after = database.stat()
+                alias_after = outside_alias.stat()
+
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                self.assertIn("one hard link", payload["error"]["message"])
+                self.assertNotIn("Avery Quill", stdout)
+                self.assertEqual(database.read_bytes(), before_bytes)
+                self.assertEqual(outside_alias.read_bytes(), before_bytes)
+                self.assertEqual(database_after.st_ino, alias_after.st_ino)
+                self.assertEqual(database_after.st_nlink, 2)
+                self.assertEqual(alias_after.st_nlink, 2)
+                self.assertEqual(database_after.st_mode, before_stat.st_mode)
+                self.assertEqual(alias_after.st_mode, before_stat.st_mode)
+                self.assertEqual(database_after.st_mtime_ns, before_stat.st_mtime_ns)
+                self.assertEqual(alias_after.st_mtime_ns, before_stat.st_mtime_ns)
+                self.assertEqual(database_after.st_ctime_ns, before_stat.st_ctime_ns)
+                self.assertEqual(alias_after.st_ctime_ns, before_stat.st_ctime_ns)
+
+    def test_profile_init_rechecks_a_hard_link_created_before_database_open(
+        self,
+    ) -> None:
+        from grounded_apply import cli as cli_module
+
+        original_default_config = cli_module._ensure_default_config
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / "profile-home"
+            outside_alias = root / "synthetic-profile-alias.db"
+            content = b"synthetic external database bytes"
+            outside_alias.write_bytes(content)
+            outside_alias.chmod(0o640)
+            linked_stat: os.stat_result | None = None
+
+            def configure_then_link(paths: object) -> bool:
+                nonlocal linked_stat
+                created = original_default_config(paths)  # type: ignore[arg-type]
+                database = home / "data" / "grounded_apply.db"
+                os.link(outside_alias, database)
+                linked_stat = outside_alias.stat()
+                return created
+
+            with patch.object(
+                cli_module,
+                "_ensure_default_config",
+                side_effect=configure_then_link,
+            ):
+                result, stdout, stderr = self.invoke(
+                    "profile", "init", "--json", home=str(home)
+                )
+
+            self.assertIsNotNone(linked_stat)
+            assert linked_stat is not None
+            database = home / "data" / "grounded_apply.db"
+            database_after = database.stat()
+            alias_after = outside_alias.stat()
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertIn("one hard link", json.loads(stdout)["error"]["message"])
+            self.assertEqual(database.read_bytes(), content)
+            self.assertEqual(outside_alias.read_bytes(), content)
+            self.assertEqual(database_after.st_ino, alias_after.st_ino)
+            self.assertEqual(database_after.st_nlink, 2)
+            self.assertEqual(database_after.st_mode, linked_stat.st_mode)
+            self.assertEqual(database_after.st_mtime_ns, linked_stat.st_mtime_ns)
+            self.assertEqual(database_after.st_ctime_ns, linked_stat.st_ctime_ns)
+
+    def test_profile_import_rechecks_for_a_hard_link_created_during_input(
+        self,
+    ) -> None:
+        from grounded_apply import cli as cli_module
+
+        original_read = cli_module._read_utf8_input
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / "profile-home"
+            init_result, _, _ = self.invoke(
+                "profile", "init", "--json", home=str(home)
+            )
+            self.assertEqual(init_result, 0)
+            database = home / "data" / "grounded_apply.db"
+            outside_alias = root / "synthetic-profile-alias.db"
+            before_bytes = database.read_bytes()
+            linked = False
+            linked_stat: os.stat_result | None = None
+
+            def read_then_link(
+                location: str,
+                *,
+                label: str,
+                max_bytes: int,
+            ) -> str:
+                nonlocal linked, linked_stat
+                text = original_read(location, label=label, max_bytes=max_bytes)
+                if not linked:
+                    linked = True
+                    os.link(database, outside_alias)
+                    linked_stat = database.stat()
+                return text
+
+            with patch.object(
+                cli_module,
+                "_read_utf8_input",
+                side_effect=read_then_link,
+            ):
+                result, stdout, stderr = self.invoke(
+                    *self.profile_import_arguments(),
+                    home=str(home),
+                )
+
+            self.assertTrue(linked)
+            self.assertIsNotNone(linked_stat)
+            assert linked_stat is not None
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertIn("one hard link", json.loads(stdout)["error"]["message"])
+            database_after = database.stat()
+            alias_after = outside_alias.stat()
+            self.assertEqual(database.read_bytes(), before_bytes)
+            self.assertEqual(outside_alias.read_bytes(), before_bytes)
+            self.assertEqual(database_after.st_nlink, 2)
+            self.assertEqual(alias_after.st_nlink, 2)
+            self.assertEqual(database_after.st_mode, linked_stat.st_mode)
+            self.assertEqual(database_after.st_mtime_ns, linked_stat.st_mtime_ns)
+            self.assertEqual(database_after.st_ctime_ns, linked_stat.st_ctime_ns)
+            self.assertFalse(Path(f"{database}-journal").exists())
+            self.assertFalse(Path(f"{database}-wal").exists())
+            self.assertFalse(Path(f"{database}-shm").exists())
 
     def test_profile_import_rejects_a_database_symlink_outside_private_data(
         self,
@@ -1448,6 +1836,1019 @@ class CliTests(unittest.TestCase):
             self.assertIn("\\u001b", review_stdout)
             self.assertNotIn("\u001b", review_stderr)
 
+    def test_profile_decide_preview_is_storage_free_and_confirmable(self) -> None:
+        from grounded_apply import cli as cli_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            self.assertIsInstance(claim, dict)
+            assert isinstance(claim, dict)
+            database = home / "data" / "grounded_apply.db"
+            before_bytes = database.read_bytes()
+            before_stat = database.stat()
+            before_paths = {path.relative_to(home) for path in home.rglob("*")}
+            arguments = self.profile_decide_arguments(
+                claim_id=str(claim["id"]),
+                review_token=str(item["review_token"]),
+            )
+
+            with patch.object(
+                cli_module,
+                "resolve_runtime_paths",
+                side_effect=AssertionError("decision preview opened storage"),
+            ) as resolve_paths:
+                result, stdout, stderr = self.invoke(*arguments, home=str(home))
+
+            payload = json.loads(stdout)
+            after_stat = database.stat()
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr, "")
+            self.assertEqual(set(payload), JSON_ENVELOPE_KEYS)
+            self.assertEqual(set(payload["data"]), DECISION_PREVIEW_KEYS)
+            self.assertEqual(payload["command"], "profile.decide")
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["data"]["dry_run"])
+            self.assertFalse(payload["data"]["storage_checked"])
+            self.assertFalse(payload["data"]["decision_recorded"])
+            self.assertTrue(payload["data"]["requires_confirmation"])
+            self.assertEqual(payload["data"]["decision"], "approved")
+            self.assertNotIn(str(item["review_token"]), stdout)
+            self.assertNotIn("synthetic-cli-review-decision", stdout)
+            resolve_paths.assert_not_called()
+            self.assertEqual(database.read_bytes(), before_bytes)
+            self.assertEqual(after_stat.st_mode, before_stat.st_mode)
+            self.assertEqual(after_stat.st_mtime_ns, before_stat.st_mtime_ns)
+            self.assertEqual(after_stat.st_ctime_ns, before_stat.st_ctime_ns)
+            self.assertEqual(
+                {path.relative_to(home) for path in home.rglob("*")},
+                before_paths,
+            )
+
+            human_result, human_stdout, human_stderr = self.invoke(
+                *arguments[:-1],
+                home=str(home),
+            )
+            self.assertEqual(human_result, 0)
+            self.assertEqual(human_stderr, "")
+            self.assertIn("no decision or external action was recorded", human_stdout)
+            self.assertNotIn(str(item["review_token"]), human_stdout)
+            self.assertNotIn("synthetic-cli-review-decision", human_stdout)
+
+            confirmed_result, confirmed_stdout, confirmed_stderr = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=str(claim["id"]),
+                    review_token=str(item["review_token"]),
+                    confirm=True,
+                ),
+                home=str(home),
+            )
+            self.assertEqual(confirmed_result, 0)
+            self.assertEqual(confirmed_stderr, "")
+            self.assertTrue(json.loads(confirmed_stdout)["data"]["decision_recorded"])
+
+    def test_profile_decide_approval_is_minimized_and_exactly_idempotent(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            evidence = item["evidence"]
+            self.assertIsInstance(claim, dict)
+            self.assertIsInstance(evidence, list)
+            assert isinstance(claim, dict)
+            assert isinstance(evidence, list)
+            arguments = self.profile_decide_arguments(
+                claim_id=str(claim["id"]),
+                review_token=str(item["review_token"]),
+                confirm=True,
+            )
+
+            first_result, first_stdout, first_stderr = self.invoke(
+                *arguments,
+                home=str(home),
+            )
+            replay_result, replay_stdout, replay_stderr = self.invoke(
+                *arguments,
+                home=str(home),
+            )
+            first = json.loads(first_stdout)
+            replay = json.loads(replay_stdout)
+
+            self.assertEqual((first_result, replay_result), (0, 0))
+            self.assertEqual((first_stderr, replay_stderr), ("", ""))
+            self.assertEqual(set(first), JSON_ENVELOPE_KEYS)
+            self.assertEqual(set(first["data"]), DECISION_RESULT_KEYS)
+            self.assertEqual(replay["data"], first["data"])
+            self.assertTrue(first["data"]["decision_recorded"])
+            self.assertFalse(first["data"]["dry_run"])
+            self.assertFalse(first["data"]["external_action_taken"])
+            self.assertEqual(first["data"]["decision"], "approved")
+            self.assertEqual(first["data"]["claim_status"], "verified")
+            self.assertEqual(first["data"]["claim_approval_status"], "approved")
+            self.assertEqual(
+                first["data"]["evidence_confirmation_status"],
+                "confirmed",
+            )
+            self.assertEqual(first["data"]["claim_id"], claim["id"])
+            self.assertEqual(first["data"]["evidence_id"], evidence[0]["id"])
+            self.assertRegex(first["data"]["decided_at"], r"Z\Z")
+            for private_text in (
+                str(item["review_token"]),
+                "synthetic-cli-review-decision",
+                str(claim["canonical_text"]),
+                str(evidence[0]["source_text"]),
+                "avery.quill@example.com",
+                str(SOURCE_FILE),
+            ):
+                self.assertNotIn(private_text, first_stdout)
+
+            human_result, human_stdout, human_stderr = self.invoke(
+                *arguments[:-1],
+                home=str(home),
+            )
+            self.assertEqual(human_result, 0)
+            self.assertEqual(human_stderr, "")
+            self.assertIn("No external action was taken", human_stdout)
+            for private_text in (
+                str(item["review_token"]),
+                "synthetic-cli-review-decision",
+                str(claim["canonical_text"]),
+                str(evidence[0]["source_text"]),
+            ):
+                self.assertNotIn(private_text, human_stdout)
+
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                self.assertEqual(len(repository.list_workflow_runs()), 2)
+            review_result, review_stdout, _ = self.invoke(
+                "profile", "review", "--json", home=str(home)
+            )
+            self.assertEqual(review_result, 0)
+            review = json.loads(review_stdout)
+            self.assertEqual(review["data"]["pending_count"], 4)
+            self.assertNotIn(
+                claim["id"],
+                {candidate["claim"]["id"] for candidate in review["data"]["items"]},
+            )
+
+            changed_result, changed_stdout, changed_stderr = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=str(claim["id"]),
+                    review_token=str(item["review_token"]),
+                    actor_id="different-synthetic-cli-reviewer",
+                    confirm=True,
+                ),
+                home=str(home),
+            )
+            self.assertEqual(changed_result, 2)
+            self.assertEqual(changed_stderr, "")
+            self.assertFalse(json.loads(changed_stdout)["ok"])
+            self.assertNotIn("synthetic-cli-review-decision", changed_stdout)
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                self.assertEqual(len(repository.list_workflow_runs()), 2)
+
+    def test_profile_decide_rejection_preserves_terminal_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            self.assertIsInstance(claim, dict)
+            assert isinstance(claim, dict)
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=str(claim["id"]),
+                    review_token=str(item["review_token"]),
+                    decision="reject",
+                    idempotency_key="synthetic-cli-review-rejection",
+                    confirm=True,
+                ),
+                home=str(home),
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr, "")
+            self.assertEqual(set(payload["data"]), DECISION_RESULT_KEYS)
+            self.assertEqual(payload["data"]["decision"], "rejected")
+            self.assertEqual(payload["data"]["claim_status"], "withdrawn")
+            self.assertEqual(payload["data"]["claim_approval_status"], "rejected")
+            self.assertEqual(
+                payload["data"]["evidence_confirmation_status"],
+                "rejected",
+            )
+            self.assertFalse(payload["data"]["external_action_taken"])
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                stored_claim = repository.get_claim(str(claim["id"]))
+                self.assertIsNotNone(stored_claim)
+                assert stored_claim is not None
+                self.assertIsNone(stored_claim["verified_at"])
+                self.assertIsNone(stored_claim["verified_by"])
+
+    def test_profile_decide_wrong_token_fails_without_reserving_the_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            self.assertIsInstance(claim, dict)
+            assert isinstance(claim, dict)
+            idempotency_key = "synthetic-cli-wrong-token-decision"
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=str(claim["id"]),
+                    review_token="0" * 64,
+                    idempotency_key=idempotency_key,
+                    confirm=True,
+                ),
+                home=str(home),
+            )
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(json.loads(stdout)["ok"])
+            self.assertNotIn(idempotency_key, stdout)
+
+            human_arguments = self.profile_decide_arguments(
+                claim_id=str(claim["id"]),
+                review_token="0" * 64,
+                idempotency_key=idempotency_key,
+                confirm=True,
+            )
+            human_result, human_stdout, human_stderr = self.invoke(
+                *human_arguments[:-1],
+                home=str(home),
+            )
+            self.assertEqual(human_result, 2)
+            self.assertEqual(human_stdout, "")
+            self.assertIn("No external action was taken", human_stderr)
+            self.assertNotIn("0" * 64, human_stderr)
+            self.assertNotIn(idempotency_key, human_stderr)
+            self.assertNotIn(str(claim["canonical_text"]), human_stderr)
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                self.assertEqual(len(repository.list_workflow_runs()), 1)
+                stored_claim = repository.get_claim(str(claim["id"]))
+                self.assertIsNotNone(stored_claim)
+                assert stored_claim is not None
+                self.assertEqual(stored_claim["status"], "needs_review")
+
+            confirmed_result, confirmed_stdout, _ = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=str(claim["id"]),
+                    review_token=str(item["review_token"]),
+                    idempotency_key=idempotency_key,
+                    confirm=True,
+                ),
+                home=str(home),
+            )
+            self.assertEqual(confirmed_result, 0)
+            self.assertTrue(json.loads(confirmed_stdout)["data"]["decision_recorded"])
+
+    def test_profile_decide_sensitive_approval_fails_but_rejection_is_allowed(
+        self,
+    ) -> None:
+        for index, sensitivity in enumerate(
+            (Sensitivity.CONFIDENTIAL, Sensitivity.HIGHLY_SENSITIVE)
+        ):
+            with self.subTest(sensitivity=sensitivity), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve() / "profile-home"
+                init_result, _, _ = self.invoke(
+                    "profile", "init", "--json", home=str(home)
+                )
+                self.assertEqual(init_result, 0)
+                item = self.create_service_import(
+                    home,
+                    sensitivity=sensitivity,
+                    idempotency_key=f"synthetic-cli-sensitive-import-{index}",
+                )
+                private_text = item.claim.canonical_text
+
+                result, stdout, stderr = self.invoke(
+                    *self.profile_decide_arguments(
+                        claim_id=item.claim.id,
+                        review_token=str(item.review_token),
+                        idempotency_key=f"synthetic-cli-sensitive-approval-{index}",
+                        confirm=True,
+                    ),
+                    home=str(home),
+                )
+
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(json.loads(stdout)["ok"])
+                self.assertNotIn(private_text, stdout)
+                with SQLiteRepository(
+                    home / "data" / "grounded_apply.db",
+                    read_only=True,
+                ) as repository:
+                    self.assertEqual(len(repository.list_workflow_runs()), 1)
+                    stored_claim = repository.get_claim(item.claim.id)
+                    self.assertIsNotNone(stored_claim)
+                    assert stored_claim is not None
+                    self.assertEqual(stored_claim["status"], "needs_review")
+
+                reject_result, reject_stdout, _ = self.invoke(
+                    *self.profile_decide_arguments(
+                        claim_id=item.claim.id,
+                        review_token=str(item.review_token),
+                        decision="reject",
+                        idempotency_key=f"synthetic-cli-sensitive-rejection-{index}",
+                        confirm=True,
+                    ),
+                    home=str(home),
+                )
+                self.assertEqual(reject_result, 0)
+                rejected = json.loads(reject_stdout)
+                self.assertEqual(rejected["data"]["decision"], "rejected")
+                self.assertNotIn(private_text, reject_stdout)
+
+    def test_profile_decide_public_contradiction_is_structured_and_minimized(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            self.assertIsInstance(claim, dict)
+            assert isinstance(claim, dict)
+            conflict_value = "SYNTHETIC_PUBLIC_CONFLICT_VALUE_4DP"
+            conflict_text = "SYNTHETIC_PUBLIC_CONFLICT_CANONICAL_5EQ"
+            conflict_ref = "synthetic-public-conflict-ref-6fr"
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                existing_only=True,
+            ) as repository:
+                conflicting = ProfileService(repository).create_claim(
+                    CreateClaim(
+                        claim_type=str(claim["claim_type"]),
+                        value=conflict_value,
+                        canonical_text=conflict_text,
+                        subject_type=str(claim["subject_type"]),
+                        subject_id=claim["subject_id"],  # type: ignore[arg-type]
+                        source_type=SourceType.USER_STATEMENT,
+                        source_ref=conflict_ref,
+                        status=ClaimStatus.CONTRADICTED,
+                        approval_status=ApprovalStatus.REJECTED,
+                        sensitivity=Sensitivity.PUBLIC,
+                    )
+                )
+                workflow_count = len(repository.list_workflow_runs())
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=str(claim["id"]),
+                    review_token=str(item["review_token"]),
+                    confirm=True,
+                ),
+                home=str(home),
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "Contradiction")
+            self.assertEqual(set(payload["data"]), DECISION_CONTRADICTION_KEYS)
+            self.assertFalse(payload["data"]["decision_recorded"])
+            self.assertFalse(payload["data"]["external_action_taken"])
+            self.assertEqual(
+                payload["data"]["conflicting_claim_ids"],
+                [conflicting.id],
+            )
+            for omitted in (conflict_value, conflict_text, conflict_ref):
+                self.assertNotIn(omitted, stdout)
+
+            human_arguments = self.profile_decide_arguments(
+                claim_id=str(claim["id"]),
+                review_token=str(item["review_token"]),
+                confirm=True,
+            )
+            human_result, human_stdout, human_stderr = self.invoke(
+                *human_arguments[:-1],
+                home=str(home),
+            )
+            self.assertEqual(human_result, 2)
+            self.assertEqual(human_stderr, "")
+            self.assertIn("No external action was taken", human_stdout)
+            self.assertNotIn(str(item["review_token"]), human_stdout)
+            self.assertNotIn("synthetic-cli-review-decision", human_stdout)
+            for omitted in (conflict_value, conflict_text, conflict_ref):
+                self.assertNotIn(omitted, human_stdout)
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                self.assertEqual(len(repository.list_workflow_runs()), workflow_count)
+                stored_claim = repository.get_claim(str(claim["id"]))
+                self.assertIsNotNone(stored_claim)
+                assert stored_claim is not None
+                self.assertEqual(stored_claim["status"], "needs_review")
+
+    def test_profile_decide_private_contradiction_is_not_disclosed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            self.assertIsInstance(claim, dict)
+            assert isinstance(claim, dict)
+            private_value = "SYNTHETIC_PRIVATE_CONFLICT_VALUE_7GS"
+            private_text = "SYNTHETIC_PRIVATE_CONFLICT_CANONICAL_8HT"
+            private_ref = "synthetic-private-conflict-ref-9iu"
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                existing_only=True,
+            ) as repository:
+                ProfileService(repository).create_claim(
+                    CreateClaim(
+                        claim_type=str(claim["claim_type"]),
+                        value=private_value,
+                        canonical_text=private_text,
+                        subject_type=str(claim["subject_type"]),
+                        subject_id=claim["subject_id"],  # type: ignore[arg-type]
+                        source_type=SourceType.USER_STATEMENT,
+                        source_ref=private_ref,
+                        status=ClaimStatus.CONTRADICTED,
+                        approval_status=ApprovalStatus.REJECTED,
+                        sensitivity=Sensitivity.HIGHLY_SENSITIVE,
+                    )
+                )
+                workflow_count = len(repository.list_workflow_runs())
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=str(claim["id"]),
+                    review_token=str(item["review_token"]),
+                    confirm=True,
+                ),
+                home=str(home),
+            )
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(json.loads(stdout)["ok"])
+            for omitted in (private_value, private_text, private_ref):
+                self.assertNotIn(omitted, stdout)
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                self.assertEqual(len(repository.list_workflow_runs()), workflow_count)
+
+    def test_profile_decide_confirm_requires_initialized_storage_without_writing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "not-created"
+            claim_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "synthetic-cli-review-item"))
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=claim_id,
+                    review_token="a" * 64,
+                    confirm=True,
+                ),
+                home=str(home),
+            )
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(json.loads(stdout)["ok"])
+            self.assertFalse(home.exists())
+
+    def test_profile_decide_unconfirmed_input_validation_does_not_require_an_item(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "not-created"
+            claim_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "synthetic-missing-review-item"))
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=claim_id,
+                    review_token="a" * 64,
+                ),
+                home=str(home),
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr, "")
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["data"]["dry_run"])
+            self.assertFalse(payload["data"]["storage_checked"])
+            self.assertFalse(payload["data"]["decision_recorded"])
+            self.assertFalse(home.exists())
+
+    def test_profile_decide_invalid_action_uses_the_json_error_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "not-created"
+            claim_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "synthetic-invalid-action"))
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_decide_arguments(
+                    claim_id=claim_id,
+                    review_token="a" * 64,
+                    decision="approved",
+                ),
+                home=str(home),
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertEqual(set(payload), JSON_ENVELOPE_KEYS)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["type"], "CliInputError")
+            self.assertNotIn("a" * 64, stdout)
+            self.assertFalse(home.exists())
+
+    def test_profile_decide_parser_errors_use_a_non_disclosing_json_contract(
+        self,
+    ) -> None:
+        claim_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "synthetic-parser-error"))
+        secret = "SYNTHETIC_PARSER_VALUE_MUST_NOT_BE_ECHOED"
+        cases = (
+            (
+                "missing_required_option",
+                (
+                    "profile",
+                    "decide",
+                    "--claim-id",
+                    claim_id,
+                    "--review-token",
+                    "a" * 64,
+                    "--decision",
+                    "approve",
+                    "--actor-id",
+                    "synthetic-parser-reviewer",
+                    "--json",
+                ),
+            ),
+            (
+                "unknown_option",
+                (
+                    *self.profile_decide_arguments(
+                        claim_id=claim_id,
+                        review_token="a" * 64,
+                    ),
+                    "--synthetic-unknown-option",
+                    secret,
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "not-created"
+            for case, arguments in cases:
+                with self.subTest(case=case):
+                    result, stdout, stderr = self.invoke(
+                        *arguments,
+                        home=str(home),
+                    )
+                    payload = json.loads(stdout)
+
+                    self.assertEqual(result, 2)
+                    self.assertEqual(stderr, "")
+                    self.assertEqual(set(payload), JSON_ENVELOPE_KEYS)
+                    self.assertEqual(payload["command"], "profile.decide")
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["error"]["type"], "CliUsageError")
+                    self.assertNotIn(secret, stdout)
+                    self.assertNotIn("a" * 64, stdout)
+                    self.assertFalse(home.exists())
+
+            human_arguments = self.profile_decide_arguments(
+                claim_id=claim_id,
+                review_token="a" * 64,
+            )
+            human_result, human_stdout, human_stderr = self.invoke(
+                *human_arguments[:-1],
+                "--synthetic-unknown-option",
+                secret,
+                home=str(home),
+            )
+            self.assertEqual(human_result, 2)
+            self.assertEqual(human_stdout, "")
+            self.assertIn("No external action was taken", human_stderr)
+            self.assertNotIn(secret, human_stderr)
+            self.assertNotIn("a" * 64, human_stderr)
+            self.assertNotIn("synthetic-cli-review-decision", human_stderr)
+
+    def test_profile_decide_output_failure_is_recoverable_by_exact_retry(self) -> None:
+        from grounded_apply import cli as cli_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            self.assertIsInstance(claim, dict)
+            assert isinstance(claim, dict)
+            arguments = self.profile_decide_arguments(
+                claim_id=str(claim["id"]),
+                review_token=str(item["review_token"]),
+                idempotency_key="synthetic-cli-output-retry",
+                confirm=True,
+            )
+            original_emit = cli_module._emit
+            failed = False
+            partial_output = '{"command":"profile.decide","partial":'
+
+            def fail_after_commit(*emit_args: object, **emit_kwargs: object) -> None:
+                nonlocal failed
+                data = emit_kwargs.get("data")
+                if (
+                    not failed
+                    and emit_kwargs.get("command") == "profile.decide"
+                    and isinstance(data, dict)
+                    and data.get("decision_recorded") is True
+                ):
+                    failed = True
+                    print(partial_output, end="")
+                    raise OSError("synthetic decision output failure")
+                original_emit(*emit_args, **emit_kwargs)  # type: ignore[arg-type]
+
+            with patch.object(cli_module, "_emit", side_effect=fail_after_commit):
+                failed_result, failed_stdout, failed_stderr = self.invoke(
+                    *arguments,
+                    home=str(home),
+                )
+
+            self.assertTrue(failed)
+            self.assertEqual(failed_result, 2)
+            self.assertEqual(failed_stdout, partial_output)
+            self.assertIn("may already be recorded", failed_stderr)
+            self.assertIn("exact same confirmed request", failed_stderr)
+            self.assertIn("No external action was taken", failed_stderr)
+            self.assertEqual(failed_stdout.count("profile.decide"), 1)
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                workflows = repository.list_workflow_runs(
+                    workflow_type="profile_import_review_decision"
+                )
+                self.assertEqual(len(workflows), 1)
+                committed = workflows[0]
+                review_item = repository.get_profile_import_review_item(str(claim["id"]))
+                self.assertIsNotNone(review_item)
+                assert review_item is not None
+                self.assertEqual(committed["status"], "succeeded")
+                self.assertEqual(
+                    committed["id"],
+                    review_item["decision_workflow_run_id"],
+                )
+                committed_decided_at = review_item["decided_at"]
+
+            retry_result, retry_stdout, retry_stderr = self.invoke(
+                *arguments,
+                home=str(home),
+            )
+            retry = json.loads(retry_stdout)
+            self.assertEqual(retry_result, 0)
+            self.assertEqual(retry_stderr, "")
+            self.assertTrue(retry["data"]["decision_recorded"])
+            self.assertEqual(retry["data"]["decision_workflow_run_id"], committed["id"])
+            self.assertEqual(retry["data"]["decided_at"], committed_decided_at)
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                self.assertEqual(len(repository.list_workflow_runs()), 2)
+
+    def test_profile_decide_persistent_output_failure_falls_back_safely(self) -> None:
+        from grounded_apply import cli as cli_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            self.assertIsInstance(claim, dict)
+            assert isinstance(claim, dict)
+            arguments = self.profile_decide_arguments(
+                claim_id=str(claim["id"]),
+                review_token=str(item["review_token"]),
+                idempotency_key="synthetic-cli-persistent-output-retry",
+                confirm=True,
+            )
+
+            with patch.object(
+                cli_module,
+                "_emit",
+                side_effect=OSError("synthetic persistent output failure"),
+            ):
+                result, stdout, stderr = self.invoke(*arguments, home=str(home))
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stdout, "")
+            self.assertIn("may already be recorded", stderr)
+            self.assertIn("exact same confirmed request", stderr)
+            self.assertIn("No external action was taken", stderr)
+            self.assertNotIn(str(item["review_token"]), stderr)
+            self.assertNotIn("synthetic-cli-persistent-output-retry", stderr)
+            self.assertNotIn(str(claim["canonical_text"]), stderr)
+
+            retry_result, retry_stdout, retry_stderr = self.invoke(
+                *arguments,
+                home=str(home),
+            )
+            retry = json.loads(retry_stdout)
+            self.assertEqual(retry_result, 0)
+            self.assertEqual(retry_stderr, "")
+            self.assertTrue(retry["data"]["decision_recorded"])
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                self.assertEqual(len(repository.list_workflow_runs()), 2)
+
+    def test_profile_decide_close_failure_after_commit_is_recoverable(self) -> None:
+        from grounded_apply import cli as cli_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            self.assertIsInstance(claim, dict)
+            assert isinstance(claim, dict)
+            arguments = self.profile_decide_arguments(
+                claim_id=str(claim["id"]),
+                review_token=str(item["review_token"]),
+                idempotency_key="synthetic-cli-close-output-retry",
+                confirm=True,
+            )
+            repository = SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                existing_only=True,
+            ).initialize()
+            original_close = repository.close
+
+            def close_then_fail() -> None:
+                original_close()
+                raise OSError("synthetic close reporting failure")
+
+            with (
+                patch.object(
+                    cli_module,
+                    "_open_initialized_profile_repository",
+                    return_value=repository,
+                ),
+                patch.object(repository, "close", side_effect=close_then_fail),
+            ):
+                result, stdout, stderr = self.invoke(*arguments, home=str(home))
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stdout, "")
+            self.assertIn("may already be recorded", stderr)
+            self.assertIn("exact same confirmed request", stderr)
+            self.assertIn("No external action was taken", stderr)
+
+            retry_result, retry_stdout, retry_stderr = self.invoke(
+                *arguments,
+                home=str(home),
+            )
+            retry = json.loads(retry_stdout)
+            self.assertEqual(retry_result, 0)
+            self.assertEqual(retry_stderr, "")
+            self.assertTrue(retry["data"]["decision_recorded"])
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as stored:
+                self.assertEqual(len(stored.list_workflow_runs()), 2)
+
+    def test_profile_decide_interruption_after_commit_gives_exact_retry_guidance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve() / "profile-home"
+            item = self.initialize_import_and_review(home)[0]
+            claim = item["claim"]
+            self.assertIsInstance(claim, dict)
+            assert isinstance(claim, dict)
+            arguments = self.profile_decide_arguments(
+                claim_id=str(claim["id"]),
+                review_token=str(item["review_token"]),
+                idempotency_key="synthetic-cli-interrupted-output-retry",
+                confirm=True,
+            )
+            original_decide = ProfileService.decide_review_item
+
+            def commit_then_interrupt(
+                service: ProfileService,
+                request: CreateProfileReviewDecision,
+            ) -> object:
+                original_decide(service, request)
+                raise KeyboardInterrupt
+
+            with patch.object(
+                ProfileService,
+                "decide_review_item",
+                autospec=True,
+                side_effect=commit_then_interrupt,
+            ):
+                result, stdout, stderr = self.invoke(*arguments, home=str(home))
+
+            self.assertEqual(result, 130)
+            self.assertEqual(stdout, "")
+            self.assertIn("may already be recorded", stderr)
+            self.assertIn("exact same confirmed request", stderr)
+            self.assertIn("No external action was taken", stderr)
+            self.assertNotIn(str(item["review_token"]), stderr)
+            self.assertNotIn("synthetic-cli-interrupted-output-retry", stderr)
+            self.assertNotIn(str(claim["canonical_text"]), stderr)
+
+            retry_result, retry_stdout, retry_stderr = self.invoke(
+                *arguments,
+                home=str(home),
+            )
+            retry = json.loads(retry_stdout)
+            self.assertEqual(retry_result, 0)
+            self.assertEqual(retry_stderr, "")
+            self.assertTrue(retry["data"]["decision_recorded"])
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as stored:
+                self.assertEqual(len(stored.list_workflow_runs()), 2)
+
+    def test_profile_decide_help_exposes_no_override_or_external_action(self) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as raised:
+            main(("profile", "decide", "--help"))
+
+        help_text = stdout.getvalue()
+        self.assertEqual(raised.exception.code, 0)
+        for forbidden in (
+            "--all",
+            "--decided-at",
+            "--edit",
+            "--evidence",
+            "--force",
+            "--sensitivity",
+            "--submit",
+            "--value",
+        ):
+            self.assertNotIn(forbidden, help_text)
+        for required in (
+            "--actor-id",
+            "--claim-id",
+            "--confirm",
+            "--decision",
+            "--idempotency-key",
+            "--review-token",
+        ):
+            self.assertIn(required, help_text)
+        self.assertIn("OPAQUE_ACTOR_ID", help_text)
+        self.assertIn("OPAQUE_KEY", help_text)
+        self.assertIn("OPAQUE_TOKEN", help_text)
+        normalized_help = " ".join(help_text.split())
+        self.assertGreaterEqual(normalized_help.count("do not include candidate data"), 3)
+
+    def test_profile_decide_does_not_abbreviate_the_confirmation_gate(self) -> None:
+        from grounded_apply import cli as cli_module
+
+        claim_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "synthetic-abbreviated-confirm"))
+        arguments = self.profile_decide_arguments(
+            claim_id=claim_id,
+            review_token="a" * 64,
+        )
+        without_json = arguments[:-1]
+        for abbreviation in ("--conf", "--confi"):
+            with self.subTest(abbreviation=abbreviation):
+                with (
+                    redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    cli_module.build_parser().parse_args(
+                        (*without_json, abbreviation, "--json")
+                    )
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_profile_review_and_doctor_do_not_touch_active_wal_sidecars(self) -> None:
+        for command, arguments in (
+            ("review", ("profile", "review", "--json")),
+            ("doctor", ("doctor", "--json")),
+        ):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve() / "profile-home"
+                init_result, _, _ = self.invoke(
+                    "profile", "init", "--json", home=str(home)
+                )
+                self.assertEqual(init_result, 0)
+                database = home / "data" / "grounded_apply.db"
+                with closing(sqlite3.connect(database)) as connection:
+                    journal_mode = connection.execute(
+                        "PRAGMA journal_mode = WAL"
+                    ).fetchone()
+                    self.assertIsNotNone(journal_mode)
+                    assert journal_mode is not None
+                    self.assertEqual(str(journal_mode[0]).lower(), "wal")
+                    connection.execute(
+                        "CREATE TABLE synthetic_wal_probe (value TEXT NOT NULL)"
+                    )
+                    connection.execute(
+                        "INSERT INTO synthetic_wal_probe (value) VALUES (?)",
+                        ("synthetic WAL state",),
+                    )
+                    connection.commit()
+                    wal = Path(f"{database}-wal")
+                    shared_memory = Path(f"{database}-shm")
+                    self.assertTrue(wal.is_file())
+                    self.assertTrue(shared_memory.is_file())
+                    snapshots = {
+                        path: (path.read_bytes(), path.stat())
+                        for path in (database, wal, shared_memory)
+                    }
+
+                    result, stdout, stderr = self.invoke(
+                        *arguments,
+                        home=str(home),
+                    )
+
+                    payload = json.loads(stdout)
+                    self.assertEqual(result, 2)
+                    self.assertEqual(stderr, "")
+                    self.assertFalse(payload["ok"])
+                    self.assertIn("sidecar", json.dumps(payload).lower())
+                    for path, (content, before) in snapshots.items():
+                        after = path.stat()
+                        self.assertEqual(path.read_bytes(), content)
+                        self.assertEqual(after.st_mode, before.st_mode)
+                        self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                        self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+
+    def test_profile_review_and_doctor_reject_closed_persistent_wal_without_writes(
+        self,
+    ) -> None:
+        for command, arguments in (
+            ("review", ("profile", "review", "--json")),
+            ("doctor", ("doctor", "--json")),
+        ):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve() / "profile-home"
+                init_result, _, _ = self.invoke(
+                    "profile", "init", "--json", home=str(home)
+                )
+                self.assertEqual(init_result, 0)
+                database = home / "data" / "grounded_apply.db"
+                with closing(sqlite3.connect(database)) as connection:
+                    journal_mode = connection.execute(
+                        "PRAGMA journal_mode = WAL"
+                    ).fetchone()
+                    self.assertIsNotNone(journal_mode)
+                    assert journal_mode is not None
+                    self.assertEqual(str(journal_mode[0]).lower(), "wal")
+                    connection.execute(
+                        "CREATE TABLE synthetic_closed_wal_probe (value TEXT NOT NULL)"
+                    )
+                    connection.execute(
+                        "INSERT INTO synthetic_closed_wal_probe (value) VALUES (?)",
+                        ("synthetic closed WAL state",),
+                    )
+                    connection.commit()
+                wal = Path(f"{database}-wal")
+                shared_memory = Path(f"{database}-shm")
+                self.assertFalse(wal.exists())
+                self.assertFalse(shared_memory.exists())
+                before_bytes = database.read_bytes()
+                before = database.stat()
+                before_paths = {path.relative_to(home) for path in home.rglob("*")}
+
+                result, stdout, stderr = self.invoke(
+                    *arguments,
+                    home=str(home),
+                )
+
+                payload = json.loads(stdout)
+                after = database.stat()
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                self.assertIn("persistent sqlite wal", json.dumps(payload).lower())
+                self.assertEqual(database.read_bytes(), before_bytes)
+                self.assertEqual(after.st_mode, before.st_mode)
+                self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+                self.assertFalse(wal.exists())
+                self.assertFalse(shared_memory.exists())
+                self.assertEqual(
+                    {path.relative_to(home) for path in home.rglob("*")},
+                    before_paths,
+                )
+
     def test_doctor_rejects_runtime_paths_inside_checkout(self) -> None:
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -1473,9 +2874,12 @@ class CliTests(unittest.TestCase):
             home = Path(directory) / "profile-home"
             database = home / "data" / "grounded_apply.db"
             database.parent.mkdir(parents=True)
+            home.chmod(0o700)
+            database.parent.chmod(0o700)
             connection = sqlite3.connect(database)
             connection.execute("PRAGMA user_version = 999")
             connection.close()
+            database.chmod(0o600)
 
             result, stdout, _ = self.invoke("doctor", "--json", home=str(home))
             payload = json.loads(stdout)
@@ -1489,10 +2893,13 @@ class CliTests(unittest.TestCase):
             home = Path(directory) / "profile-home"
             database = home / "data" / "grounded_apply.db"
             database.parent.mkdir(parents=True)
+            home.chmod(0o700)
+            database.parent.chmod(0o700)
             connection = sqlite3.connect(database)
             connection.execute("CREATE TABLE unknown_personal_data (value TEXT)")
             connection.commit()
             connection.close()
+            database.chmod(0o600)
 
             result, stdout, _ = self.invoke("doctor", "--json", home=str(home))
             payload = json.loads(stdout)
@@ -1500,6 +2907,303 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result, 2)
             self.assertFalse(payload["ok"])
             self.assertIn("unversioned schema", payload["data"]["checks"]["database"]["error"])
+
+    def test_doctor_does_not_inspect_a_multiply_linked_database(self) -> None:
+        from grounded_apply import cli as cli_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / "profile-home"
+            init_result, _, _ = self.invoke(
+                "profile", "init", "--json", home=str(home)
+            )
+            self.assertEqual(init_result, 0)
+            database = home / "data" / "grounded_apply.db"
+            outside_alias = root / "synthetic-profile-alias.db"
+            os.link(database, outside_alias)
+            before = database.stat()
+            before_bytes = database.read_bytes()
+
+            with patch.object(
+                cli_module,
+                "_read_schema_version",
+                side_effect=AssertionError("unsafe database was inspected"),
+            ) as read_schema:
+                result, stdout, stderr = self.invoke(
+                    "doctor", "--json", home=str(home)
+                )
+
+            payload = json.loads(stdout)
+            after = database.stat()
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["data"]["checks"]["runtime_home"]["ok"])
+            self.assertFalse(payload["data"]["checks"]["database"]["ok"])
+            self.assertIsNone(
+                payload["data"]["checks"]["database"]["initialized"]
+            )
+            self.assertIn(
+                "inspection was skipped",
+                payload["data"]["checks"]["database"]["error"],
+            )
+            read_schema.assert_not_called()
+            self.assertEqual(database.read_bytes(), before_bytes)
+            self.assertEqual(outside_alias.read_bytes(), before_bytes)
+            self.assertEqual(after.st_mode, before.st_mode)
+            self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+
+    def test_commands_reject_a_nonregular_database_before_storage_access(self) -> None:
+        from grounded_apply import cli as cli_module
+
+        claim_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "synthetic-directory-database"))
+        commands = (
+            ("init", ("profile", "init", "--json")),
+            ("init_dry_run", ("profile", "init", "--dry-run", "--json")),
+            ("import", self.profile_import_arguments()),
+            ("import_dry_run", self.profile_import_arguments(dry_run=True)),
+            ("review", ("profile", "review", "--json")),
+            (
+                "decide",
+                self.profile_decide_arguments(
+                    claim_id=claim_id,
+                    review_token="a" * 64,
+                    confirm=True,
+                ),
+            ),
+            ("doctor", ("doctor", "--json")),
+        )
+        for command, arguments in commands:
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory).resolve() / "profile-home"
+                data_dir = home / "data"
+                data_dir.mkdir(mode=0o700, parents=True)
+                home.chmod(0o700)
+                data_dir.chmod(0o700)
+                database = data_dir / "grounded_apply.db"
+                database.mkdir(mode=0o700)
+                sentinel = database / "synthetic-sentinel.txt"
+                content = "SYNTHETIC DIRECTORY DATABASE CONTENT"
+                sentinel.write_text(content, encoding="utf-8")
+                before = database.stat()
+
+                with (
+                    patch.object(
+                        cli_module,
+                        "_repository_for",
+                        side_effect=AssertionError("nonregular database reached SQLite"),
+                    ) as repository_for,
+                    patch.object(
+                        cli_module,
+                        "_read_schema_version",
+                        side_effect=AssertionError("nonregular database was inspected"),
+                    ) as read_schema,
+                ):
+                    result, stdout, stderr = self.invoke(
+                        *arguments,
+                        home=str(home),
+                    )
+
+                payload = json.loads(stdout)
+                after = database.stat()
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                self.assertIn("regular non-symlink", json.dumps(payload))
+                repository_for.assert_not_called()
+                read_schema.assert_not_called()
+                self.assertTrue(database.is_dir())
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), content)
+                self.assertEqual(after.st_mode, before.st_mode)
+                self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+                self.assertFalse((home / "config").exists())
+
+    def test_repository_open_rechecks_a_hard_link_added_during_connect(self) -> None:
+        from grounded_apply.repositories import sqlite as sqlite_module
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / "profile-home"
+            init_result, _, _ = self.invoke(
+                "profile", "init", "--json", home=str(home)
+            )
+            self.assertEqual(init_result, 0)
+            database = home / "data" / "grounded_apply.db"
+            outside_alias = root / "synthetic-connect-race-alias.db"
+            before_bytes = database.read_bytes()
+            before = database.stat()
+            original_connect = sqlite_module.sqlite3.connect
+
+            def connect_then_link(*args: object, **kwargs: object) -> sqlite3.Connection:
+                connection = original_connect(*args, **kwargs)  # type: ignore[arg-type]
+                os.link(database, outside_alias)
+                return connection
+
+            with patch.object(
+                sqlite_module.sqlite3,
+                "connect",
+                side_effect=connect_then_link,
+            ):
+                result, stdout, stderr = self.invoke(
+                    *self.profile_import_arguments(),
+                    home=str(home),
+                )
+
+            payload = json.loads(stdout)
+            after = database.stat()
+            alias_after = outside_alias.stat()
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(payload["ok"])
+            self.assertIn("one hard link", payload["error"]["message"])
+            self.assertEqual(database.read_bytes(), before_bytes)
+            self.assertEqual(outside_alias.read_bytes(), before_bytes)
+            self.assertEqual(after.st_ino, alias_after.st_ino)
+            self.assertEqual(after.st_nlink, 2)
+            self.assertEqual(after.st_mode, before.st_mode)
+            self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+            with closing(
+                original_connect(f"file:{database}?mode=ro", uri=True)
+            ) as connection:
+                workflow_count = connection.execute(
+                    "SELECT count(*) FROM workflow_runs"
+                ).fetchone()
+                self.assertIsNotNone(workflow_count)
+                assert workflow_count is not None
+                self.assertEqual(workflow_count[0], 0)
+
+    def test_commands_do_not_open_a_database_with_an_unsafe_sqlite_sidecar(
+        self,
+    ) -> None:
+        from grounded_apply import cli as cli_module
+
+        synthetic_claim_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, "synthetic-sidecar-review-item")
+        )
+        commands = (
+            ("init", ("profile", "init", "--json")),
+            ("import", self.profile_import_arguments()),
+            ("review", ("profile", "review", "--json")),
+            (
+                "decide",
+                self.profile_decide_arguments(
+                    claim_id=synthetic_claim_id,
+                    review_token="a" * 64,
+                    confirm=True,
+                ),
+            ),
+            ("doctor", ("doctor", "--json")),
+        )
+        for command, arguments in commands:
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                home = root / "profile-home"
+                init_result, _, _ = self.invoke(
+                    "profile", "init", "--json", home=str(home)
+                )
+                self.assertEqual(init_result, 0)
+                database = home / "data" / "grounded_apply.db"
+                sidecar = Path(f"{database}-journal")
+                content = b"synthetic unsafe rollback journal bytes"
+                sidecar.write_bytes(content)
+                sidecar.chmod(0o600)
+                outside_alias = root / "synthetic-profile-journal-alias"
+                os.link(sidecar, outside_alias)
+                before = sidecar.stat()
+
+                with (
+                    patch.object(
+                        cli_module,
+                        "_repository_for",
+                        side_effect=AssertionError("unsafe database was opened"),
+                    ) as repository_for,
+                    patch.object(
+                        cli_module,
+                        "_read_schema_version",
+                        side_effect=AssertionError("unsafe database was inspected"),
+                    ) as read_schema,
+                ):
+                    result, stdout, stderr = self.invoke(
+                        *arguments,
+                        home=str(home),
+                    )
+
+                payload = json.loads(stdout)
+                sidecar_after = sidecar.stat()
+                alias_after = outside_alias.stat()
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                self.assertIn("sidecar", json.dumps(payload).lower())
+                repository_for.assert_not_called()
+                read_schema.assert_not_called()
+                self.assertEqual(sidecar.read_bytes(), content)
+                self.assertEqual(outside_alias.read_bytes(), content)
+                self.assertEqual(sidecar_after.st_ino, alias_after.st_ino)
+                self.assertEqual(sidecar_after.st_nlink, 2)
+                self.assertEqual(sidecar_after.st_mode, before.st_mode)
+                self.assertEqual(sidecar_after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(sidecar_after.st_ctime_ns, before.st_ctime_ns)
+
+    def test_commands_reject_orphan_sqlite_sidecars_before_storage_access(
+        self,
+    ) -> None:
+        from grounded_apply import cli as cli_module
+
+        commands = (
+            ("init", ("profile", "init", "--json")),
+            ("init_dry_run", ("profile", "init", "--dry-run", "--json")),
+            ("import_dry_run", self.profile_import_arguments(dry_run=True)),
+            ("doctor", ("doctor", "--json")),
+        )
+        for command, arguments in commands:
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                home = root / "profile-home"
+                data_dir = home / "data"
+                data_dir.mkdir(mode=0o700, parents=True)
+                home.chmod(0o700)
+                data_dir.chmod(0o700)
+                database = data_dir / "grounded_apply.db"
+                sidecar = Path(f"{database}-journal")
+                content = b"synthetic orphan rollback journal bytes"
+                sidecar.write_bytes(content)
+                sidecar.chmod(0o600)
+                before = sidecar.stat()
+
+                with (
+                    patch.object(
+                        cli_module,
+                        "_repository_for",
+                        side_effect=AssertionError("orphan sidecar reached SQLite"),
+                    ) as repository_for,
+                    patch.object(
+                        cli_module,
+                        "_read_schema_version",
+                        side_effect=AssertionError("orphan sidecar was inspected"),
+                    ) as read_schema,
+                ):
+                    result, stdout, stderr = self.invoke(
+                        *arguments,
+                        home=str(home),
+                    )
+
+                payload = json.loads(stdout)
+                after = sidecar.stat()
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                self.assertIn("sidecar", json.dumps(payload).lower())
+                repository_for.assert_not_called()
+                read_schema.assert_not_called()
+                self.assertFalse(database.exists())
+                self.assertEqual(sidecar.read_bytes(), content)
+                self.assertEqual(after.st_mode, before.st_mode)
+                self.assertEqual(after.st_mtime_ns, before.st_mtime_ns)
+                self.assertEqual(after.st_ctime_ns, before.st_ctime_ns)
+                self.assertFalse((home / "config").exists())
 
     def test_nested_command_error_keeps_the_stable_json_envelope(self) -> None:
         checkout = Path(__file__).resolve().parents[1]
