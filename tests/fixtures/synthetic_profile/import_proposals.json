@@ -1,7 +1,6 @@
 {
-  "schema_version": 1,
-  "source_ref": "fixture://synthetic-profile/avery-quill/resume.txt",
-  "extraction_method": "synthetic-fixture@1",
+  "schema_version": 2,
+  "source_sha256": "33f8b29af13f811ab2828217ea2cee1c77935dc5a496623acfbaa237979d83a3",
   "span_index_base": 0,
   "span_unit": "unicode_codepoint",
   "span_end": "exclusive",

@@ -92,29 +92,54 @@ no inline command-line option. Dry-run performs persistence-independent request
 validation and reports `storage_checked: false`; it does not create or open
 profile storage. A real import requires an earlier `profile init`, remains
 idempotent under its opaque key, and creates only pending, unusable records.
-Every allowed claim type has a closed schema-version-1 value shape. Before any
-storage transaction, the service snapshots all nested request state and validates
-the whole batch with deterministic high-confidence checks over persisted claim
-content and import metadata, including fixed-point percent decoding,
-fragmented-content checks, evidence bounds, and normalized/alphanumeric
-whole-source guards. These checks are defense in depth, not complete secret or
-PII classification.
-The value-schema and content-policy versions are recorded in workflow audit data
-and participate in idempotency identity.
-Unselected raw source text is not persisted or globally sensitive-pattern
-scanned. To prevent an answer-only span from hiding its label, validation also
-checks a bounded same-line neighborhood and a recognized label-only line
-immediately preceding the selection when it falls within the 512-code-point
-lookbehind.
-Application-owned source identity and a registered extractor remain required
-before real candidate use.
+The strict proposal manifest is schema version 2. It carries the SHA-256 of the
+exact source bytes as a consistency assertion, plus span conventions and
+proposals; it cannot supply a source path, artifact ID, extractor identity, or
+trust state. The application recomputes the digest, derives a path-free
+`sha256:<digest>` source reference and deterministic digest-only artifact, and
+assigns the registered manifest-ingress identifier. A matching digest proves
+that the two inputs belong together; it does not authenticate who authored the
+source or proposals.
+
+Every allowed claim type has a closed value-schema-version-1 shape. Before any
+storage transaction, the service snapshots all nested request state and
+validates the whole batch with deterministic high-confidence checks over
+persisted claim content and import metadata, including fixed-point percent
+decoding, fragmented-content checks, evidence bounds, and normalized/
+alphanumeric whole-source guards. These checks are defense in depth, not
+complete secret or PII classification. Value, content-policy, request,
+locator, result-manifest, source-identity, and record-ID versions are bound into
+the workflow audit identity. Claim and evidence IDs are deterministically bound
+to the creating workflow and proposal position, and an idempotent retry
+revalidates the checkpoint, source artifact, result manifest, links, and stored
+records before returning them.
+
+Raw source text is used in memory for digest, span, context, and whole-source
+checks but is not persisted or globally sensitive-pattern scanned. From the
+source body, only exact selected evidence spans are stored. The digest-only
+artifact retains the digest
+and byte/code-point sizes, never an input path, original filename, or source
+body. Terminal symlinks and files that change between inspection and descriptor
+read are rejected. To prevent an answer-only span from hiding its label,
+validation also checks a bounded same-line neighborhood and a recognized
+label-only line immediately preceding the selection when it falls within the
+512-code-point lookbehind.
 Import and review fail unchanged if the private data directory or database gains
 group/other access, if the database target escapes its data directory, or if a
 portable runtime child escapes `GROUNDED_APPLY_HOME`.
 
 `profile review` is physically read-only. Its output contains untrusted candidate
 content for inspection, clearly marks every item unusable, and cannot record an
-approval or rejection.
+approval or rejection. Before display it revalidates the path-free source
+artifact, registered ingress, one-to-one evidence link, locator digest and
+bounds, and selected-text checksum. Generic claim/evidence mutation APIs reject
+`imported_resume`; only the import workflow can create that provenance.
+
+Manifest version 1 and the former public `CreateImportProposal` shape are
+intentionally unsupported. Regenerate a version-2 manifest and use a fresh
+opaque idempotency key in a synthetic runtime. Legacy pending imported rows are
+not relabeled or trusted automatically; the current review command fails closed
+until a migration or lifecycle command is implemented.
 
 ## Product shape
 

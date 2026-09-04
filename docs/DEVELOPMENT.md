@@ -39,27 +39,36 @@ Do not use real candidate data in repository development.
 ### Structured profile import and review
 
 The current import boundary consumes two separate UTF-8 inputs: exact source text
-and a schema-version-1 proposal manifest. Each option accepts a regular file or
-`-` for stdin; at most one may use stdin. There are intentionally no inline
-arguments for source text, canonical text, values, source references, or
-extraction metadata. The opaque idempotency key permits only a bounded identifier
-alphabet and must not contain candidate data.
+and a schema-version-2 proposal manifest. Each option accepts a regular file or
+`-` for stdin; at most one may use stdin. File input is captured through one
+descriptor after `lstat`: the terminal path must be a regular non-symlink file,
+the platform must provide no-follow and nonblocking open flags, the opened
+device/inode must match, and size plus change timestamps must remain stable
+through the bounded read. There are intentionally no inline arguments for source
+text, canonical text, values, source references, or extraction metadata. The
+opaque idempotency key permits only a bounded identifier alphabet and must not
+contain candidate data.
 
 The manifest must use zero-based, end-exclusive Unicode-codepoint spans. Its
-top-level fields are exactly `schema_version`, `source_ref`,
-`extraction_method`, `span_index_base`, `span_unit`, `span_end`, and `proposals`.
-Each proposal contains exactly `claim_type`, `value`, `canonical_text`, `span`,
-and optional `confidence`; each span contains `start`, `end`, and exact `text`.
-Duplicate JSON fields, non-finite numbers, unknown fields, authority fields, more
-than 1,000 proposals, non-UTF-8 input, non-regular files, and mismatched spans
-fail closed. The CLI and service both limit source input to 16 MiB of UTF-8;
-proposal-file input is limited to 4 MiB at the CLI boundary.
+top-level fields are exactly `schema_version`, `source_sha256`,
+`span_index_base`, `span_unit`, `span_end`, and `proposals`. `source_sha256` is a
+lowercase 64-character digest assertion over the exact source UTF-8 bytes; the
+application recomputes and compares it before any persistence. It binds the two
+inputs for consistency but is not producer authentication. The manifest cannot
+supply `source_ref`, `artifact_id`, `extractor_id`, `extraction_method`, or a
+trust/authority field. Each proposal contains exactly `claim_type`, `value`,
+`canonical_text`, `span`, and optional `confidence`; each span contains `start`,
+`end`, and exact `text`. Duplicate JSON fields, non-finite numbers, unknown
+fields, authority fields, more than 1,000 proposals, non-UTF-8 input,
+non-regular/unstable files, digest mismatches, and mismatched spans fail closed.
+The CLI and service both limit source input to 16 MiB of UTF-8; proposal-file
+input is limited to 4 MiB at the CLI boundary.
 Service validation also requires at least one alphanumeric source code point and
 limits every screened content or metadata component to 8,192 code points; the
 value, canonical-text, evidence, source-reference, and extraction-method limits
 below are stricter.
 
-Manifest schema version 1 has a closed, versioned value-schema registry. There
+Manifest schema version 2 uses a closed value-schema-version-1 registry. There
 is no generic JSON fallback for an unregistered claim type. In this table,
 `TEXT(N)` means non-blank, already-trimmed text with at most `N` Unicode code
 points and no CR/LF or Unicode control, format, surrogate, line-separator, or
@@ -85,8 +94,9 @@ paragraph-separator code points:
 Before its first storage call, the service snapshots all nested request state and
 validates the entire batch. The persisted surfaces it screens include recursive
 value strings (whose object keys are fixed by the closed schemas), canonical
-text, exact selected evidence, `source_ref`, `extraction_method`, `artifact_id`,
-and subject/scope identifiers. Deterministic high-confidence patterns reject
+text, exact selected evidence, application-derived source/artifact/ingress
+identifiers, and caller-supplied subject/scope identifiers. Deterministic
+high-confidence patterns reject
 recognizable work-authorization or immigration answers, government identifiers,
 credential assignments, private keys, and common token formats. Percent-encoded
 content is decoded repeatedly to a fixed point, with at most eight decoding
@@ -97,8 +107,14 @@ batch; broader multi-component fragmentation is outside this heuristic.
 Caller-controlled metadata is limited to 1,048,576 persisted code points per
 batch, including the per-record copies made for each claim and evidence row.
 This is defense in depth, not a complete secret or PII classifier.
-Value-schema version 1 and content-policy version 1 both participate in the
-idempotency request hash and are recorded in the workflow audit input.
+Manifest/request schema 2, value schema 1, content policy 1, source-identity 1,
+span-locator 1, result-manifest 2, and record-ID 1 participate in the
+idempotency request hash and are recorded in the workflow audit input. That
+input contains only version identifiers, counts, digests, the registered ingress
+ID, and digest-derived source/artifact references. It includes the already
+hashed idempotency key so the lookup column is redundantly bound to the audited
+input; it contains no raw source, proposed values, selected evidence, file path,
+filename, or raw idempotency key.
 
 Canonical text is limited to 2,048 code points. Each selected evidence item is
 limited to 4,096 code points and 16 lines, and all selected evidence in one batch
@@ -123,14 +139,18 @@ idempotency key.
 
 Unselected raw source text remains caller-managed and in memory. It is used for
 span and whole-source validation and its digest, but it is not persisted or
-globally sensitive-pattern scanned. To prevent an answer-only selection from
+globally sensitive-pattern scanned. A deterministic digest-only artifact stores
+`sha256:<digest>`, byte and Unicode-codepoint sizes, and versioned retention
+metadata; it stores no input path, original filename, or raw source body. Every
+claim/evidence pair references that artifact and the registered
+`grounded-apply.profile-import.manifest@1` ingress identifier. The identifier
+names the application path that accepted the untrusted manifest; it does not
+assert who produced the proposals. To prevent an answer-only selection from
 hiding a sensitive label, the service screens up to 256 unselected code points
 on either side within the selected logical line and an exact recognized
 label-only line immediately before it when that line falls within a
-512-code-point lookbehind. Application-owned source identity and a registered
-extractor remain the next provenance boundary; contradiction-aware approval,
-redacted logging, and data lifecycle commands are also required before real
-candidate use.
+512-code-point lookbehind. Contradiction-aware approval, redacted logging, and
+data lifecycle commands are still required before real candidate use.
 
 `profile import --dry-run` performs service-owned request validation without
 opening a repository or creating runtime state. Its `storage_checked: false`
@@ -148,12 +168,32 @@ outside Git worktrees, and every portable runtime child must remain beneath
 `GROUNDED_APPLY_HOME`. Permission drift and path escapes fail unchanged.
 
 Persisted imports contain only `needs_review`/`pending` claims and pending exact
-evidence spans. Import result output is minimized to hashes, counts, and opaque
-record IDs. `profile review` opens SQLite in read-only/query-only mode and lists
-the pending queue with exact supporting evidence, structured values, scope,
-sensitivity, and explicit `content_trust: untrusted` / `usable: false` markers.
-It has no mutation or approval option. Prompt-like imported content is data, never
-an instruction.
+evidence spans. The public generic claim/evidence service rejects
+`SourceType.IMPORTED_RESUME`; only the import workflow can create those records.
+Claim and evidence UUIDs are deterministically derived from the creating
+workflow plus proposal position. A retry accepts only the exact succeeded
+checkpoint shape and revalidates the digest artifact, workflow-bound IDs, result
+manifest, one-to-one support link, claim semantics, locator, selected text,
+checksum, registered ingress, and evidence metadata. It never repairs a missing
+or conflicting provenance record. Import result output is minimized to hashes,
+counts, and opaque record IDs.
+
+`profile review` opens SQLite in read-only/query-only mode and lists the pending
+queue with exact supporting evidence, structured values, scope, sensitivity, and
+explicit `content_trust: untrusted` / `usable: false` markers. Before display it
+requires exactly one pending imported evidence item and revalidates the
+digest-only artifact, registered ingress, locator schema/source digest,
+codepoint bounds, and selected-text checksum. It has no mutation or approval
+option. Prompt-like imported content is data, never an instruction.
+
+Manifest version 1, request identity version 1, and the former public
+`CreateImportProposal` constructor are hard compatibility breaks. There is no
+automatic migration or provenance relabel. Regenerate a version-2 manifest and
+use a fresh opaque idempotency key in a disposable synthetic runtime. A legacy
+pending imported row causes review to fail closed without displaying its old
+path-like provenance. Future source-identity or locator version changes likewise
+require a registered version-dispatched validator or an explicit migration;
+stored version tags do not by themselves grant compatibility.
 
 This boundary is currently for synthetic development data only.
 

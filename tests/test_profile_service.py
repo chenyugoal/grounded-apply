@@ -105,8 +105,8 @@ class ProfileServiceTests(unittest.TestCase):
         evidence = self.service.create_evidence(
             CreateEvidence(
                 claim_id=stored.id,
-                source_type=SourceType.IMPORTED_RESUME,
-                source_ref="synthetic-resume.txt#line=7",
+                source_type=SourceType.OTHER,
+                source_ref="synthetic-source.txt#line=7",
                 source_text="Built a Python service for fictional test data.",
                 locator={"line": 7},
                 confirmation_status=EvidenceConfirmationStatus.CONFIRMED,
@@ -152,8 +152,8 @@ class ProfileServiceTests(unittest.TestCase):
         evidence = self.service.create_evidence(
             CreateEvidence(
                 claim_id=first.id,
-                source_type=SourceType.IMPORTED_RESUME,
-                source_ref="synthetic-resume.txt#line=7",
+                source_type=SourceType.OTHER,
+                source_ref="synthetic-source.txt#line=7",
                 source_text="Built a Python service for fictional test data.",
                 confirmation_status=EvidenceConfirmationStatus.CONFIRMED,
                 confirmed_by="synthetic-user",
@@ -174,6 +174,64 @@ class ProfileServiceTests(unittest.TestCase):
             {(evidence.id, first.id), (evidence.id, second.id)},
         )
 
+    def test_public_claim_creation_rejects_imported_resume_for_every_trust_state(
+        self,
+    ) -> None:
+        cases = (
+            {},
+            {
+                "status": ClaimStatus.VERIFIED,
+                "approval_status": ApprovalStatus.APPROVED,
+                "verified_by": "synthetic-user",
+            },
+        )
+
+        for overrides in cases:
+            with self.subTest(status=overrides.get("status", ClaimStatus.NEEDS_REVIEW)):
+                with self.assertRaisesRegex(ValueError, "profile import workflow"):
+                    self.service.create_claim(
+                        self.request(
+                            source_type=SourceType.IMPORTED_RESUME,
+                            **overrides,
+                        ),
+                        now=NOW,
+                    )
+
+        self.assertEqual(self.repository.list_claims(), [])
+
+    def test_public_evidence_creation_rejects_imported_resume_for_every_trust_state(
+        self,
+    ) -> None:
+        claim = self.service.create_claim(self.request(), now=NOW)
+        cases = (
+            {},
+            {
+                "confirmation_status": EvidenceConfirmationStatus.CONFIRMED,
+                "confirmed_by": "synthetic-user",
+            },
+        )
+
+        for overrides in cases:
+            with self.subTest(
+                confirmation_status=overrides.get(
+                    "confirmation_status",
+                    EvidenceConfirmationStatus.PENDING,
+                )
+            ):
+                with self.assertRaisesRegex(ValueError, "profile import workflow"):
+                    self.service.create_evidence(
+                        CreateEvidence(
+                            claim_id=claim.id,
+                            source_type=SourceType.IMPORTED_RESUME,
+                            source_ref="synthetic-resume.txt#line=7",
+                            source_text="Synthetic imported evidence.",
+                            **overrides,
+                        ),
+                        now=NOW,
+                    )
+
+        self.assertEqual(self.repository.list_evidence(), [])
+
     def test_contradicting_evidence_never_satisfies_support_requirement(self) -> None:
         stored = self.service.create_claim(
             self.request(
@@ -186,8 +244,8 @@ class ProfileServiceTests(unittest.TestCase):
         )
         evidence = self.repository.add_evidence(
             evidence_id="contradicting-evidence",
-            source_type="imported_resume",
-            source_ref="synthetic-resume.txt#line=8",
+            source_type="other",
+            source_ref="synthetic-source.txt#line=8",
             source_text="A contradictory synthetic source span.",
             confirmation_status="confirmed",
             confirmed_by="synthetic-user",
@@ -218,8 +276,8 @@ class ProfileServiceTests(unittest.TestCase):
         )
         self.repository.add_evidence(
             evidence_id="rejected-evidence",
-            source_type="imported_resume",
-            source_ref="synthetic-resume.txt#line=9",
+            source_type="other",
+            source_ref="synthetic-source.txt#line=9",
             source_text="A rejected synthetic source span.",
             confirmation_status="rejected",
             claim_id=stored.id,

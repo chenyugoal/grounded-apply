@@ -241,13 +241,56 @@ def _read_utf8_input(location: str, *, label: str, max_bytes: int) -> str:
                 raw = text.encode("utf-8")
         else:
             path = Path(location)
-            file_stat = path.stat()
-            if not stat.S_ISREG(file_stat.st_mode):
+            path_stat = path.lstat()
+            if not stat.S_ISREG(path_stat.st_mode):
                 raise CliInputError(f"{label.capitalize()} must be a regular file")
-            if file_stat.st_size > max_bytes:
-                raise CliInputError(f"{label.capitalize()} exceeds the size limit")
-            with path.open("rb") as stream:
-                raw = stream.read(max_bytes + 1)
+            nofollow = getattr(os, "O_NOFOLLOW", None)
+            nonblock = getattr(os, "O_NONBLOCK", None)
+            if (
+                not isinstance(nofollow, int)
+                or nofollow <= 0
+                or not isinstance(nonblock, int)
+                or nonblock <= 0
+            ):
+                raise CliInputError(
+                    f"Secure {label} capture is unavailable on this platform"
+                )
+            flags = os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(path, flags)
+            try:
+                opened_stat = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened_stat.st_mode)
+                    or (opened_stat.st_dev, opened_stat.st_ino)
+                    != (path_stat.st_dev, path_stat.st_ino)
+                ):
+                    raise CliInputError(
+                        f"{label.capitalize()} changed before it could be read"
+                    )
+                if opened_stat.st_size > max_bytes:
+                    raise CliInputError(f"{label.capitalize()} exceeds the size limit")
+                chunks: list[bytes] = []
+                remaining = max_bytes + 1
+                while remaining:
+                    chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                raw = b"".join(chunks)
+                final_stat = os.fstat(descriptor)
+                if (
+                    (final_stat.st_dev, final_stat.st_ino, final_stat.st_size)
+                    != (opened_stat.st_dev, opened_stat.st_ino, opened_stat.st_size)
+                    or final_stat.st_mtime_ns != opened_stat.st_mtime_ns
+                    or final_stat.st_ctime_ns != opened_stat.st_ctime_ns
+                    or len(raw) != final_stat.st_size
+                ):
+                    raise CliInputError(
+                        f"{label.capitalize()} changed while it was being read"
+                    )
+            finally:
+                os.close(descriptor)
         if len(raw) > max_bytes:
             raise CliInputError(f"{label.capitalize()} exceeds the size limit")
         return raw.decode("utf-8")
@@ -331,6 +374,7 @@ def _import_request_from_inputs(
 ):  # type: ignore[no-untyped-def]
     from grounded_apply.services import (
         CreateImportProposal,
+        PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION,
         ProposedImportClaim,
         TextSourceSpan,
     )
@@ -341,8 +385,7 @@ def _import_request_from_inputs(
         required=frozenset(
             {
                 "schema_version",
-                "source_ref",
-                "extraction_method",
+                "source_sha256",
                 "span_index_base",
                 "span_unit",
                 "span_end",
@@ -351,8 +394,14 @@ def _import_request_from_inputs(
         ),
         label="Proposal input",
     )
-    if type(data["schema_version"]) is not int or data["schema_version"] != 1:
-        raise CliInputError("Proposal input schema_version must be 1")
+    if (
+        type(data["schema_version"]) is not int
+        or data["schema_version"] != PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION
+    ):
+        raise CliInputError(
+            "Proposal input schema_version must be "
+            f"{PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION}"
+        )
     if data["span_index_base"] != 0 or type(data["span_index_base"]) is not int:
         raise CliInputError("Proposal input spans must use a zero-based index")
     if data["span_unit"] != "unicode_codepoint":
@@ -405,14 +454,13 @@ def _import_request_from_inputs(
 
     return CreateImportProposal(
         idempotency_key=idempotency_key,
-        source_ref=_required_text(
-            data["source_ref"], label="source_ref", max_length=512
-        ),
         source_text=source_text,
-        proposals=tuple(proposals),
-        extraction_method=_required_text(
-            data["extraction_method"], label="extraction_method", max_length=128
+        expected_source_sha256=_required_text(
+            data["source_sha256"],
+            label="source_sha256",
+            max_length=64,
         ),
+        proposals=tuple(proposals),
     )
 
 
@@ -518,7 +566,10 @@ def _command_profile_import(args: argparse.Namespace) -> int:
             "dry_run": False,
             "evidence_count": len(result.evidence),
             "evidence_ids": [evidence.id for evidence in result.evidence],
+            "extractor_id": result.extractor_id,
             "review_required": True,
+            "source_artifact_id": result.source_artifact_id,
+            "source_ref": result.source_ref,
             "source_sha256": result.source_sha256,
             "workflow_run_id": result.workflow_run_id,
         },

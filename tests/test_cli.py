@@ -10,16 +10,83 @@ import tempfile
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from grounded_apply import __version__
 from grounded_apply.cli import main
+from grounded_apply.domain import SourceType
+from grounded_apply.repositories import SQLiteRepository
+from grounded_apply.services import PROFILE_IMPORT_EXTRACTOR_ID
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "synthetic_profile"
 SOURCE_FILE = FIXTURE_ROOT / "resume.txt"
 PROPOSALS_FILE = FIXTURE_ROOT / "import_proposals.json"
 IDEMPOTENCY_KEY = "synthetic-avery-quill-cli-import-v1"
+JSON_ENVELOPE_KEYS = {"command", "data", "error", "ok", "version", "warnings"}
+IMPORT_PREVIEW_KEYS = {
+    "dry_run",
+    "extractor_id",
+    "planned_claim_count",
+    "planned_evidence_count",
+    "proposal_count",
+    "review_required",
+    "source_artifact_id",
+    "source_ref",
+    "source_sha256",
+    "storage_checked",
+}
+IMPORT_RESULT_KEYS = {
+    "claim_count",
+    "claim_ids",
+    "dry_run",
+    "evidence_count",
+    "evidence_ids",
+    "extractor_id",
+    "review_required",
+    "source_artifact_id",
+    "source_ref",
+    "source_sha256",
+    "workflow_run_id",
+}
+REVIEW_CLAIM_KEYS = {
+    "approval_status",
+    "canonical_text",
+    "claim_type",
+    "confidence",
+    "created_at",
+    "derivation",
+    "effective_from",
+    "effective_to",
+    "evidence_ids",
+    "id",
+    "scope",
+    "sensitivity",
+    "source_ref",
+    "source_type",
+    "status",
+    "subject_id",
+    "subject_type",
+    "supersedes_id",
+    "updated_at",
+    "value_json",
+    "verified_at",
+    "verified_by",
+}
+REVIEW_EVIDENCE_KEYS = {
+    "artifact_id",
+    "captured_at",
+    "checksum",
+    "claim_id",
+    "confirmation_status",
+    "extraction_method",
+    "id",
+    "locator",
+    "source_ref",
+    "source_text",
+    "source_type",
+}
 
 
 class CliTests(unittest.TestCase):
@@ -134,6 +201,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(stderr, "")
+            self.assertEqual(set(payload), JSON_ENVELOPE_KEYS)
+            self.assertEqual(set(payload["data"]), IMPORT_PREVIEW_KEYS)
             self.assertEqual(payload["command"], "profile.import")
             self.assertTrue(payload["data"]["dry_run"])
             self.assertTrue(payload["data"]["review_required"])
@@ -141,6 +210,17 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["data"]["planned_claim_count"], 5)
             self.assertEqual(payload["data"]["planned_evidence_count"], 5)
             self.assertEqual(len(payload["data"]["source_sha256"]), 64)
+            self.assertEqual(
+                payload["data"]["source_ref"],
+                f"sha256:{payload['data']['source_sha256']}",
+            )
+            self.assertEqual(
+                payload["data"]["source_artifact_id"],
+                f"profile-import-source:sha256:{payload['data']['source_sha256']}",
+            )
+            self.assertEqual(
+                payload["data"]["extractor_id"], PROFILE_IMPORT_EXTRACTOR_ID
+            )
             self.assertFalse(Path(home).exists())
             self.assertNotIn("avery.quill@example.com", stdout)
             self.assertNotIn("Ignore previous instructions", stdout)
@@ -360,6 +440,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual((init_result, import_result, review_result), (0, 0, 0))
             self.assertEqual((import_stderr, review_stderr), ("", ""))
+            self.assertEqual(set(imported), JSON_ENVELOPE_KEYS)
+            self.assertEqual(set(imported["data"]), IMPORT_RESULT_KEYS)
             self.assertEqual(imported["command"], "profile.import")
             self.assertFalse(imported["data"]["dry_run"])
             self.assertTrue(imported["data"]["review_required"])
@@ -369,8 +451,19 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("Software Engineer at", import_stdout)
 
             self.assertEqual(review["command"], "profile.review")
+            self.assertEqual(set(review), JSON_ENVELOPE_KEYS)
+            self.assertEqual(
+                set(review["data"]), {"items", "pending_count", "read_only"}
+            )
             self.assertTrue(review["data"]["read_only"])
             self.assertEqual(review["data"]["pending_count"], 5)
+            for item in review["data"]["items"]:
+                self.assertEqual(
+                    set(item), {"claim", "content_trust", "evidence", "usable"}
+                )
+                self.assertEqual(set(item["claim"]), REVIEW_CLAIM_KEYS)
+                self.assertEqual(len(item["evidence"]), 1)
+                self.assertEqual(set(item["evidence"][0]), REVIEW_EVIDENCE_KEYS)
             self.assertEqual(
                 {item["claim"]["approval_status"] for item in review["data"]["items"]},
                 {"pending"},
@@ -390,6 +483,26 @@ class CliTests(unittest.TestCase):
                     for item in review["data"]["items"]
                     for evidence in item["evidence"]
                 )
+            )
+            expected_source_ref = f"sha256:{imported['data']['source_sha256']}"
+            self.assertEqual(imported["data"]["source_ref"], expected_source_ref)
+            self.assertEqual(
+                imported["data"]["extractor_id"], PROFILE_IMPORT_EXTRACTOR_ID
+            )
+            self.assertEqual(
+                {
+                    item["claim"]["source_ref"]
+                    for item in review["data"]["items"]
+                },
+                {expected_source_ref},
+            )
+            self.assertEqual(
+                {
+                    evidence["extraction_method"]
+                    for item in review["data"]["items"]
+                    for evidence in item["evidence"]
+                },
+                {PROFILE_IMPORT_EXTRACTOR_ID},
             )
             self.assertIn("Software Engineer at Example Robotics LLC", review_stdout)
             self.assertNotIn("avery.quill@example.com", review_stdout)
@@ -414,6 +527,99 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual((first_result, retry_result), (0, 0))
             self.assertEqual(first["data"], retry["data"])
+
+    def test_profile_import_replay_uses_manifest_semantics_not_json_serialization(
+        self,
+    ) -> None:
+        def reverse_object_fields(value: object) -> object:
+            if isinstance(value, dict):
+                return {
+                    key: reverse_object_fields(value[key])
+                    for key in reversed(tuple(value))
+                }
+            if isinstance(value, list):
+                return [reverse_object_fields(item) for item in value]
+            return value
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = str(root / "profile-home")
+            reserialized_path = root / "SYNTHETIC_PRIVATE_REORDERED_MANIFEST.json"
+            manifest = json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
+            reserialized_path.write_text(
+                json.dumps(
+                    reverse_object_fields(manifest),
+                    ensure_ascii=False,
+                    indent=3,
+                ),
+                encoding="utf-8",
+            )
+            self.invoke("profile", "init", "--json", home=home)
+
+            first_result, first_stdout, first_stderr = self.invoke(
+                *self.profile_import_arguments(), home=home
+            )
+            retry_result, retry_stdout, retry_stderr = self.invoke(
+                *self.profile_import_arguments(proposals_file=reserialized_path),
+                home=home,
+            )
+
+            self.assertEqual((first_result, retry_result), (0, 0))
+            self.assertEqual((first_stderr, retry_stderr), ("", ""))
+            self.assertEqual(
+                json.loads(first_stdout)["data"],
+                json.loads(retry_stdout)["data"],
+            )
+            self.assertNotIn(
+                str(reserialized_path),
+                first_stdout + retry_stdout,
+            )
+
+    def test_profile_import_replay_is_independent_of_private_source_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = str(root / "profile-home")
+            first_source = root / "SYNTHETIC_PRIVATE_PERSON" / "resume-one.txt"
+            second_source = root / "different-private-folder" / "resume-two.txt"
+            first_proposals = first_source.parent / "proposal-one.json"
+            second_proposals = second_source.parent / "proposal-two.json"
+            first_source.parent.mkdir()
+            second_source.parent.mkdir()
+            source_bytes = SOURCE_FILE.read_bytes()
+            first_source.write_bytes(source_bytes)
+            second_source.write_bytes(source_bytes)
+            proposal_bytes = PROPOSALS_FILE.read_bytes()
+            first_proposals.write_bytes(proposal_bytes)
+            second_proposals.write_bytes(proposal_bytes)
+            self.invoke("profile", "init", "--json", home=home)
+
+            first_result, first_stdout, first_stderr = self.invoke(
+                *self.profile_import_arguments(
+                    source_file=first_source,
+                    proposals_file=first_proposals,
+                ),
+                home=home,
+            )
+            retry_result, retry_stdout, retry_stderr = self.invoke(
+                *self.profile_import_arguments(
+                    source_file=second_source,
+                    proposals_file=second_proposals,
+                ),
+                home=home,
+            )
+            review_result, review_stdout, review_stderr = self.invoke(
+                "profile", "review", "--json", home=home
+            )
+
+            self.assertEqual((first_result, retry_result, review_result), (0, 0, 0))
+            self.assertEqual((first_stderr, retry_stderr, review_stderr), ("", "", ""))
+            self.assertEqual(json.loads(first_stdout)["data"], json.loads(retry_stdout)["data"])
+            all_output = first_stdout + retry_stdout + review_stdout
+            self.assertNotIn(str(first_source), all_output)
+            self.assertNotIn(str(second_source), all_output)
+            self.assertNotIn(str(first_proposals), all_output)
+            self.assertNotIn(str(second_proposals), all_output)
+            self.assertNotIn("SYNTHETIC_PRIVATE_PERSON", all_output)
 
     def test_profile_import_changed_input_reuses_no_records_or_private_error_text(
         self,
@@ -451,6 +657,47 @@ class CliTests(unittest.TestCase):
             self.assertNotIn(IDEMPOTENCY_KEY, changed_stdout)
             self.assertEqual(review_result, 0)
             self.assertEqual(review["data"]["pending_count"], 5)
+
+    def test_profile_import_changed_source_conflicts_without_new_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "profile-home"
+            self.invoke("profile", "init", "--json", home=str(home))
+            first_result, _, _ = self.invoke(
+                *self.profile_import_arguments(), home=str(home)
+            )
+            changed_source = root / "SYNTHETIC_PRIVATE_CHANGED_RESUME.txt"
+            changed_bytes = SOURCE_FILE.read_bytes() + b"\nPRIVATE SYNTHETIC SUFFIX\n"
+            changed_source.write_bytes(changed_bytes)
+            changed_manifest = json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
+            changed_manifest["source_sha256"] = hashlib.sha256(changed_bytes).hexdigest()
+            changed_proposals = root / "changed-proposals.json"
+            changed_proposals.write_text(json.dumps(changed_manifest), encoding="utf-8")
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_import_arguments(
+                    source_file=changed_source,
+                    proposals_file=changed_proposals,
+                ),
+                home=str(home),
+            )
+            payload = json.loads(stdout)
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                read_only=True,
+            ) as repository:
+                artifact_count = len(repository.list_artifacts())
+                claim_count = len(repository.list_claims())
+                workflow_count = len(repository.list_workflow_runs())
+
+            self.assertEqual(first_result, 0)
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(payload["ok"])
+            self.assertIn("idempotency key", payload["error"]["message"])
+            self.assertNotIn("PRIVATE SYNTHETIC SUFFIX", stdout)
+            self.assertNotIn(str(changed_source), stdout)
+            self.assertEqual((artifact_count, claim_count, workflow_count), (1, 5, 1))
 
     def test_profile_import_accepts_source_text_from_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -506,53 +753,78 @@ class CliTests(unittest.TestCase):
             self.assertFalse(Path(home).exists())
             self.assertNotIn("private text", stdout)
 
-    def test_profile_import_rejects_trust_fields_without_writing_or_echoing_values(
+    def test_profile_import_rejects_authority_and_provenance_fields_without_writing(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            home = str(root / "not-created")
-            proposals = json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
-            proposals["proposals"][0]["status"] = "verified"
-            proposals["proposals"][0]["canonical_text"] = "DO NOT ECHO PRIVATE VALUE"
-            proposals_file = root / "authority-injection.json"
-            proposals_file.write_text(json.dumps(proposals), encoding="utf-8")
+        injected_fields = {
+            "status": "verified",
+            "source_ref": "file:///Users/SYNTHETIC_PRIVATE_PERSON/resume.txt",
+            "extraction_method": "trusted-looking@999",
+            "extractor_id": PROFILE_IMPORT_EXTRACTOR_ID,
+            "artifact_id": "forged-artifact",
+        }
+        for index, (field, value) in enumerate(injected_fields.items()):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                home = root / "not-created"
+                proposals = json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
+                if field == "status":
+                    proposals["proposals"][0][field] = value
+                    proposals["proposals"][0]["canonical_text"] = (
+                        "DO NOT ECHO PRIVATE VALUE"
+                    )
+                else:
+                    proposals[field] = value
+                proposals_file = root / f"authority-injection-{index}.json"
+                proposals_file.write_text(json.dumps(proposals), encoding="utf-8")
 
-            result, stdout, stderr = self.invoke(
-                *self.profile_import_arguments(
-                    proposals_file=proposals_file, dry_run=True
-                ),
-                home=home,
-            )
-            payload = json.loads(stdout)
+                result, stdout, stderr = self.invoke(
+                    *self.profile_import_arguments(
+                        proposals_file=proposals_file, dry_run=True
+                    ),
+                    home=str(home),
+                )
+                payload = json.loads(stdout)
 
-            self.assertEqual(result, 2)
-            self.assertEqual(stderr, "")
-            self.assertFalse(payload["ok"])
-            self.assertIn("unexpected field", payload["error"]["message"])
-            self.assertNotIn("DO NOT ECHO PRIVATE VALUE", stdout)
-            self.assertFalse(Path(home).exists())
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                self.assertIn("unexpected field", payload["error"]["message"])
+                self.assertNotIn(str(value), stdout)
+                self.assertNotIn("DO NOT ECHO PRIVATE VALUE", stdout)
+                self.assertFalse(home.exists())
 
     def test_profile_import_strict_json_contract_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             valid_text = PROPOSALS_FILE.read_text(encoding="utf-8")
             valid = json.loads(valid_text)
-            wrong_schema = {**valid, "schema_version": 2}
+            wrong_schema = {**valid, "schema_version": 1}
             wrong_span_unit = {**valid, "span_unit": "utf8_byte"}
             unknown_root = {**valid, "approval_status": "approved"}
+            uppercase_digest = {
+                **valid,
+                "source_sha256": str(valid["source_sha256"]).upper(),
+            }
+            short_digest = {**valid, "source_sha256": "0" * 63}
+            nonhex_digest = {**valid, "source_sha256": "g" * 64}
+            wrong_digest_type = {**valid, "source_sha256": 7}
             nested_unknown = json.loads(valid_text)
             nested_unknown["proposals"][0]["scope"] = {"type": "global"}
             inputs = (
                 valid_text.replace(
-                    '"schema_version": 1,',
-                    '"schema_version": 1, "schema_version": 1,',
+                    '"schema_version": 2,',
+                    '"schema_version": 2, "schema_version": 2,',
                     1,
                 ),
                 valid_text.replace("0.99", "NaN", 1),
                 json.dumps(wrong_schema),
                 json.dumps(wrong_span_unit),
                 json.dumps(unknown_root),
+                json.dumps(uppercase_digest),
+                json.dumps(short_digest),
+                json.dumps(nonhex_digest),
+                json.dumps(wrong_digest_type),
                 json.dumps(nested_unknown),
                 "[]",
             )
@@ -666,6 +938,9 @@ class CliTests(unittest.TestCase):
             source_file = root / "resume-crlf.txt"
             source_file.write_bytes(source_text.encode("utf-8"))
             proposals = json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
+            proposals["source_sha256"] = hashlib.sha256(
+                source_file.read_bytes()
+            ).hexdigest()
             for item in proposals["proposals"]:
                 span_text = item["span"]["text"]
                 start = source_text.index(span_text)
@@ -691,6 +966,29 @@ class CliTests(unittest.TestCase):
                 payload["data"]["source_sha256"],
                 hashlib.sha256(source_file.read_bytes()).hexdigest(),
             )
+            self.assertFalse(home.exists())
+
+    def test_profile_import_rejects_a_source_that_does_not_match_manifest_digest(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_file = root / "changed-source.txt"
+            source_file.write_bytes(SOURCE_FILE.read_bytes() + b"\nSynthetic suffix.\n")
+            home = root / "not-created"
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_import_arguments(source_file=source_file, dry_run=True),
+                home=str(home),
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(payload["ok"])
+            self.assertIn("source digest", payload["error"]["message"].lower())
+            self.assertNotIn("Synthetic suffix", stdout)
+            self.assertNotIn(str(source_file), stdout)
             self.assertFalse(home.exists())
 
     def test_profile_import_rejects_nonregular_and_oversized_inputs_without_reading(
@@ -722,6 +1020,155 @@ class CliTests(unittest.TestCase):
                     self.assertFalse(home.exists())
                     self.assertNotIn(str(source_file), stdout)
 
+    def test_profile_import_rejects_terminal_input_symlinks_without_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_link = root / "private-source-link.txt"
+            proposal_link = root / "private-proposal-link.json"
+            source_link.symlink_to(SOURCE_FILE)
+            proposal_link.symlink_to(PROPOSALS_FILE)
+
+            for index, (source_file, proposals_file) in enumerate(
+                (
+                    (source_link, PROPOSALS_FILE),
+                    (SOURCE_FILE, proposal_link),
+                )
+            ):
+                with self.subTest(index=index):
+                    home = root / f"not-created-symlink-{index}"
+                    result, stdout, stderr = self.invoke(
+                        *self.profile_import_arguments(
+                            source_file=source_file,
+                            proposals_file=proposals_file,
+                            dry_run=True,
+                        ),
+                        home=str(home),
+                    )
+                    payload = json.loads(stdout)
+
+                    self.assertEqual(result, 2)
+                    self.assertEqual(stderr, "")
+                    self.assertFalse(payload["ok"])
+                    self.assertIn("regular file", payload["error"]["message"])
+                    self.assertNotIn(str(source_file), stdout)
+                    self.assertNotIn(str(proposals_file), stdout)
+                    self.assertFalse(home.exists())
+
+    def test_profile_import_rejects_a_file_changed_during_capture(self) -> None:
+        from grounded_apply import cli as cli_module
+
+        original_fstat = cli_module.os.fstat
+        calls = 0
+
+        def changed_final_stat(descriptor: int) -> os.stat_result | SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            result = original_fstat(descriptor)
+            if calls != 2:
+                return result
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns + 1,
+                st_ctime_ns=result.st_ctime_ns,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "not-created"
+            with patch.object(cli_module.os, "fstat", side_effect=changed_final_stat):
+                result, stdout, stderr = self.invoke(
+                    *self.profile_import_arguments(dry_run=True),
+                    home=str(home),
+                )
+            payload = json.loads(stdout)
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(payload["ok"])
+            self.assertIn("changed while", payload["error"]["message"])
+            self.assertNotIn(str(SOURCE_FILE), stdout)
+            self.assertFalse(home.exists())
+
+    def test_profile_import_fails_closed_when_secure_open_flags_are_unavailable(
+        self,
+    ) -> None:
+        from grounded_apply import cli as cli_module
+
+        for flag_name in ("O_NOFOLLOW", "O_NONBLOCK"):
+            with (
+                self.subTest(flag_name=flag_name),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                home = Path(directory) / "not-created"
+                with (
+                    patch.object(cli_module.os, flag_name, 0, create=True),
+                    patch.object(
+                        cli_module.os,
+                        "open",
+                        wraps=cli_module.os.open,
+                    ) as open_file,
+                ):
+                    result, stdout, stderr = self.invoke(
+                        *self.profile_import_arguments(dry_run=True),
+                        home=str(home),
+                    )
+                payload = json.loads(stdout)
+
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                open_file.assert_not_called()
+                self.assertNotIn(str(SOURCE_FILE), stdout)
+                self.assertFalse(home.exists())
+
+    def test_profile_import_rejects_lstat_open_identity_mismatch_before_read(
+        self,
+    ) -> None:
+        from grounded_apply import cli as cli_module
+
+        original_fstat = cli_module.os.fstat
+
+        def changed_opened_stat(descriptor: int) -> SimpleNamespace:
+            result = original_fstat(descriptor)
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_dev=result.st_dev,
+                st_ino=result.st_ino + 1,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+                st_ctime_ns=result.st_ctime_ns,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "not-created"
+            with (
+                patch.object(
+                    cli_module.os,
+                    "fstat",
+                    side_effect=changed_opened_stat,
+                ),
+                patch.object(
+                    cli_module.os,
+                    "read",
+                    wraps=cli_module.os.read,
+                ) as read_file,
+            ):
+                result, stdout, stderr = self.invoke(
+                    *self.profile_import_arguments(dry_run=True),
+                    home=str(home),
+                )
+            payload = json.loads(stdout)
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(payload["ok"])
+            self.assertIn("changed before", payload["error"]["message"])
+            read_file.assert_not_called()
+            self.assertNotIn(str(SOURCE_FILE), stdout)
+            self.assertFalse(home.exists())
+
     def test_profile_review_requires_initialized_storage_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             home = str(Path(directory) / "not-created")
@@ -736,6 +1183,79 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertIn("profile init", payload["error"]["message"])
             self.assertFalse(Path(home).exists())
+
+    def test_profile_review_never_discloses_legacy_path_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "profile-home"
+            self.invoke("profile", "init", "--json", home=str(home))
+            private_source_ref = (
+                "file:///Users/SYNTHETIC_PRIVATE_PERSON/Documents/resume.txt"
+            )
+            with SQLiteRepository(
+                home / "data" / "grounded_apply.db",
+                existing_only=True,
+            ) as repository:
+                claim = repository.add_claim(
+                    claim_type="skill_use",
+                    value="Python",
+                    canonical_text="Used Python in a fictional project",
+                    source_type=SourceType.IMPORTED_RESUME.value,
+                    source_ref=private_source_ref,
+                )
+                repository.add_evidence(
+                    claim_id=str(claim["id"]),
+                    source_type=SourceType.IMPORTED_RESUME.value,
+                    source_ref=private_source_ref,
+                    source_text="Synthetic supporting evidence",
+                    extraction_method="caller-claimed@999",
+                )
+
+            for json_output in (False, True):
+                with self.subTest(json_output=json_output):
+                    arguments = ("profile", "review")
+                    if json_output:
+                        arguments += ("--json",)
+                    result, stdout, stderr = self.invoke(
+                        *arguments,
+                        home=str(home),
+                    )
+
+                    self.assertEqual(result, 2)
+                    self.assertNotIn(private_source_ref, stdout + stderr)
+                    self.assertNotIn("SYNTHETIC_PRIVATE_PERSON", stdout + stderr)
+                    self.assertIn("not application-owned", stdout + stderr)
+
+    def test_profile_review_does_not_echo_a_corrupt_stored_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "profile-home"
+            self.invoke("profile", "init", "--json", home=str(home))
+            self.invoke(*self.profile_import_arguments(), home=str(home))
+            private_marker = (
+                "file:///Users/SYNTHETIC_PRIVATE_PERSON/private-resume.txt"
+            )
+            with closing(
+                sqlite3.connect(home / "data" / "grounded_apply.db")
+            ) as connection:
+                connection.execute(
+                    "UPDATE evidence SET captured_at = ?",
+                    (private_marker,),
+                )
+                connection.commit()
+
+            for json_output in (False, True):
+                with self.subTest(json_output=json_output):
+                    arguments = ("profile", "review")
+                    if json_output:
+                        arguments += ("--json",)
+                    result, stdout, stderr = self.invoke(
+                        *arguments,
+                        home=str(home),
+                    )
+
+                    self.assertEqual(result, 2)
+                    self.assertNotIn(private_marker, stdout + stderr)
+                    self.assertNotIn("SYNTHETIC_PRIVATE_PERSON", stdout + stderr)
+                    self.assertIn("captured_at", stdout + stderr)
 
     def test_profile_review_is_physically_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

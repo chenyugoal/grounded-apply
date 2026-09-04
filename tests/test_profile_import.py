@@ -6,7 +6,9 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,19 +33,24 @@ from grounded_apply.domain import (
 )
 from grounded_apply.repositories import RepositoryError, SQLiteRepository
 from grounded_apply.services import (
+    CreateClaim,
     CreateImportProposal,
     CreateEvidence,
     ImportProposalResult,
+    PROFILE_IMPORT_EXTRACTOR_ID,
+    PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION,
     PROFILE_IMPORT_MAX_SOURCE_BYTES,
     ProfileService,
     ProfileReviewItem,
     ProposedImportClaim,
     TextSourceSpan,
+    registered_profile_import_extractors,
     registered_profile_import_claim_types,
 )
 
 
 NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+NOW_TEXT = "2026-08-11T12:00:00Z"
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "synthetic_profile"
 
 SAFE_IMPORT_VALUES: dict[str, Any] = {
@@ -87,7 +94,6 @@ def import_request(
     *,
     source_text: str | None = None,
     proposal_data: dict[str, Any] | None = None,
-    artifact_id: str | None = None,
 ) -> CreateImportProposal:
     fixture_text, fixture_data = load_fixture()
     text = fixture_text if source_text is None else source_text
@@ -108,11 +114,9 @@ def import_request(
     )
     return CreateImportProposal(
         idempotency_key="fixture-avery-quill-import-v1",
-        source_ref=data["source_ref"],
         source_text=text,
-        extraction_method=data["extraction_method"],
+        expected_source_sha256=data["source_sha256"],
         proposals=proposals,
-        artifact_id=artifact_id,
     )
 
 
@@ -141,9 +145,10 @@ def single_proposal_request(
         selected_span = span
     return CreateImportProposal(
         idempotency_key=idempotency_key,
-        source_ref="fixture://synthetic-profile/schema-test.txt",
         source_text=source_text,
-        extraction_method="synthetic-schema-test@1",
+        expected_source_sha256=hashlib.sha256(
+            source_text.encode("utf-8")
+        ).hexdigest(),
         proposals=(
             ProposedImportClaim(
                 claim_type=claim_type,
@@ -159,11 +164,16 @@ class SyntheticProfileFixtureTests(unittest.TestCase):
     def test_every_fixture_span_is_an_exact_unicode_codepoint_slice(self) -> None:
         source_text, data = load_fixture()
 
-        self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(data["schema_version"], PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION)
         self.assertEqual(data["span_index_base"], 0)
         self.assertEqual(data["span_unit"], "unicode_codepoint")
         self.assertEqual(data["span_end"], "exclusive")
-        self.assertTrue(data["source_ref"].startswith("fixture://"))
+        self.assertEqual(
+            data["source_sha256"],
+            hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+        )
+        self.assertNotIn("source_ref", data)
+        self.assertNotIn("extraction_method", data)
         self.assertIn("example.com", source_text)
         self.assertIn("UNTRUSTED IMPORTED NOTE", source_text)
         self.assertNotEqual(len(source_text), len(source_text.encode("utf-8")))
@@ -213,6 +223,7 @@ class ProfileImportProposalTests(unittest.TestCase):
         self.assertEqual(database.read_bytes(), before_bytes)
         self.assertEqual(database.stat().st_mode, before_stat.st_mode)
         self.assertEqual(database.stat().st_mtime_ns, before_stat.st_mtime_ns)
+        self.assertEqual(self.repository.list_artifacts(), [])
         self.assertEqual(self.repository.list_claims(), [])
         self.assertEqual(self.repository.list_evidence(), [])
         self.assertEqual(self.repository.list_workflow_runs(), [])
@@ -819,9 +830,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="exact-service-source-byte-limit",
-            source_ref="fixture://synthetic-profile/exact-source-limit.txt",
             source_text=exact_source,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                exact_source.encode("utf-8")
+            ).hexdigest(),
             proposals=(proposal,),
         )
 
@@ -848,9 +860,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="safe-maximum-proposal-batch",
-            source_ref="fixture://synthetic-profile/maximum-batch.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -862,19 +875,18 @@ class ProfileImportProposalTests(unittest.TestCase):
         safe = single_proposal_request()
         request = replace(
             safe,
-            artifact_id="A" * 20,
             proposals=(safe.proposals[0],) * 3,
         )
         unique_input_size = (
             len(request.source_ref)
-            + len(request.extraction_method)
-            + len(request.artifact_id or "")
+            + len(request.extractor_id)
+            + len(request.source_artifact_id)
             + sum(len(proposal.subject_type) for proposal in request.proposals)
         )
         persisted_size = len(request.proposals) * (
             (2 * len(request.source_ref))
-            + len(request.extraction_method)
-            + len(request.artifact_id or "")
+            + len(request.extractor_id)
+            + len(request.source_artifact_id)
         ) + sum(len(proposal.subject_type) for proposal in request.proposals)
         test_limit = (unique_input_size + persisted_size) // 2
         self.assertLess(unique_input_size, test_limit)
@@ -902,6 +914,55 @@ class ProfileImportProposalTests(unittest.TestCase):
             request,
             message_pattern="valid Unicode",
         )
+
+    def test_source_identity_and_extractor_are_application_owned(self) -> None:
+        request = single_proposal_request()
+        forbidden_values = {
+            "source_sha256": "0" * 64,
+            "source_ref": "file:///Users/SYNTHETIC_PRIVATE_PERSON/resume.txt",
+            "source_artifact_id": "forged-artifact",
+            "extractor_id": "trusted-looking@999",
+        }
+
+        for field_name, value in forbidden_values.items():
+            with self.subTest(field_name=field_name):
+                with self.assertRaises((TypeError, ValueError)):
+                    replace(request, **{field_name: value})
+
+        object.__setattr__(request, "source_sha256", "0" * 64)
+        object.__setattr__(
+            request,
+            "source_ref",
+            "file:///Users/SYNTHETIC_PRIVATE_PERSON/resume.txt",
+        )
+        object.__setattr__(request, "source_artifact_id", "forged-artifact")
+        object.__setattr__(request, "extractor_id", "trusted-looking@999")
+
+        preview = self.service.preview_import_proposal(request)
+        result = self.service.create_import_proposal(request, now=NOW)
+
+        expected_digest = hashlib.sha256(request.source_text.encode("utf-8")).hexdigest()
+        self.assertEqual(preview.source_sha256, expected_digest)
+        self.assertEqual(result.source_ref, f"sha256:{expected_digest}")
+        self.assertEqual(result.extractor_id, PROFILE_IMPORT_EXTRACTOR_ID)
+        self.assertNotIn("SYNTHETIC_PRIVATE_PERSON", str(result))
+
+    def test_source_digest_assertion_and_extractor_registry_fail_closed(self) -> None:
+        request = single_proposal_request()
+
+        with self.assertRaisesRegex(ValueError, "source digest"):
+            replace(request, expected_source_sha256="0" * 64)
+        with patch(
+            "grounded_apply.services.profile.PROFILE_IMPORT_EXTRACTOR_ID",
+            "unregistered.profile-import@1",
+        ):
+            with self.assertRaisesRegex(ValueError, "registered identifier"):
+                replace(request)
+
+        self.assertEqual(self.repository.list_artifacts(), [])
+        self.assertEqual(self.repository.list_claims(), [])
+        self.assertEqual(self.repository.list_evidence(), [])
+        self.assertEqual(self.repository.list_workflow_runs(), [])
 
     def assert_disallowed_content_on_every_surface(
         self,
@@ -1222,41 +1283,6 @@ class ProfileImportProposalTests(unittest.TestCase):
             (
                 replace(
                     safe,
-                    source_ref=(
-                        "https://synthetic-user:synthetic-password@"
-                        "profile.example.com/resume"
-                    ),
-                ),
-                "synthetic-password",
-            ),
-            (
-                replace(
-                    safe,
-                    source_ref=f"https://profile.example.com/resume?token={token}",
-                ),
-                token,
-            ),
-            (
-                replace(
-                    safe,
-                    source_ref=(
-                        "https://profile.example.com/resume?"
-                        "token%253DSYNTHETIC_NOT_A_TOKEN_1234567890"
-                    ),
-                ),
-                "SYNTHETIC_NOT_A_TOKEN_1234567890",
-            ),
-            (
-                replace(
-                    safe,
-                    extraction_method=f"extractor@ghp_{'A' * 30}",
-                ),
-                "ghp_",
-            ),
-            (replace(safe, artifact_id=f"token={token}"), token),
-            (
-                replace(
-                    safe,
                     proposals=(
                         replace(safe.proposals[0], subject_id=f"token={token}"),
                     ),
@@ -1519,9 +1545,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="reordered-whole-document-values",
-            source_ref="fixture://synthetic-profile/reordered-values.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -1546,9 +1573,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="short-reordered-whole-document",
-            source_ref="fixture://synthetic-profile/short-reordered.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -1572,9 +1600,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="single-character-whole-document",
-            source_ref="fixture://synthetic-profile/single-character-chunks.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -1598,9 +1627,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="punctuation-padded-source-characters",
-            source_ref="fixture://synthetic-profile/padded-characters.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -1625,9 +1655,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="source-character-padded-document",
-            source_ref="fixture://synthetic-profile/source-character-padding.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -1654,9 +1685,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="unrelated-value-length",
-            source_ref="fixture://synthetic-profile/unrelated-values.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -1677,7 +1709,6 @@ class ProfileImportProposalTests(unittest.TestCase):
                 safe,
                 proposals=(replace(safe.proposals[0], subject_id=source_text),),
             ),
-            replace(safe, source_ref=f"fixture://whole/{source_text}"),
             replace(
                 safe,
                 proposals=(
@@ -1699,24 +1730,6 @@ class ProfileImportProposalTests(unittest.TestCase):
                     request,
                     message_pattern="metadata.*whole source|metadata.*too broad",
                 )
-
-        short_source = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet"
-        selected = "Alpha"
-        encoded_source_ref = "fixture://whole/" + quote(
-            quote(short_source, safe=""),
-            safe="",
-        )
-        self.assertLessEqual(len(encoded_source_ref), 512)
-        short_safe = single_proposal_request(
-            canonical_text="Synthetic encoded metadata claim",
-            source_text=short_source,
-            span=TextSourceSpan(start=0, end=len(selected), text=selected),
-            idempotency_key="encoded-whole-document-metadata",
-        )
-        self.assert_rejected_before_storage(
-            replace(short_safe, source_ref=encoded_source_ref),
-            message_pattern="metadata.*whole source|metadata.*too broad",
-        )
 
     def test_percent_encoded_whole_document_content_is_rejected(self) -> None:
         source_text, _ = load_fixture()
@@ -1802,9 +1815,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="split-whole-document",
-            source_ref="fixture://synthetic-profile/split-document.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -1837,9 +1851,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="padded-split-whole-document",
-            source_ref="fixture://synthetic-profile/padded-split-document.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -1872,9 +1887,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         request = CreateImportProposal(
             idempotency_key="invisible-padded-document",
-            source_ref="fixture://synthetic-profile/invisible-padding.txt",
             source_text=source_text,
-            extraction_method="synthetic-schema-test@1",
+            expected_source_sha256=hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
             proposals=proposals,
         )
 
@@ -1949,12 +1965,18 @@ class ProfileImportProposalTests(unittest.TestCase):
             preview.source_sha256,
             hashlib.sha256(request.source_text.encode("utf-8")).hexdigest(),
         )
+        self.assertEqual(preview.source_ref, request.source_ref)
+        self.assertEqual(preview.source_artifact_id, request.source_artifact_id)
+        self.assertEqual(preview.extractor_id, PROFILE_IMPORT_EXTRACTOR_ID)
         self.assertEqual(self.repository.list_claims(), [])
         self.assertEqual(self.repository.list_evidence(), [])
         self.assertEqual(self.repository.list_workflow_runs(), [])
 
         result = self.service.create_import_proposal(request, now=NOW)
         self.assertEqual(result.source_sha256, preview.source_sha256)
+        self.assertEqual(result.source_ref, preview.source_ref)
+        self.assertEqual(result.source_artifact_id, preview.source_artifact_id)
+        self.assertEqual(result.extractor_id, preview.extractor_id)
         self.assertEqual(len(result.claims), preview.proposal_count)
 
     def test_review_items_expose_only_pending_claims_and_exact_support(self) -> None:
@@ -1993,6 +2015,85 @@ class ProfileImportProposalTests(unittest.TestCase):
                 ),
             )
 
+    def test_public_generic_mutations_reject_imported_resume_records(self) -> None:
+        private_source_ref = "file:///Users/SYNTHETIC_PRIVATE_PERSON/resume.txt"
+
+        with self.assertRaisesRegex(ValueError, "profile import workflow") as claim_error:
+            self.service.create_claim(
+                CreateClaim(
+                    claim_type="skill_use",
+                    value="Python",
+                    canonical_text="Used Python in a fictional project",
+                    source_type=SourceType.IMPORTED_RESUME,
+                    source_ref=private_source_ref,
+                ),
+                now=NOW,
+            )
+
+        ordinary_claim = self.service.create_claim(
+            CreateClaim(
+                claim_type="skill_use",
+                value="Python",
+                canonical_text="Used Python in a fictional user statement",
+                source_type=SourceType.USER_STATEMENT,
+                source_ref="user-statement://synthetic-profile/1",
+            ),
+            now=NOW,
+        )
+        with self.assertRaisesRegex(ValueError, "profile import workflow") as evidence_error:
+            self.service.create_evidence(
+                CreateEvidence(
+                    claim_id=ordinary_claim.id,
+                    source_type=SourceType.IMPORTED_RESUME,
+                    source_ref=private_source_ref,
+                    source_text="Synthetic supporting evidence",
+                    extraction_method="caller-claimed@999",
+                ),
+                now=NOW,
+            )
+
+        self.assertNotIn(private_source_ref, str(claim_error.exception))
+        self.assertNotIn(private_source_ref, str(evidence_error.exception))
+        self.assertEqual(len(self.repository.list_claims()), 1)
+        self.assertEqual(self.repository.list_evidence(), [])
+        self.assertEqual(self.repository.list_artifacts(), [])
+
+    def test_review_blocks_legacy_path_and_unregistered_extractor_provenance(
+        self,
+    ) -> None:
+        private_source_ref = "file:///Users/SYNTHETIC_PRIVATE_PERSON/resume.txt"
+        current = self.service.create_import_proposal(import_request(), now=NOW)
+        legacy_claim = self.repository.add_claim(
+            claim_id="synthetic-legacy-import-claim",
+            claim_type="skill_use",
+            value="Python",
+            canonical_text="Used Python in a fictional legacy import",
+            source_type=SourceType.IMPORTED_RESUME.value,
+            source_ref=private_source_ref,
+            created_at=NOW_TEXT,
+        )
+        self.repository.add_evidence(
+            evidence_id="synthetic-legacy-import-evidence",
+            claim_id=str(legacy_claim["id"]),
+            source_type=SourceType.IMPORTED_RESUME.value,
+            source_ref=private_source_ref,
+            source_text="Synthetic supporting evidence",
+            extraction_method="caller-claimed@999",
+            captured_at=NOW_TEXT,
+            created_at=NOW_TEXT,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source provenance is not application-owned",
+        ) as error:
+            self.service.list_review_items()
+
+        self.assertNotIn(private_source_ref, str(error.exception))
+        self.assertNotIn("SYNTHETIC_PRIVATE_PERSON", str(error.exception))
+        self.assertEqual(len(self.repository.list_claims()), len(current.claims) + 1)
+        self.assertEqual(len(self.repository.list_evidence()), len(current.evidence) + 1)
+
     def test_fixture_import_creates_only_reviewable_claims_with_exact_evidence(self) -> None:
         source_text, data = load_fixture()
         request = import_request(source_text=source_text, proposal_data=data)
@@ -2005,6 +2106,16 @@ class ProfileImportProposalTests(unittest.TestCase):
             result.source_sha256,
             hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
         )
+        self.assertEqual(result.source_ref, f"sha256:{result.source_sha256}")
+        self.assertEqual(
+            result.source_artifact_id,
+            f"profile-import-source:sha256:{result.source_sha256}",
+        )
+        self.assertEqual(result.extractor_id, PROFILE_IMPORT_EXTRACTOR_ID)
+        self.assertEqual(
+            registered_profile_import_extractors(),
+            frozenset({PROFILE_IMPORT_EXTRACTOR_ID}),
+        )
         for claim, evidence, proposed in zip(
             result.claims, result.evidence, data["proposals"], strict=True
         ):
@@ -2013,7 +2124,7 @@ class ProfileImportProposalTests(unittest.TestCase):
             self.assertEqual(claim.status, ClaimStatus.NEEDS_REVIEW)
             self.assertEqual(claim.approval_status, ApprovalStatus.PENDING)
             self.assertEqual(claim.source_type, SourceType.IMPORTED_RESUME)
-            self.assertEqual(claim.source_ref, data["source_ref"])
+            self.assertEqual(claim.source_ref, result.source_ref)
             self.assertIsNone(claim.verified_at)
             self.assertIsNone(claim.verified_by)
             self.assertEqual(claim.evidence_ids, (evidence.id,))
@@ -2021,8 +2132,9 @@ class ProfileImportProposalTests(unittest.TestCase):
             self.assertEqual(claim.canonical_text, proposed["canonical_text"])
             self.assertEqual(evidence.confirmation_status, EvidenceConfirmationStatus.PENDING)
             self.assertEqual(evidence.source_type, SourceType.IMPORTED_RESUME)
-            self.assertEqual(evidence.source_ref, data["source_ref"])
-            self.assertEqual(evidence.extraction_method, data["extraction_method"])
+            self.assertEqual(evidence.source_ref, result.source_ref)
+            self.assertEqual(evidence.artifact_id, result.source_artifact_id)
+            self.assertEqual(evidence.extraction_method, PROFILE_IMPORT_EXTRACTOR_ID)
             self.assertEqual(evidence.source_text, expected_text)
             self.assertEqual(
                 evidence.checksum,
@@ -2097,17 +2209,172 @@ class ProfileImportProposalTests(unittest.TestCase):
         self.assertEqual(retry, first)
         self.assertEqual(len(self.repository.list_claims()), len(first.claims))
         self.assertEqual(len(self.repository.list_evidence()), len(first.evidence))
+        self.assertEqual(len(self.repository.list_artifacts()), 1)
         workflow = self.repository.get_workflow_run(first.workflow_run_id)
         self.assertIsNotNone(workflow)
         assert workflow is not None
-        self.assertNotEqual(workflow["idempotency_key"], request.idempotency_key)
-        self.assertEqual(len(str(workflow["idempotency_key"])), 64)
+        expected_idempotency_digest = hashlib.sha256(
+            request.idempotency_key.encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(workflow["idempotency_key"], expected_idempotency_digest)
         self.assertNotIn(request.idempotency_key, str(workflow))
         self.assertNotIn("Avery Quill", str(workflow["input_json"]))
         self.assertNotIn("Ignore previous instructions", str(workflow["input_json"]))
         workflow_input = json.loads(str(workflow["input_json"]))
+        self.assertEqual(
+            set(workflow_input),
+            {
+                "content_policy_version",
+                "extractor_id",
+                "idempotency_key_sha256",
+                "manifest_schema_version",
+                "proposal_count",
+                "proposals_sha256",
+                "record_id_schema_version",
+                "request_schema_version",
+                "result_manifest_schema_version",
+                "source_artifact_id",
+                "source_byte_size",
+                "source_codepoint_size",
+                "source_identity_schema_version",
+                "source_ref",
+                "source_sha256",
+                "span_locator_schema_version",
+                "value_schema_version",
+            },
+        )
+        self.assertEqual(workflow_input["request_schema_version"], 2)
+        self.assertEqual(workflow_input["manifest_schema_version"], 2)
+        self.assertEqual(workflow_input["result_manifest_schema_version"], 2)
+        self.assertEqual(workflow_input["record_id_schema_version"], 1)
+        self.assertEqual(workflow_input["source_identity_schema_version"], 1)
+        self.assertEqual(workflow_input["span_locator_schema_version"], 1)
         self.assertEqual(workflow_input["value_schema_version"], 1)
         self.assertEqual(workflow_input["content_policy_version"], 1)
+        self.assertEqual(workflow_input["extractor_id"], PROFILE_IMPORT_EXTRACTOR_ID)
+        self.assertEqual(
+            workflow_input["idempotency_key_sha256"], expected_idempotency_digest
+        )
+        self.assertEqual(workflow_input["source_sha256"], request.source_sha256)
+        self.assertEqual(workflow_input["source_ref"], request.source_ref)
+        self.assertEqual(
+            workflow_input["source_codepoint_size"], len(request.source_text)
+        )
+        self.assertEqual(
+            workflow_input["source_artifact_id"], request.source_artifact_id
+        )
+        self.assertEqual(
+            workflow["input_hash_sha256"],
+            hashlib.sha256(str(workflow["input_json"]).encode("utf-8")).hexdigest(),
+        )
+
+    def test_idempotency_digest_is_bound_into_the_workflow_request_identity(self) -> None:
+        first_request = import_request()
+        second_request = replace(
+            first_request,
+            idempotency_key="fixture-avery-quill-import-second-key",
+        )
+        first = self.service.create_import_proposal(first_request, now=NOW)
+        second = self.service.create_import_proposal(second_request, now=NOW)
+        first_workflow = self.repository.get_workflow_run(first.workflow_run_id)
+        second_workflow = self.repository.get_workflow_run(second.workflow_run_id)
+        assert first_workflow is not None and second_workflow is not None
+        first_input = json.loads(str(first_workflow["input_json"]))
+        second_input = json.loads(str(second_workflow["input_json"]))
+
+        self.assertEqual(
+            first_input["idempotency_key_sha256"], first_workflow["idempotency_key"]
+        )
+        self.assertEqual(
+            second_input["idempotency_key_sha256"], second_workflow["idempotency_key"]
+        )
+        self.assertNotEqual(first_input, second_input)
+        self.assertNotEqual(
+            first_workflow["input_hash_sha256"], second_workflow["input_hash_sha256"]
+        )
+
+        first_input["idempotency_key_sha256"] = second_input[
+            "idempotency_key_sha256"
+        ]
+        tampered_input = json.dumps(
+            first_input,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with closing(sqlite3.connect(self.repository.database)) as connection:
+            connection.execute(
+                "UPDATE workflow_runs SET input_json = ?, input_hash_sha256 = ? "
+                "WHERE id = ?",
+                (
+                    tampered_input,
+                    hashlib.sha256(tampered_input.encode("utf-8")).hexdigest(),
+                    first.workflow_run_id,
+                ),
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(RepositoryError, "idempotency key") as error:
+            self.service.create_import_proposal(first_request, now=NOW)
+
+        self.assertNotIn(first_request.idempotency_key, str(error.exception))
+        self.assertEqual(len(self.repository.list_workflow_runs()), 2)
+
+    def test_record_ids_are_deterministic_and_bound_to_their_workflow(self) -> None:
+        first_request = import_request()
+        second_request = replace(
+            first_request,
+            idempotency_key="fixture-avery-quill-import-distinct-workflow",
+        )
+        first = self.service.create_import_proposal(first_request, now=NOW)
+        second = self.service.create_import_proposal(second_request, now=NOW)
+
+        for result in (first, second):
+            for index, (claim, evidence) in enumerate(
+                zip(result.claims, result.evidence, strict=True)
+            ):
+                prefix = (
+                    "urn:grounded-apply:profile-import-record:"
+                    f"v1:{result.workflow_run_id}:{index}"
+                )
+                self.assertEqual(
+                    claim.id,
+                    str(uuid.uuid5(uuid.NAMESPACE_URL, f"{prefix}:claim")),
+                )
+                self.assertEqual(
+                    evidence.id,
+                    str(uuid.uuid5(uuid.NAMESPACE_URL, f"{prefix}:evidence")),
+                )
+
+        self.assertTrue(
+            {claim.id for claim in first.claims}.isdisjoint(
+                claim.id for claim in second.claims
+            )
+        )
+        self.assertTrue(
+            {evidence.id for evidence in first.evidence}.isdisjoint(
+                evidence.id for evidence in second.evidence
+            )
+        )
+
+        second_workflow = self.repository.get_workflow_run(second.workflow_run_id)
+        assert second_workflow is not None
+        substituted_manifest = json.loads(
+            str(second_workflow["generated_artifacts_json"])
+        )
+        self.repository.update_workflow_run(
+            first.workflow_run_id,
+            generated_artifacts=substituted_manifest,
+        )
+
+        with self.assertRaisesRegex(RepositoryError, "record identities") as error:
+            self.service.create_import_proposal(first_request, now=NOW)
+
+        self.assertNotIn(first_request.source_text, str(error.exception))
+        self.assertEqual(len(self.repository.list_claims()), 10)
+        self.assertEqual(len(self.repository.list_evidence()), 10)
+        self.assertEqual(len(self.repository.list_workflow_runs()), 2)
 
     def test_retry_rejects_a_corrupted_persisted_result_manifest(self) -> None:
         request = import_request()
@@ -2139,20 +2406,244 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         self.repository.update_workflow_run(
             first.workflow_run_id,
-            generated_artifacts=reversed_pairs,
+            generated_artifacts={
+                "schema_version": 2,
+                "source_artifact_id": request.source_artifact_id,
+                "records": reversed_pairs,
+            },
         )
 
-        with self.assertRaisesRegex(RepositoryError, "integrity checks"):
+        with self.assertRaisesRegex(RepositoryError, "record identities"):
+            self.service.create_import_proposal(request, now=NOW)
+
+    def test_retry_revalidates_every_persisted_provenance_copy(self) -> None:
+        corruptions = (
+            ("claims", "source_ref", f"sha256:{'0' * 64}"),
+            ("evidence", "source_ref", f"sha256:{'0' * 64}"),
+            ("evidence", "extraction_method", "unregistered.profile-import@1"),
+            ("evidence", "locator_json", "{}"),
+            ("evidence", "checksum_sha256", "0" * 64),
+        )
+
+        for table, column, value in corruptions:
+            with self.subTest(table=table, column=column):
+                with tempfile.TemporaryDirectory() as directory:
+                    database = Path(directory) / "profile.db"
+                    with SQLiteRepository(database) as repository:
+                        service = ProfileService(repository)
+                        request = import_request()
+                        first = service.create_import_proposal(request, now=NOW)
+                        with closing(sqlite3.connect(database)) as connection:
+                            connection.execute(
+                                f"UPDATE {table} SET {column} = ?",
+                                (value,),
+                            )
+                            connection.commit()
+
+                        with self.assertRaisesRegex(
+                            RepositoryError,
+                            "integrity checks",
+                        ):
+                            service.create_import_proposal(request, now=NOW)
+
+                        self.assertEqual(len(repository.list_artifacts()), 1)
+                        self.assertEqual(
+                            len(repository.list_claims()), len(first.claims)
+                        )
+                        self.assertEqual(
+                            len(repository.list_evidence()), len(first.evidence)
+                        )
+                        self.assertEqual(len(repository.list_workflow_runs()), 1)
+
+    def test_retry_rejects_tampered_support_link_strength_and_note(self) -> None:
+        private_marker = "SYNTHETIC_PRIVATE_LINK_NOTE"
+        corruptions: tuple[tuple[str, object], ...] = (
+            ("strength", 0.0),
+            ("note", private_marker),
+        )
+
+        for column, value in corruptions:
+            with self.subTest(column=column), tempfile.TemporaryDirectory() as directory:
+                database = Path(directory) / "profile.db"
+                with SQLiteRepository(database) as repository:
+                    service = ProfileService(repository)
+                    request = import_request()
+                    first = service.create_import_proposal(request, now=NOW)
+                    with closing(sqlite3.connect(database)) as connection:
+                        connection.execute(
+                            f"UPDATE claim_evidence SET {column} = ? "
+                            "WHERE claim_id = ? AND evidence_id = ?",
+                            (value, first.claims[0].id, first.evidence[0].id),
+                        )
+                        connection.commit()
+
+                    with self.assertRaisesRegex(
+                        RepositoryError,
+                        "evidence links are invalid",
+                    ) as error:
+                        service.create_import_proposal(request, now=NOW)
+
+                    self.assertNotIn(private_marker, str(error.exception))
+                    self.assertEqual(len(repository.list_claims()), len(first.claims))
+                    self.assertEqual(len(repository.list_evidence()), len(first.evidence))
+                    self.assertEqual(len(repository.list_workflow_runs()), 1)
+
+    def test_retry_rejects_unrequested_claim_dates_and_supersession(self) -> None:
+        for column in ("effective_from", "effective_to", "supersedes_id"):
+            with self.subTest(column=column), tempfile.TemporaryDirectory() as directory:
+                database = Path(directory) / "profile.db"
+                with SQLiteRepository(database) as repository:
+                    service = ProfileService(repository)
+                    request = import_request()
+                    first = service.create_import_proposal(request, now=NOW)
+                    value = (
+                        first.claims[1].id
+                        if column == "supersedes_id"
+                        else "2025-01-01T00:00:00Z"
+                    )
+                    with closing(sqlite3.connect(database)) as connection:
+                        connection.execute(
+                            f"UPDATE claims SET {column} = ? WHERE id = ?",
+                            (value, first.claims[0].id),
+                        )
+                        connection.commit()
+
+                    with self.assertRaisesRegex(
+                        RepositoryError,
+                        "integrity checks",
+                    ):
+                        service.create_import_proposal(request, now=NOW)
+
+                    self.assertEqual(len(repository.list_claims()), len(first.claims))
+                    self.assertEqual(len(repository.list_evidence()), len(first.evidence))
+                    self.assertEqual(len(repository.list_workflow_runs()), 1)
+
+    def test_retry_rejects_evidence_metadata_and_confirmation_mutations(self) -> None:
+        private_marker = "SYNTHETIC_PRIVATE_EVIDENCE_METADATA"
+        corruptions: tuple[tuple[str, tuple[object, ...]], ...] = (
+            (
+                "UPDATE evidence SET metadata_json = ? WHERE id = ?",
+                (json.dumps({"private": private_marker}),),
+            ),
+            (
+                "UPDATE evidence SET confirmed_at = ? WHERE id = ?",
+                (NOW_TEXT,),
+            ),
+            (
+                "UPDATE evidence SET confirmed_by = ? WHERE id = ?",
+                (private_marker,),
+            ),
+            (
+                "UPDATE evidence SET confirmation_status = 'confirmed', "
+                "confirmed_at = ? WHERE id = ?",
+                (NOW_TEXT,),
+            ),
+        )
+
+        for index, (statement, parameters) in enumerate(corruptions):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                database = Path(directory) / "profile.db"
+                with SQLiteRepository(database) as repository:
+                    service = ProfileService(repository)
+                    request = import_request()
+                    first = service.create_import_proposal(request, now=NOW)
+                    with closing(sqlite3.connect(database)) as connection:
+                        connection.execute(
+                            statement,
+                            (*parameters, first.evidence[0].id),
+                        )
+                        connection.commit()
+
+                    with self.assertRaisesRegex(
+                        RepositoryError,
+                        "integrity checks",
+                    ) as error:
+                        service.create_import_proposal(request, now=NOW)
+
+                    self.assertNotIn(private_marker, str(error.exception))
+                    self.assertEqual(len(repository.list_claims()), len(first.claims))
+                    self.assertEqual(len(repository.list_evidence()), len(first.evidence))
+                    self.assertEqual(len(repository.list_workflow_runs()), 1)
+
+    def test_retry_rejects_corrupted_workflow_checkpoint_fields(self) -> None:
+        private_marker = "SYNTHETIC_PRIVATE_CHECKPOINT"
+        corruptions: tuple[tuple[str, object], ...] = (
+            ("status", "running"),
+            ("current_step", "persist_reviewable_claims"),
+            ("completed_steps_json", "[]"),
+            ("completed_steps_json", "{"),
+            ("outstanding_need_info_json", json.dumps([private_marker])),
+            ("retry_policy_json", json.dumps({"tampered": True})),
+            ("model_name", "synthetic-model"),
+            ("prompt_version", "synthetic-prompt@1"),
+            ("failure_code", "synthetic_failure"),
+            ("failure_reason", private_marker),
+            ("started_at", "2026-08-10T12:00:00Z"),
+            ("finished_at", "2026-08-12T12:00:00Z"),
+        )
+
+        for column, value in corruptions:
+            with (
+                self.subTest(column=column, value=value),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                database = Path(directory) / "profile.db"
+                with SQLiteRepository(database) as repository:
+                    service = ProfileService(repository)
+                    request = import_request()
+                    first = service.create_import_proposal(request, now=NOW)
+                    with closing(sqlite3.connect(database)) as connection:
+                        connection.execute(
+                            f"UPDATE workflow_runs SET {column} = ? WHERE id = ?",
+                            (value, first.workflow_run_id),
+                        )
+                        connection.commit()
+
+                    with self.assertRaisesRegex(
+                        RepositoryError,
+                        "checkpoint|safely retryable",
+                    ) as error:
+                        service.create_import_proposal(request, now=NOW)
+
+                    self.assertNotIn(private_marker, str(error.exception))
+                    self.assertEqual(len(repository.list_claims()), len(first.claims))
+                    self.assertEqual(len(repository.list_evidence()), len(first.evidence))
+                    self.assertEqual(len(repository.list_workflow_runs()), 1)
+
+    def test_retry_rejects_an_extra_evidence_link(self) -> None:
+        request = import_request()
+        first = self.service.create_import_proposal(request, now=NOW)
+        claim = first.claims[0]
+        evidence = first.evidence[0]
+        self.repository.add_evidence(
+            evidence_id="synthetic-extra-import-evidence",
+            claim_id=claim.id,
+            source_type=SourceType.IMPORTED_RESUME.value,
+            source_ref=request.source_ref,
+            source_text=evidence.source_text or "Synthetic evidence",
+            locator=evidence.locator,
+            extraction_method=PROFILE_IMPORT_EXTRACTOR_ID,
+            artifact_id=request.source_artifact_id,
+            checksum_sha256=evidence.checksum,
+            captured_at=NOW_TEXT,
+            created_at=NOW_TEXT,
+        )
+
+        with self.assertRaisesRegex(ValueError, "complete pending"):
+            self.service.list_review_items()
+        with self.assertRaisesRegex(RepositoryError, "evidence links are invalid"):
             self.service.create_import_proposal(request, now=NOW)
 
     def test_reusing_an_idempotency_key_with_different_input_fails_closed(self) -> None:
         request = import_request()
         first = self.service.create_import_proposal(request, now=NOW)
+        changed_source = request.source_text + "\nChanged after the first request.\n"
         changed = CreateImportProposal(
             idempotency_key=request.idempotency_key,
-            source_ref=request.source_ref,
-            source_text=request.source_text + "\nChanged after the first request.\n",
-            extraction_method=request.extraction_method,
+            source_text=changed_source,
+            expected_source_sha256=hashlib.sha256(
+                changed_source.encode("utf-8")
+            ).hexdigest(),
             proposals=request.proposals,
         )
 
@@ -2197,6 +2688,7 @@ class ProfileImportProposalTests(unittest.TestCase):
 
         self.assertEqual(results[0], results[1])
         with SQLiteRepository(database) as repository:
+            self.assertEqual(len(repository.list_artifacts()), 1)
             self.assertEqual(len(repository.list_claims()), 5)
             self.assertEqual(len(repository.list_evidence()), 5)
             self.assertEqual(len(repository.list_workflow_runs()), 1)
@@ -2227,9 +2719,8 @@ class ProfileImportProposalTests(unittest.TestCase):
                     self.service.create_import_proposal(
                         CreateImportProposal(
                             idempotency_key="invalid-span",
-                            source_ref=data["source_ref"],
                             source_text=source_text,
-                            extraction_method=data["extraction_method"],
+                            expected_source_sha256=data["source_sha256"],
                             proposals=(candidate,),
                         ),
                         now=NOW,
@@ -2239,7 +2730,7 @@ class ProfileImportProposalTests(unittest.TestCase):
 
     def test_batch_rolls_back_when_a_later_evidence_write_fails(self) -> None:
         request = import_request()
-        original_create_evidence = self.service.create_evidence
+        original_create_evidence = self.service._create_evidence
         call_count = 0
 
         def fail_on_second_evidence(
@@ -2255,7 +2746,7 @@ class ProfileImportProposalTests(unittest.TestCase):
 
         with patch.object(
             self.service,
-            "create_evidence",
+            "_create_evidence",
             side_effect=fail_on_second_evidence,
         ):
             with self.assertRaisesRegex(RuntimeError, "second evidence failure"):
@@ -2263,17 +2754,193 @@ class ProfileImportProposalTests(unittest.TestCase):
 
         self.assertEqual(self.repository.list_claims(), [])
         self.assertEqual(self.repository.list_evidence(), [])
+        self.assertEqual(self.repository.list_artifacts(), [])
         self.assertEqual(self.repository.list_workflow_runs(), [])
 
-    def test_missing_artifact_link_rolls_back_the_import(self) -> None:
-        request = import_request(artifact_id="missing-protected-artifact")
+    def test_source_artifact_is_application_owned_and_reused(self) -> None:
+        request = import_request()
 
-        with self.assertRaises(sqlite3.IntegrityError):
+        first = self.service.create_import_proposal(request, now=NOW)
+        second = self.service.create_import_proposal(
+            replace(request, idempotency_key="same-source-second-workflow"),
+            now=NOW,
+        )
+
+        self.assertNotEqual(first.workflow_run_id, second.workflow_run_id)
+        artifacts = self.repository.list_artifacts()
+        self.assertEqual(len(artifacts), 1)
+        artifact = artifacts[0]
+        self.assertEqual(
+            set(artifact),
+            {
+                "id",
+                "artifact_type",
+                "uri",
+                "local_path",
+                "original_name",
+                "media_type",
+                "byte_size",
+                "content_sha256",
+                "sensitivity",
+                "metadata_json",
+                "captured_at",
+                "created_at",
+                "updated_at",
+            },
+        )
+        self.assertEqual(artifact["id"], request.source_artifact_id)
+        self.assertEqual(artifact["artifact_type"], "profile_import_source_digest")
+        self.assertEqual(artifact["uri"], request.source_ref)
+        self.assertIsNone(artifact["local_path"])
+        self.assertIsNone(artifact["original_name"])
+        self.assertEqual(artifact["media_type"], "text/plain; charset=utf-8")
+        self.assertEqual(artifact["content_sha256"], request.source_sha256)
+        self.assertEqual(artifact["sensitivity"], Sensitivity.PERSONAL.value)
+        self.assertEqual(
+            artifact["byte_size"], len(request.source_text.encode("utf-8"))
+        )
+        self.assertEqual(
+            json.loads(str(artifact["metadata_json"])),
+            {
+                "retention": "digest_only",
+                "source_codepoint_size": len(request.source_text),
+                "source_identity_schema_version": 1,
+            },
+        )
+        self.assertEqual(artifact["captured_at"], NOW_TEXT)
+        self.assertEqual(artifact["created_at"], NOW_TEXT)
+        self.assertEqual(artifact["updated_at"], NOW_TEXT)
+        self.assertNotIn(request.source_text, str(artifact))
+        self.assertEqual(
+            {evidence.artifact_id for evidence in first.evidence + second.evidence},
+            {request.source_artifact_id},
+        )
+
+    def test_preexisting_corrupt_source_artifact_collision_rolls_back_without_repair(
+        self,
+    ) -> None:
+        request = import_request()
+        private_marker = "/Users/SYNTHETIC_PRIVATE_PERSON/resume.txt"
+        before = self.repository.add_artifact(
+            artifact_id=request.source_artifact_id,
+            artifact_type="profile_import_source_digest",
+            uri=request.source_ref,
+            local_path=None,
+            original_name=private_marker,
+            media_type="text/plain; charset=utf-8",
+            byte_size=len(request.source_text.encode("utf-8")),
+            content_sha256=request.source_sha256,
+            sensitivity=Sensitivity.PERSONAL.value,
+            metadata={
+                "retention": "digest_only",
+                "source_codepoint_size": len(request.source_text),
+                "source_identity_schema_version": 1,
+            },
+            captured_at=NOW_TEXT,
+            created_at=NOW_TEXT,
+        )
+
+        with self.assertRaisesRegex(
+            RepositoryError,
+            "source identity.*integrity",
+        ) as error:
             self.service.create_import_proposal(request, now=NOW)
 
+        self.assertNotIn(private_marker, str(error.exception))
+        self.assertEqual(self.repository.get_artifact(request.source_artifact_id), before)
         self.assertEqual(self.repository.list_claims(), [])
         self.assertEqual(self.repository.list_evidence(), [])
         self.assertEqual(self.repository.list_workflow_runs(), [])
+
+    def test_review_rejects_corrupt_source_provenance_without_disclosing_it(self) -> None:
+        private_marker = "/Users/SYNTHETIC_PRIVATE_PERSON/resume.txt"
+        corruption_names = (
+            "artifact",
+            "locator_digest",
+            "checksum",
+            "out_of_source_codepoint_bound",
+        )
+
+        for corruption in corruption_names:
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as directory:
+                database = Path(directory) / "profile.db"
+                with SQLiteRepository(database) as repository:
+                    service = ProfileService(repository)
+                    request = import_request()
+                    first = service.create_import_proposal(request, now=NOW)
+                    evidence = first.evidence[0]
+                    assert isinstance(evidence.locator, dict)
+                    with closing(sqlite3.connect(database)) as connection:
+                        if corruption == "artifact":
+                            connection.execute(
+                                "UPDATE artifacts SET original_name = ? WHERE id = ?",
+                                (private_marker, request.source_artifact_id),
+                            )
+                        elif corruption == "locator_digest":
+                            locator = {**evidence.locator, "source_sha256": "0" * 64}
+                            connection.execute(
+                                "UPDATE evidence SET locator_json = ? WHERE id = ?",
+                                (json.dumps(locator), evidence.id),
+                            )
+                        elif corruption == "checksum":
+                            connection.execute(
+                                "UPDATE evidence SET checksum_sha256 = ? WHERE id = ?",
+                                ("0" * 64, evidence.id),
+                            )
+                        else:
+                            self.assertGreater(
+                                len(request.source_text.encode("utf-8")),
+                                len(request.source_text),
+                            )
+                            selected_text = "X"
+                            start = len(request.source_text)
+                            locator = {
+                                **evidence.locator,
+                                "start": start,
+                                "end": start + len(selected_text),
+                            }
+                            connection.execute(
+                                "UPDATE evidence SET locator_json = ?, source_text = ?, "
+                                "checksum_sha256 = ? WHERE id = ?",
+                                (
+                                    json.dumps(locator),
+                                    selected_text,
+                                    hashlib.sha256(
+                                        selected_text.encode("utf-8")
+                                    ).hexdigest(),
+                                    evidence.id,
+                                ),
+                            )
+                        connection.commit()
+
+                    with self.assertRaises((RepositoryError, ValueError)) as error:
+                        service.list_review_items()
+
+                    self.assertIn("integrity", str(error.exception))
+                    self.assertNotIn(private_marker, str(error.exception))
+                    self.assertNotIn(request.source_text, str(error.exception))
+                    self.assertEqual(len(repository.list_claims()), len(first.claims))
+                    self.assertEqual(len(repository.list_evidence()), len(first.evidence))
+                    self.assertEqual(len(repository.list_workflow_runs()), 1)
+
+    def test_corrupted_source_artifact_blocks_retry_without_repair(self) -> None:
+        request = import_request()
+        self.service.create_import_proposal(request, now=NOW)
+        forged_uri = "file:///Users/SYNTHETIC_PRIVATE_PERSON/resume.txt"
+        with closing(sqlite3.connect(self.repository.database)) as connection:
+            connection.execute(
+                "UPDATE artifacts SET uri = ? WHERE id = ?",
+                (forged_uri, request.source_artifact_id),
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(RepositoryError, "source identity.*integrity") as error:
+            self.service.create_import_proposal(request, now=NOW)
+
+        self.assertNotIn(forged_uri, str(error.exception))
+        artifact = self.repository.get_artifact(request.source_artifact_id)
+        assert artifact is not None
+        self.assertEqual(artifact["uri"], forged_uri)
 
     def test_restricted_or_unknown_fact_types_are_not_imported(self) -> None:
         request = import_request()
@@ -2336,9 +3003,8 @@ class ProfileImportProposalTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             CreateImportProposal(
                 idempotency_key="wrong-container",
-                source_ref=request.source_ref,
                 source_text=request.source_text,
-                extraction_method=request.extraction_method,
+                expected_source_sha256=request.source_sha256,
                 proposals=list(request.proposals),  # type: ignore[arg-type]
             )
 
@@ -2360,13 +3026,25 @@ class ProfileImportProposalTests(unittest.TestCase):
         invalid_requests = (
             {
                 "idempotency_key": "",
-                "source_ref": valid.source_ref,
                 "source_text": valid.source_text,
+                "expected_source_sha256": valid.source_sha256,
                 "proposals": valid.proposals,
             },
-            {"source_ref": "", "source_text": valid.source_text, "proposals": valid.proposals},
-            {"source_ref": valid.source_ref, "source_text": "", "proposals": valid.proposals},
-            {"source_ref": valid.source_ref, "source_text": valid.source_text, "proposals": ()},
+            {
+                "source_text": "",
+                "expected_source_sha256": valid.source_sha256,
+                "proposals": valid.proposals,
+            },
+            {
+                "source_text": valid.source_text,
+                "expected_source_sha256": "",
+                "proposals": valid.proposals,
+            },
+            {
+                "source_text": valid.source_text,
+                "expected_source_sha256": valid.source_sha256,
+                "proposals": (),
+            },
         )
 
         for values in invalid_requests:
@@ -2379,7 +3057,6 @@ class ProfileImportProposalTests(unittest.TestCase):
                     self.service.create_import_proposal(
                         CreateImportProposal(
                             idempotency_key=idempotency_key,
-                            extraction_method=valid.extraction_method,
                             **request_values,
                         ),
                         now=NOW,
@@ -2392,10 +3069,9 @@ class ProfileImportProposalTests(unittest.TestCase):
         invalid_values = (
             {"idempotency_key": "candidate private sentence with spaces"},
             {"idempotency_key": "x" * 257},
-            {"source_ref": "/Users/example/private-resume.txt"},
-            {"source_ref": "fixture://resume\nprivate-data"},
-            {"source_ref": f"fixture://{'x' * 503}"},
-            {"extraction_method": f"extractor@{'x' * 128}"},
+            {"expected_source_sha256": "A" * 64},
+            {"expected_source_sha256": "0" * 63},
+            {"expected_source_sha256": "g" * 64},
         )
 
         for changed in invalid_values:
