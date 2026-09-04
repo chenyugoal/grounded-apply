@@ -16,10 +16,12 @@ working-tree checkpoint and next exact task.
 As of September 3, 2026, the repository is in **Phase 0**. The design basis,
 resumability contract, executable scaffold, deterministic truth policies, and
 initial SQLite persistence slice are implemented and verified. Safe structured
-text-import proposals, a strict file/stdin CLI boundary, read-only pending review,
-and the first synthetic profile fixture are implemented; review decisions,
-registered derivations, data lifecycle tools, and all end-user application
-workflows in Phases 1–5 remain planned or in progress.
+text-import proposals, registered schema-v1 claim values, deterministic
+high-confidence defense-in-depth screening of persisted content and metadata,
+whole-source minimization guards, a strict file/stdin CLI boundary, read-only
+pending review, and the first synthetic profile fixture are implemented; review
+decisions, registered derivations, data lifecycle tools, and all end-user
+application workflows in Phases 1–5 remain planned or in progress.
 
 ## Phase 0 — Repository and truth layer
 
@@ -38,9 +40,9 @@ facts and provenance without placing private data in the repository.
 | `NeedInfo`, `Contradiction`, and claim-packet resolution | Implemented | Missing/conflicting/stale/sensitive cases fail closed |
 | SQLite schema and migration mechanism | Implemented | Atomic fresh/concurrent init, future refusal, checksum validation, and existing-only no-migration writes pass |
 | Repository/service boundaries for validated mutation | In progress | Claim/evidence service round trips and CLI import use services; approval mutation remains |
-| Resume import, extraction proposal, and human review | In progress | Strict file/stdin proposals and read-only review are exact, pending, and idempotent; extraction and review decisions remain |
+| Resume import, extraction proposal, and human review | In progress | Strict file/stdin proposals snapshot nested request state before storage, use exhaustive registered value schemas, apply fixed-point and fragment-aware high-confidence screening to persisted content/metadata, and enforce bounded plus 80% whole-source guards; application-owned source identity, a registered extractor, extraction, and review decisions remain |
 | Redacted logging, backup, export, and deletion | Planned | Privacy and round-trip tests pass on synthetic data |
-| Synthetic candidate/job fixtures and adversarial corpus | In progress | One adversarial synthetic profile fixture exists; broader candidate/job corpus remains |
+| Synthetic candidate/job fixtures and adversarial corpus | In progress | One synthetic profile plus adversarial schema, sensitive-content, secret, percent-encoding, fragmentation, whole-source, padding, mutation, and no-write import cases exist; broader candidate/job corpus remains |
 
 Phase 0 exits only when the canonical commands pass from a clean checkout, real
 data is unnecessary, and the truth/privacy invariants have automated coverage.

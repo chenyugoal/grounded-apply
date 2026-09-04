@@ -6,7 +6,7 @@ import json
 import math
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
@@ -34,33 +34,27 @@ from grounded_apply.repositories import (
     RepositoryError,
     SQLiteRepository,
 )
+from grounded_apply.services.profile_import_validation import (
+    PROFILE_IMPORT_CONTENT_POLICY_VERSION,
+    PROFILE_IMPORT_MAX_SOURCE_BYTES,
+    PROFILE_IMPORT_MAX_TOTAL_EVIDENCE_CODEPOINTS,
+    PROFILE_IMPORT_MAX_TOTAL_METADATA_CODEPOINTS,
+    PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
+    registered_profile_import_claim_types,
+    validate_profile_import_batch,
+    validate_profile_import_metadata,
+    validate_profile_import_proposal,
+)
 
 
 _PROFILE_IMPORT_WORKFLOW = "profile_import_proposal"
 _MAX_IMPORT_PROPOSALS = 1000
-_PROFILE_IMPORT_CLAIM_TYPES = frozenset(
-    {
-        "achievement",
-        "certification",
-        "education",
-        "education_degree",
-        "education_field",
-        "employment_dates",
-        "employment_description",
-        "employment_title",
-        "language",
-        "portfolio_item",
-        "project_contribution",
-        "project_outcome",
-        "publication",
-        "skill_use",
-    }
-)
 _EXTRACTION_METHOD_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9_.-]*")
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
 _SOURCE_REF_PATTERN = re.compile(
     r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\x00-\x1f\x7f]+"
 )
+_LINE_BREAK_PATTERN = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 
 def utc_now() -> datetime:
@@ -248,6 +242,10 @@ class ProposedImportClaim:
             raise TypeError("sensitivity must be a Sensitivity")
         if not isinstance(self.scope, Scope):
             raise TypeError("scope must be a Scope")
+        if not isinstance(self.scope.type, ScopeType):
+            raise TypeError("scope type must be a ScopeType")
+        if self.scope.id is not None:
+            _require_text(self.scope.id, "scope id")
         _require_text(self.subject_type, "subject_type")
         if self.subject_id is not None:
             _require_text(self.subject_id, "subject_id")
@@ -277,6 +275,8 @@ class CreateImportProposal:
             or _SOURCE_REF_PATTERN.fullmatch(self.source_ref) is None
         ):
             raise ValueError("source_ref must be a bounded absolute source URI")
+        if len(self.source_text.encode("utf-8")) > PROFILE_IMPORT_MAX_SOURCE_BYTES:
+            raise ValueError("source_text must not exceed 16 MiB as UTF-8")
         if len(self.extraction_method) > 128:
             raise ValueError("extraction_method must not exceed 128 characters")
         if _EXTRACTION_METHOD_PATTERN.fullmatch(self.extraction_method) is None:
@@ -447,9 +447,37 @@ def _json_identity(value: JsonValue) -> str:
     )
 
 
+def _snapshot_import_request(request: CreateImportProposal) -> CreateImportProposal:
+    """Copy every nested request object before validation, hashing, and storage."""
+
+    if not isinstance(request, CreateImportProposal):
+        raise TypeError("request must be a CreateImportProposal")
+    proposals: list[ProposedImportClaim] = []
+    for proposal in request.proposals:
+        _validate_json_value(proposal.value)
+        value_snapshot: Any = json.loads(_json_identity(proposal.value))
+        proposals.append(
+            replace(
+                proposal,
+                value=value_snapshot,
+                span=TextSourceSpan(
+                    start=proposal.span.start,
+                    end=proposal.span.end,
+                    text=proposal.span.text,
+                ),
+                scope=Scope(type=proposal.scope.type, id=proposal.scope.id),
+            )
+        )
+    return replace(request, proposals=tuple(proposals))
+
+
 def _import_request_sha256(request: CreateImportProposal) -> str:
     payload = json.dumps(
-        to_jsonable(request),
+        {
+            "request": to_jsonable(request),
+            "content_policy_version": PROFILE_IMPORT_CONTENT_POLICY_VERSION,
+            "value_schema_version": PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
+        },
         ensure_ascii=False,
         allow_nan=False,
         sort_keys=True,
@@ -461,18 +489,109 @@ def _import_request_sha256(request: CreateImportProposal) -> str:
 def _validated_source_spans(request: CreateImportProposal) -> tuple[str, ...]:
     source_length = len(request.source_text)
     result: list[str] = []
+    selected_spans: list[tuple[int, int]] = []
+    persisted_metadata: list[str | None] = [
+        request.source_ref,
+        request.extraction_method,
+        request.artifact_id,
+    ]
+    total_metadata_codepoints = len(request.proposals) * (
+        (2 * len(request.source_ref))
+        + len(request.extraction_method)
+        + (0 if request.artifact_id is None else len(request.artifact_id))
+    )
+    total_selected_codepoints = 0
+    validate_profile_import_metadata(
+        (
+            request.source_ref,
+            request.extraction_method,
+            request.artifact_id,
+        )
+    )
+    if total_metadata_codepoints > PROFILE_IMPORT_MAX_TOTAL_METADATA_CODEPOINTS:
+        raise ValueError("profile import metadata exceeds the batch limit")
+    claim_types = registered_profile_import_claim_types()
     for index, proposal in enumerate(request.proposals):
-        if proposal.claim_type not in _PROFILE_IMPORT_CLAIM_TYPES:
+        if proposal.claim_type not in claim_types:
             raise ValueError(
                 f"proposal {index} claim type is not allowed for profile import"
             )
+        validate_profile_import_metadata(
+            (
+                proposal.subject_type,
+                proposal.subject_id,
+                proposal.scope.id,
+            )
+        )
+        persisted_metadata.extend(
+            (proposal.subject_type, proposal.subject_id, proposal.scope.id)
+        )
+        total_metadata_codepoints += sum(
+            len(item)
+            for item in (
+                proposal.subject_type,
+                proposal.subject_id,
+                proposal.scope.id,
+            )
+            if item is not None
+        )
+        if total_metadata_codepoints > PROFILE_IMPORT_MAX_TOTAL_METADATA_CODEPOINTS:
+            raise ValueError("profile import metadata exceeds the batch limit")
         span = proposal.span
         if span.end > source_length:
             raise ValueError(f"proposal {index} source span is outside the source text")
         exact_text = request.source_text[span.start : span.end]
         if exact_text != span.text:
             raise ValueError(f"proposal {index} source span does not match the source text")
+        lookbehind_start = max(0, span.start - 512)
+        preceding_text = request.source_text[lookbehind_start:span.start]
+        preceding_breaks = tuple(_LINE_BREAK_PATTERN.finditer(preceding_text))
+        if preceding_breaks:
+            current_line_start = lookbehind_start + preceding_breaks[-1].end()
+            previous_line_end = preceding_breaks[-1].start()
+            previous_line_start = (
+                preceding_breaks[-2].end() if len(preceding_breaks) > 1 else 0
+            )
+            preceding_line = preceding_text[
+                previous_line_start:previous_line_end
+            ].strip()
+            if not preceding_line:
+                preceding_line = None
+        else:
+            current_line_start = lookbehind_start
+            preceding_line = None
+        following_text = request.source_text[
+            span.end : min(source_length, span.end + 256)
+        ]
+        following_break = _LINE_BREAK_PATTERN.search(following_text)
+        current_line_end = (
+            span.end + following_break.start()
+            if following_break is not None
+            else min(source_length, span.end + 256)
+        )
+        context_start = max(current_line_start, span.start - 256)
+        validate_profile_import_proposal(
+            claim_type=proposal.claim_type,
+            value=proposal.value,
+            canonical_text=proposal.canonical_text,
+            evidence_text=exact_text,
+            evidence_context=request.source_text[context_start:current_line_end],
+            preceding_line=preceding_line,
+        )
+        total_selected_codepoints += len(exact_text)
+        if total_selected_codepoints > PROFILE_IMPORT_MAX_TOTAL_EVIDENCE_CODEPOINTS:
+            raise ValueError("profile import selected evidence exceeds the batch limit")
         result.append(exact_text)
+        selected_spans.append((span.start, span.end))
+    validate_profile_import_batch(
+        source_text=request.source_text,
+        spans=tuple(selected_spans),
+        proposals=tuple(
+            (proposal.value, proposal.canonical_text, exact_text)
+            for proposal, exact_text in zip(request.proposals, result, strict=True)
+        ),
+        metadata=tuple(persisted_metadata),
+    )
     return tuple(result)
 
 
@@ -620,6 +739,7 @@ class ProfileService:
         reloads the original records instead of duplicating them.
         """
 
+        request = _snapshot_import_request(request)
         created_at = now or utc_now()
         created_at_text = _timestamp(created_at)
         assert created_at_text is not None
@@ -629,6 +749,8 @@ class ProfileService:
         stored_idempotency_key = _text_sha256(request.idempotency_key)
         workflow_input = {
             "request_schema_version": 1,
+            "content_policy_version": PROFILE_IMPORT_CONTENT_POLICY_VERSION,
+            "value_schema_version": PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
             "proposal_count": len(request.proposals),
             "source_sha256": source_sha256,
         }
@@ -718,8 +840,7 @@ class ProfileService:
     def preview_import_proposal(request: CreateImportProposal) -> ImportProposalPreview:
         """Validate a proposed import without consulting or mutating persistence."""
 
-        if not isinstance(request, CreateImportProposal):
-            raise TypeError("request must be a CreateImportProposal")
+        request = _snapshot_import_request(request)
         _validated_source_spans(request)
         proposal_count = len(request.proposals)
         return ImportProposalPreview(

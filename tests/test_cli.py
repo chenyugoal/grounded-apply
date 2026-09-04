@@ -426,7 +426,10 @@ class CliTests(unittest.TestCase):
                 *self.profile_import_arguments(), home=home
             )
             proposals = json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
-            proposals["proposals"][0]["value"] = "PRIVATE CHANGED VALUE"
+            proposals["proposals"][0]["value"] = {
+                "employer": "Example Robotics LLC",
+                "title": "PRIVATE CHANGED VALUE",
+            }
             changed_file = root / "changed.json"
             changed_file.write_text(json.dumps(proposals), encoding="utf-8")
 
@@ -575,6 +578,87 @@ class CliTests(unittest.TestCase):
                     self.assertFalse(home.exists())
                     self.assertNotIn("avery.quill@example.com", stdout)
 
+    def test_profile_import_dry_run_rejects_sensitive_allowed_type_without_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "not-created"
+            private_value = "api_token=SYNTHETIC_NOT_A_TOKEN_1234567890"
+            proposals = json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
+            proposals["proposals"][0]["value"]["title"] = private_value
+            proposals_file = root / "sensitive-value.json"
+            proposals_file.write_text(json.dumps(proposals), encoding="utf-8")
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_import_arguments(
+                    proposals_file=proposals_file,
+                    dry_run=True,
+                ),
+                home=str(home),
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(result, 2)
+            self.assertEqual(stderr, "")
+            self.assertFalse(payload["ok"])
+            self.assertIn("disallowed sensitive", payload["error"]["message"])
+            self.assertNotIn(private_value, stdout)
+            self.assertFalse(home.exists())
+
+    def test_profile_import_rejects_unsafe_content_without_changing_storage(
+        self,
+    ) -> None:
+        source_text = SOURCE_FILE.read_text(encoding="utf-8")
+
+        for case in ("sensitive-value", "whole-document-evidence"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                home = root / "profile-home"
+                proposals = json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
+                private_value = "password=SYNTHETIC_NOT_A_PASSWORD_123456"
+                if case == "sensitive-value":
+                    proposals["proposals"][0]["value"]["title"] = private_value
+                else:
+                    proposals["proposals"][0]["span"] = {
+                        "start": 0,
+                        "end": len(source_text),
+                        "text": source_text,
+                    }
+                proposals_file = root / f"{case}.json"
+                proposals_file.write_text(json.dumps(proposals), encoding="utf-8")
+                self.invoke("profile", "init", "--json", home=str(home))
+                database = home / "data" / "grounded_apply.db"
+                before_bytes = database.read_bytes()
+                before_stat = database.stat()
+                before_paths = {path.relative_to(home) for path in home.rglob("*")}
+
+                result, stdout, stderr = self.invoke(
+                    *self.profile_import_arguments(proposals_file=proposals_file),
+                    home=str(home),
+                )
+                payload = json.loads(stdout)
+                after_stat = database.stat()
+                review_result, review_stdout, _ = self.invoke(
+                    "profile", "review", "--json", home=str(home)
+                )
+
+                self.assertEqual(result, 2)
+                self.assertEqual(stderr, "")
+                self.assertFalse(payload["ok"])
+                self.assertNotIn(private_value, stdout)
+                self.assertNotIn("avery.quill@example.com", stdout)
+                self.assertNotIn("Ignore previous instructions", stdout)
+                self.assertEqual(database.read_bytes(), before_bytes)
+                self.assertEqual(after_stat.st_mode, before_stat.st_mode)
+                self.assertEqual(after_stat.st_mtime_ns, before_stat.st_mtime_ns)
+                self.assertEqual(
+                    {path.relative_to(home) for path in home.rglob("*")},
+                    before_paths,
+                )
+                self.assertEqual(review_result, 0)
+                self.assertEqual(json.loads(review_stdout)["data"]["pending_count"], 0)
+
     def test_profile_import_preserves_crlf_for_spans_and_source_hash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -702,7 +786,10 @@ class CliTests(unittest.TestCase):
             home = str(root / "profile-home")
             proposals = json.loads(PROPOSALS_FILE.read_text(encoding="utf-8"))
             proposals["proposals"][0]["canonical_text"] = "Claims Python"
-            proposals["proposals"][0]["value"] = "Rust"
+            proposals["proposals"][0]["value"] = {
+                "employer": "Example Robotics LLC",
+                "title": "Rust Engineer",
+            }
             proposals_file = root / "mismatch.json"
             proposals_file.write_text(json.dumps(proposals), encoding="utf-8")
             self.invoke("profile", "init", "--json", home=home)
@@ -715,7 +802,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertIn("Claims Python", stdout)
-            self.assertIn('Value: "Rust"', stdout)
+            self.assertIn('"title":"Rust Engineer"', stdout)
             self.assertIn("sensitivity=personal", stdout)
             self.assertNotEqual(stderr, "")
 

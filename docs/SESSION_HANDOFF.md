@@ -6,166 +6,162 @@ architecture rationale in ADRs.
 
 ## Checkpoint
 
-- **Last updated:** 2026-09-03 17:48 CDT
+- **Last updated:** 2026-09-03 19:45 CDT
 - **Branch:** `codex/phase-0-truth-layer`
-- **HEAD:** `d0726ba` (`Add safe structured profile import proposals`)
-- **Milestone:** Phase 0 — strict file/stdin import and read-only pending review
-- **Status:** CLI milestone implemented and verified in the working tree; Phase 0
-  continues and the product is not ready for real candidate data
-- **Expected working tree:** Uncommitted milestone changes in `AGENTS.md`, `README.md`,
+- **HEAD:** `5ab2fcc` (`Implement grounded application workflow improvements`)
+- **Milestone:** Phase 0 — versioned profile-import schemas and content boundary
+- **Status:** This narrow milestone is implemented and verified in the working
+  tree. Phase 0 continues; the product is not release-ready and must not be used
+  with real candidate data.
+- **Expected working tree:** Uncommitted changes in `README.md`,
   `docs/DEVELOPMENT.md`, `docs/ROADMAP.md`, this file,
-  `src/grounded_apply/cli.py`, `src/grounded_apply/config.py`,
-  `src/grounded_apply/repositories/sqlite.py`,
-  `src/grounded_apply/services/`, `tests/test_cli.py`,
-  `tests/test_config.py`, `tests/test_profile_import.py`, and
-  `tests/test_repository.py`
+  `src/grounded_apply/cli.py`, `src/grounded_apply/services/__init__.py`,
+  `src/grounded_apply/services/profile.py`, the new
+  `src/grounded_apply/services/profile_import_validation.py`,
+  `tests/test_cli.py`, and `tests/test_profile_import.py`.
 
-The prior checkpoint was stale at session start: it described the structured
-import service as uncommitted at `9ae8523`; that work was already committed in a
-clean tree as `d0726ba`.
+The tree was clean and matched `origin/codex/phase-0-truth-layer` at session
+start. The required first command passed 106 tests before this work began.
 
 ## Implemented and verified
 
-The committed `d0726ba` service milestone remains intact. This working tree adds:
-
-- `gapply profile import --source-file PATH|- --proposals-file PATH|-`
-  with `--idempotency-key OPAQUE [--dry-run] [--json]`. Candidate source and proposal
-  values have no inline argument, and at most one input may use stdin.
-- A strict schema-v1 JSON adapter: exact field sets, duplicate-key and non-finite
-  rejection, zero-based/end-exclusive Unicode-codepoint spans, exact span text,
-  bounded regular-file/stdin input, valid Unicode, bounded provenance metadata,
-  an opaque idempotency key, and a 1,000-proposal ceiling. Trust, approval,
-  scope, sensitivity, subject, and other unknown fields are rejected at the CLI
-  boundary.
-- Persistence-independent `ProfileService.preview_import_proposal`. Dry-run does
-  not open SQLite, create runtime paths, consume an idempotency key, or imply
-  storage validation; output explicitly reports `storage_checked: false`.
-- Persisted CLI import routed through `ProfileService`, retaining the atomic,
-  concurrent-safe idempotency and review-only trust state. Import requires an
-  already initialized, current schema. It opens the existing database in SQLite
-  `mode=rw`, validates without migration on the same connection used to write,
-  and cannot create or migrate a missing, empty, or input-time-replaced database.
-  Output contains hashes, counts, and opaque IDs, not candidate text.
-- `gapply profile review [--json]`, backed by
-  `ProfileService.list_review_items`. It shows both canonical and structured
-  values plus exact supporting evidence, scope, sensitivity, and provenance;
-  every item is marked `content_trust: untrusted` and `usable: false`.
-- A SQLite repository read-only/query-only mode. Review validates the current
-  schema without migration, chmod, or database-byte/mtime changes; missing and
-  empty databases are not created or adopted.
-- Non-mutating storage privacy preflight for import and review. The data directory
-  and database must retain user-only permissions, database targets must remain
-  inside private data and outside Git worktrees, and portable runtime children
-  must remain beneath `GROUNDED_APPLY_HOME`. Escapes and permission drift fail
-  without repair or content disclosure.
-- Terminal-safe human review rendering for control and bidirectional-format
-  characters. Imported prompt-like text remains explicitly untrusted data.
-- Updated README, development command contract, and roadmap evidence.
+- A closed schema-version-1 registry now covers all 14 allowed import claim
+  types. Scalar strings and structured employment/project values have exact
+  shapes, bounded text, valid date/range rules, and an explicit ownership enum;
+  there is no generic JSON fallback.
+- Import preview and persistence snapshot JSON values, `Scope`, and
+  `TextSourceSpan` before validation, hashing, or storage. Value-schema version 1
+  and content-policy version 1 participate in request identity and are recorded
+  in workflow audit input.
+- Service-owned validation runs before the storage transaction over values,
+  canonical text, selected evidence, bounded same-line/preceding-label context,
+  provenance metadata, and subject/scope identifiers. It rejects recognizable
+  work-authorization/immigration answers, government identifiers, credential
+  assignments, private keys, and common token formats without echoing content.
+- Per-component screening handles control-character and punctuation obfuscation
+  and every percent-decode layer through a fixed point. Bounded cross-field
+  checks run within a proposal, while an indexed matcher detects recognized
+  assignment labels split across two batch components. The indexed path avoids
+  factorial or multiplicative full-text scans.
+- The source boundary is shared by CLI and service at 16 MiB of UTF-8. Canonical
+  text, per-item/batch evidence, line count, proposal count, component, and
+  caller-controlled persisted-metadata volume all have service-owned limits.
+- Whole-source minimization rejects 80% selected alphanumeric span coverage,
+  exact raw/decoded reconstruction in individual value/canonical/evidence/
+  metadata channels, aligned-layer exact reconstruction across combined
+  value/canonical/evidence content in serialization order and its reverse,
+  token-weight coverage, and an adaptive sampled-window comparison.
+  Source-multiset projection prevents punctuation or repeated-character padding
+  from selecting a misleading comparison size.
+- Rejections remain pre-transaction and do not reserve idempotency keys. Imports
+  that pass still create only pending, unusable claims and evidence.
+- Adversarial tests cover every registered schema, exact boundaries, mutation
+  snapshots, no-write failures, work authorization, government IDs,
+  credentials/tokens, encoded and fragmented content, whole-source splitting,
+  padding, metadata replication, false-positive controls, and worst-shape
+  assignment indexing.
 
 ## Verification
 
-All verification used synthetic `example.com`/555 data and no network access.
+All verification used synthetic `example.com` data and no network access.
 
 ```text
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
-  -m unittest tests.test_cli tests.test_profile_import tests.test_repository \
-  tests.test_config -v
-PASS — 79/79 focused CLI/import/repository/config tests
-
 ./scripts/check
-PASS — CLI help + isolated doctor smoke + 106/106 unittest cases
+PASS — CLI help + isolated doctor smoke + 159/159 unittest cases
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
+  -m unittest tests.test_profile_import -q
+PASS — 73/73 profile-import tests
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
+  -m unittest tests.test_cli -q
+PASS — 33/33 CLI tests
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
+  -m unittest discover -s tests -v
+PASS — 159/159 tests with warnings treated as errors
 
 ./scripts/gapply --help
 ./scripts/gapply profile import --help
 ./scripts/gapply profile review --help
 PASS
 
-GROUNDED_APPLY_HOME=<fresh-/private/tmp-path>/profile-home \
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-release.BS77J0/doctor-home \
   ./scripts/gapply doctor --json
-PASS — read-only uninitialized result; no runtime data created
+PASS — read-only uninitialized result; the runtime path was not created
 
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  python3 -m unittest discover -s tests -v
-PASS — Ran 106 tests, OK
-
-GROUNDED_APPLY_HOME=<fresh-/private/tmp-path>/profile-home \
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-release.BS77J0/smoke-home \
   ./scripts/gapply profile init --json
-GROUNDED_APPLY_HOME=<same-path> ./scripts/gapply profile import \
+GROUNDED_APPLY_HOME=<same> ./scripts/gapply profile import \
   --source-file tests/fixtures/synthetic_profile/resume.txt \
   --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
-  --idempotency-key synthetic-smoke-import-1 --dry-run --json
-GROUNDED_APPLY_HOME=<same-path> ./scripts/gapply profile import \
+  --idempotency-key synthetic-release-smoke-1 --dry-run --json
+GROUNDED_APPLY_HOME=<same> ./scripts/gapply profile import \
   --source-file tests/fixtures/synthetic_profile/resume.txt \
   --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
-  --idempotency-key synthetic-smoke-import-1 --json
-GROUNDED_APPLY_HOME=<same-path> ./scripts/gapply profile review --json
+  --idempotency-key synthetic-release-smoke-1 --json
+GROUNDED_APPLY_HOME=<same> ./scripts/gapply profile review --json
 PASS — 5 pending/unusable claims and 5 pending exact evidence spans
 
 git diff --check
 PASS
 ```
 
-The new tests cover file and either-stdin input, CRLF preservation, input size and
-regular-file limits, strict JSON/schema/trust-field failures, valid Unicode,
-metadata and batch bounds, true no-write dry-run against absent and initialized
-homes, same-connection existing-only validation, input-time database replacement,
-refusal to initialize storage implicitly, permission drift and database/portable
-path escapes, idempotent replay and changed input, minimized errors/output, empty
-and populated review queues, complete pending imported evidence, canonical/value
-disagreement, terminal control text, and byte/mode/mtime-stable read-only SQLite
-access.
-
 Complete-diff review and changed-path credential/PII scans found no secrets or
-real candidate data; identity-like strings are explicitly fictional fixture and
-assertion values.
+real candidate data. Identity-, credential-, and government-ID-like strings are
+conspicuously synthetic test fixtures, deny-pattern definitions, or assertions.
 
 ## Known limitations and release blockers
 
-- This milestone is a structured proposal ingestion boundary, not a resume
-  extractor. There is no PDF/DOCX/LaTeX parser, model adapter, or artifact
-  lifecycle service. Do not use it with real candidate data.
-- Allowed claim types still accept flexible JSON values. A malicious or mistaken
-  extractor could hide sensitive eligibility or secret-shaped data under an
-  allowed type. Per-type value schemas and sensitive-field rejection are required
-  before real-data import or approval.
-- Proposal-supplied `source_ref` and `extraction_method` are syntax-bounded but
-  are not bound to a protected artifact or registered extractor identity.
-- Review is deliberately display-only. No approve, edit, reject, contradiction
-  resolution, evidence revalidation, or audit decision exists. Review lists the
-  full pending queue and has no workflow filter or pagination.
-- Dry-run validates request semantics only. Because `storage_checked` is false,
-  it does not predict idempotent replay/conflict, schema compatibility, or
-  artifact foreign-key success.
-- Raw source remains caller-managed and in memory; only selected spans and hashes
-  persist. Redacted structured logging, backup, export, deletion, and protected
-  artifact retention remain planned.
-- Native Windows runtime-directory conventions and installed-wheel migration
-  discovery remain unverified. Argparse usage failures are still plain text.
-- Initialized storage does not yet reject a multiply linked database inode; a
-  hard link could alias the same SQLite file outside the validated runtime path.
-  Single-link or equivalent file-identity enforcement is required before real
-  candidate data.
+- This milestone is deterministic defense in depth, not complete sensitive-data
+  classification. Clearance, veteran status, disability, criminal/legal
+  attestations, conflicts, demographics, and other restricted categories can
+  still be hidden under an allowed type. They need a versioned declarative
+  restricted-content policy and negative controls before real-data use.
+- Sampled near-duplicate windows are not proof: adversarial mutation at known
+  sample positions can evade them. Components with different percent-encoding
+  depths can also evade combined exact reconstruction when no single aligned
+  decode layer matches, and arbitrary cross-channel reorderings can evade the
+  serialization-order and reverse-order combined checks. Assignment labels split
+  across three or more components, homoglyph/entity encodings, and broader label
+  layouts are not exhaustively classified.
+- Proposal-authored `source_ref` and `extraction_method` are syntax/content
+  bounded but are not bound to an application-owned artifact or registered
+  extractor identity. This is the next provenance boundary.
+- Review is display-only. There is no approve/edit/reject decision,
+  contradiction resolution, evidence revalidation, or audit decision record.
+- Raw source remains caller-managed and in memory. Unselected content is not
+  globally sensitive-pattern scanned or persisted. Redacted logging, backup,
+  export, deletion, and protected artifact retention remain planned.
+- A deliberately pathological but valid 1,000-proposal assignment-heavy preview
+  takes about 13 seconds on the current development host. Inputs are bounded and
+  the prior multiplicative scan is removed, but a total delimiter/work budget is
+  a future hardening opportunity.
+- Existing synthetic workflow idempotency keys created before schema/content
+  policy versioning conflict by design because request identity changed.
+- Native Windows runtime conventions, installed-wheel migration discovery, and
+  multiply linked SQLite database rejection remain unverified or unimplemented.
 - Derived claims remain unusable until a registered evaluator recomputes them.
 
 ## Next exact tasks
 
-1. Start with `tests/test_profile_import.py`: define a registered value schema for
-   every currently allowed import claim type and add adversarial cases for work
-   authorization, government identifiers, credentials/tokens, and whole-document
-   evidence hidden under an allowed type; fail before any write.
-2. Start with `tests/test_cli.py`: replace proposal-authored extractor/source
+1. Start with `tests/test_cli.py`: replace proposal-authored extractor/source
    identity with an application-owned source digest and registered extractor
-   identifier, while retaining private-path-free provenance and replay integrity.
-3. Start with `tests/test_profile_service.py`: add an explicit, idempotent review
-   decision service that revalidates evidence checksum/locator integrity, detects
-   contradictions, records actor/time/audit fields, and cannot approve sensitive
-   or malformed proposals.
+   identifier, while retaining private-path-free provenance and replay
+   integrity.
+2. Start with `tests/test_profile_import.py`: move restricted-content screening
+   into a versioned declarative taxonomy and add clearance, veteran, disability,
+   criminal/legal, conflict, and demographic cases plus false-positive controls.
+3. Start with `tests/test_profile_service.py`: add an explicit idempotent review
+   decision service that revalidates evidence checksum/locator integrity,
+   detects contradictions, records actor/time/audit fields, and cannot approve
+   sensitive or malformed proposals.
 4. Start with `tests/test_config.py`: reject multiply linked profile databases
-   without modifying either alias, then preserve that invariant across import and
-   review.
-5. Start with a new redacted-logging test module: prove source text, proposed
-   values, credentials, sensitive answers, and private paths never enter normal
-   logs or public error metadata.
+   without modifying either alias, then preserve that invariant across import
+   and review.
+5. Add redacted-logging and lifecycle tests proving source text, values,
+   credentials, sensitive answers, and private paths do not enter normal logs,
+   backups, exports, or deletion metadata.
 6. Verify an installed wheel in an isolated environment when Hatchling is
    available, specifically bundled migration discovery and the `gapply` entry
    point.
@@ -178,18 +174,18 @@ assertion values.
 
 ## Key decisions
 
-- CLI import accepts separate explicitly authorized source/proposal files or one
-  stdin stream; imported content cannot add authority fields or authorize reads.
-- Dry-run is a persistence-independent request validation, so its output uses
-  planned counts and truthfully reports that storage was not checked.
-- Normal import and review require a current schema created by explicit
-  `profile init`; import validates an existing writable connection without schema
-  changes, and data commands do not silently initialize or migrate it.
-- Import and review revalidate private permissions and resolved-path containment;
-  they never repair unsafe storage as a side effect.
-- Review content is intentionally visible private output but remains marked
-  untrusted and unusable. The read path is physically read-only, and there is no
-  approval side effect.
-- The narrow CLI manifest fixes imported claims to conservative service defaults:
-  person subject, global scope, at least personal sensitivity, pending approval,
-  and pending evidence confirmation.
+- The import manifest remains untrusted data. It can select only registered
+  claim types and cannot grant approval, verification, evidence confirmation,
+  public sensitivity, or external-action authority.
+- Content validation is explicitly high-confidence and fail-closed for its named
+  categories, while documented as non-exhaustive outside them.
+- Raw source is used only for digest, exact spans, bounded selected context, and
+  whole-source minimization; it is not stored or globally classified.
+- Whole-source exact checks evaluate raw and every aligned percent-decode layer;
+  broader token/window heuristics apply per channel, while combined content gets
+  serialization-order and reverse-order exact checks to avoid ordinary-content
+  false positives.
+- The service snapshots nested caller-owned objects once so validation,
+  idempotency hashing, and persistence operate on the same state.
+- Phase 0 remains in progress. Passing this milestone does not authorize real
+  candidate data or imply release readiness.

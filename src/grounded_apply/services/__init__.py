@@ -11,6 +11,10 @@ from .profile import (
     ProposedImportClaim,
     TextSourceSpan,
 )
+from .profile_import_validation import (
+    PROFILE_IMPORT_MAX_SOURCE_BYTES,
+    registered_profile_import_claim_types,
+)
 
 __all__ = [
     "CreateClaim",
@@ -20,6 +24,8 @@ __all__ = [
     "ImportProposalResult",
     "ProfileService",
     "ProfileReviewItem",
+    "PROFILE_IMPORT_MAX_SOURCE_BYTES",
     "ProposedImportClaim",
     "TextSourceSpan",
+    "registered_profile_import_claim_types",
 ]

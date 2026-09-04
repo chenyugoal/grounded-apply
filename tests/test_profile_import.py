@@ -11,8 +11,10 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from unittest.mock import patch
 
+import grounded_apply.services.profile_import_validation as profile_import_validation
 from grounded_apply.domain import (
     ApprovalStatus,
     ClaimStatus,
@@ -21,6 +23,8 @@ from grounded_apply.domain import (
     EvidenceConfirmationStatus,
     NeedInfo,
     NeedInfoReason,
+    Scope,
+    ScopeType,
     Sensitivity,
     SourceType,
     to_jsonable,
@@ -30,15 +34,45 @@ from grounded_apply.services import (
     CreateImportProposal,
     CreateEvidence,
     ImportProposalResult,
+    PROFILE_IMPORT_MAX_SOURCE_BYTES,
     ProfileService,
     ProfileReviewItem,
     ProposedImportClaim,
     TextSourceSpan,
+    registered_profile_import_claim_types,
 )
 
 
 NOW = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "synthetic_profile"
+
+SAFE_IMPORT_VALUES: dict[str, Any] = {
+    "achievement": "Improved a fictional build check",
+    "certification": "Example Systems Certificate",
+    "education": "Example University",
+    "education_degree": "Bachelor of Synthetic Science",
+    "education_field": "Synthetic Systems",
+    "employment_dates": {"start": "2022-01", "end": "2025-03"},
+    "employment_description": "Built fictional warehouse tooling",
+    "employment_title": {
+        "employer": "Example Robotics LLC",
+        "title": "Software Engineer",
+    },
+    "language": "Esperanto",
+    "portfolio_item": "https://portfolio.example.com/avery-quill",
+    "project_contribution": {
+        "project": "Moonshot Compiler",
+        "contribution": "Rust parsing code",
+        "ownership": "contributed",
+    },
+    "project_outcome": {
+        "before_minutes": 30,
+        "after_minutes": 10,
+        "activity": "synthetic test setup",
+    },
+    "publication": "Testing Fictional Systems",
+    "skill_use": "Python",
+}
 
 
 def load_fixture() -> tuple[str, dict[str, Any]]:
@@ -82,6 +116,45 @@ def import_request(
     )
 
 
+def single_proposal_request(
+    *,
+    claim_type: str = "skill_use",
+    value: Any = "Python",
+    canonical_text: str = "Used Python on a fictional project",
+    source_text: str = (
+        "Synthetic document header.\n"
+        "Synthetic supporting evidence.\n"
+        "Synthetic document footer."
+    ),
+    span: TextSourceSpan | None = None,
+    idempotency_key: str = "single-safe-import",
+) -> CreateImportProposal:
+    if span is None:
+        selected_text = "Synthetic supporting evidence."
+        selected_start = source_text.index(selected_text)
+        selected_span = TextSourceSpan(
+            start=selected_start,
+            end=selected_start + len(selected_text),
+            text=selected_text,
+        )
+    else:
+        selected_span = span
+    return CreateImportProposal(
+        idempotency_key=idempotency_key,
+        source_ref="fixture://synthetic-profile/schema-test.txt",
+        source_text=source_text,
+        extraction_method="synthetic-schema-test@1",
+        proposals=(
+            ProposedImportClaim(
+                claim_type=claim_type,
+                value=value,
+                canonical_text=canonical_text,
+                span=selected_span,
+            ),
+        ),
+    )
+
+
 class SyntheticProfileFixtureTests(unittest.TestCase):
     def test_every_fixture_span_is_an_exact_unicode_codepoint_slice(self) -> None:
         source_text, data = load_fixture()
@@ -108,6 +181,1761 @@ class ProfileImportProposalTests(unittest.TestCase):
         ).initialize()
         self.addCleanup(self.repository.close)
         self.service = ProfileService(self.repository)
+
+    def assert_rejected_before_storage(
+        self,
+        request: CreateImportProposal,
+        *,
+        forbidden_text: str | None = None,
+        message_pattern: str | None = None,
+    ) -> None:
+        database = Path(self.repository.database)
+        before_bytes = database.read_bytes()
+        before_stat = database.stat()
+
+        with patch.object(
+            self.repository,
+            "transaction",
+            side_effect=AssertionError("storage transaction entered"),
+        ) as transaction:
+            with self.assertRaises(ValueError) as preview_error:
+                self.service.preview_import_proposal(request)
+            with self.assertRaises(ValueError) as persisted_error:
+                self.service.create_import_proposal(request, now=NOW)
+
+        transaction.assert_not_called()
+        if message_pattern is not None:
+            self.assertRegex(str(preview_error.exception), message_pattern)
+            self.assertRegex(str(persisted_error.exception), message_pattern)
+        if forbidden_text is not None:
+            self.assertNotIn(forbidden_text, str(preview_error.exception))
+            self.assertNotIn(forbidden_text, str(persisted_error.exception))
+        self.assertEqual(database.read_bytes(), before_bytes)
+        self.assertEqual(database.stat().st_mode, before_stat.st_mode)
+        self.assertEqual(database.stat().st_mtime_ns, before_stat.st_mtime_ns)
+        self.assertEqual(self.repository.list_claims(), [])
+        self.assertEqual(self.repository.list_evidence(), [])
+        self.assertEqual(self.repository.list_workflow_runs(), [])
+
+    def test_registered_value_schemas_accept_every_allowed_claim_type(self) -> None:
+        self.assertEqual(
+            registered_profile_import_claim_types(),
+            frozenset(SAFE_IMPORT_VALUES),
+        )
+
+        for index, (claim_type, value) in enumerate(SAFE_IMPORT_VALUES.items()):
+            with self.subTest(claim_type=claim_type):
+                request = single_proposal_request(
+                    claim_type=claim_type,
+                    value=value,
+                    idempotency_key=f"valid-schema-{index}",
+                )
+                preview = self.service.preview_import_proposal(request)
+                result = self.service.create_import_proposal(request, now=NOW)
+
+                self.assertEqual(preview.proposal_count, 1)
+                self.assertEqual(result.claims[0].claim_type, claim_type)
+                self.assertEqual(result.claims[0].value_json, value)
+
+        present = single_proposal_request(
+            claim_type="employment_dates",
+            value={"start": "2022-01", "end": "present"},
+            idempotency_key="valid-current-employment",
+        )
+        self.service.preview_import_proposal(present)
+        for ownership in ("supported", "contributed", "co-led", "led", "owned"):
+            with self.subTest(ownership=ownership):
+                contribution = single_proposal_request(
+                    claim_type="project_contribution",
+                    value={
+                        "project": "Moonshot Compiler",
+                        "contribution": "Synthetic parser work",
+                        "ownership": ownership,
+                    },
+                    idempotency_key=f"valid-ownership-{ownership}",
+                )
+                self.service.preview_import_proposal(contribution)
+
+        maximum_minutes = single_proposal_request(
+            claim_type="project_outcome",
+            value={
+                "activity": "Synthetic annual maintenance",
+                "before_minutes": 525_600,
+                "after_minutes": 0,
+            },
+            idempotency_key="valid-maximum-minutes",
+        )
+        self.service.preview_import_proposal(maximum_minutes)
+
+    def test_scalar_value_schemas_enforce_each_registered_length_limit(self) -> None:
+        limits = {
+            "achievement": 2048,
+            "certification": 512,
+            "education": 1024,
+            "education_degree": 512,
+            "education_field": 512,
+            "employment_description": 2048,
+            "language": 128,
+            "portfolio_item": 2048,
+            "publication": 2048,
+            "skill_use": 256,
+        }
+        source_text = "S" * 5000 + "Synthetic evidence." + "T" * 5000
+        start = 5000
+        span = TextSourceSpan(
+            start=start,
+            end=start + len("Synthetic evidence."),
+            text="Synthetic evidence.",
+        )
+
+        for index, (claim_type, limit) in enumerate(limits.items()):
+            with self.subTest(claim_type=claim_type):
+                self.service.preview_import_proposal(
+                    single_proposal_request(
+                        claim_type=claim_type,
+                        value="X" * limit,
+                        source_text=source_text,
+                        span=span,
+                        idempotency_key=f"scalar-boundary-{index}",
+                    )
+                )
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        claim_type=claim_type,
+                        value="X" * (limit + 1),
+                        source_text=source_text,
+                        span=span,
+                        idempotency_key=f"scalar-over-limit-{index}",
+                    ),
+                    message_pattern="length limit",
+                )
+
+    def test_scalar_value_schemas_require_trimmed_visible_text(self) -> None:
+        scalar_types = (
+            "achievement",
+            "certification",
+            "education",
+            "education_degree",
+            "education_field",
+            "employment_description",
+            "language",
+            "portfolio_item",
+            "publication",
+            "skill_use",
+        )
+        invalid_values = (
+            ("", "non-blank trimmed"),
+            (" ", "non-blank trimmed"),
+            (" leading", "non-blank trimmed"),
+            ("trailing ", "non-blank trimmed"),
+            ("hidden\u200btext", "one line without control or format"),
+        )
+
+        for type_index, claim_type in enumerate(scalar_types):
+            for value_index, (value, message_pattern) in enumerate(invalid_values):
+                with self.subTest(claim_type=claim_type, value_index=value_index):
+                    self.assert_rejected_before_storage(
+                        single_proposal_request(
+                            claim_type=claim_type,
+                            value=value,
+                            idempotency_key=(
+                                f"invalid-scalar-text-{type_index}-{value_index}"
+                            ),
+                        ),
+                        message_pattern=message_pattern,
+                    )
+
+    def test_structured_value_schemas_accept_exact_field_boundaries(self) -> None:
+        source_text = "S" * 5000 + "Synthetic evidence." + "T" * 5000
+        span = TextSourceSpan(
+            start=5000,
+            end=5000 + len("Synthetic evidence."),
+            text="Synthetic evidence.",
+        )
+        boundary_values: tuple[tuple[str, Any], ...] = (
+            (
+                "employment_title",
+                {"employer": "E" * 512, "title": "T" * 512},
+            ),
+            (
+                "employment_dates",
+                {"start": "1900-01", "end": "2099-12"},
+            ),
+            (
+                "project_contribution",
+                {
+                    "project": "P" * 512,
+                    "contribution": "C" * 2048,
+                    "ownership": "owned",
+                },
+            ),
+            (
+                "project_outcome",
+                {
+                    "activity": "A" * 512,
+                    "before_minutes": 525_600,
+                    "after_minutes": 525_600,
+                },
+            ),
+        )
+
+        for index, (claim_type, value) in enumerate(boundary_values):
+            with self.subTest(claim_type=claim_type):
+                self.service.preview_import_proposal(
+                    single_proposal_request(
+                        claim_type=claim_type,
+                        value=value,
+                        source_text=source_text,
+                        span=span,
+                        idempotency_key=f"structured-boundary-{index}",
+                    )
+                )
+
+    def test_registered_value_schemas_reject_wrong_containers_before_storage(
+        self,
+    ) -> None:
+        structured_types = {
+            "employment_dates",
+            "employment_title",
+            "project_contribution",
+            "project_outcome",
+        }
+
+        for index, claim_type in enumerate(SAFE_IMPORT_VALUES):
+            with self.subTest(claim_type=claim_type):
+                wrong_value: Any = (
+                    "not a structured value"
+                    if claim_type in structured_types
+                    else {"unexpected": "object"}
+                )
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        claim_type=claim_type,
+                        value=wrong_value,
+                        idempotency_key=f"wrong-container-{index}",
+                    )
+                )
+
+    def test_structured_value_schemas_reject_invalid_fields_before_storage(
+        self,
+    ) -> None:
+        invalid_values: tuple[tuple[str, Any], ...] = (
+            ("employment_title", {"employer": "Example Robotics LLC"}),
+            (
+                "employment_title",
+                {
+                    "employer": "Example Robotics LLC",
+                    "title": "Engineer",
+                    "private": "unexpected",
+                },
+            ),
+            ("employment_title", {"employer": "", "title": "Engineer"}),
+            ("employment_title", {"employer": 7, "title": "Engineer"}),
+            ("employment_title", {"employer": "E" * 513, "title": "Engineer"}),
+            ("employment_title", {"employer": "Example", "title": " "}),
+            ("employment_title", {"employer": "Example", "title": 7}),
+            ("employment_title", {"employer": "Example", "title": "T" * 513}),
+            ("employment_dates", {"start": 2022, "end": "2025-03"}),
+            ("employment_dates", {"start": "2022-13", "end": "2025-03"}),
+            ("employment_dates", {"start": "2022-01", "end": "2025-13"}),
+            ("employment_dates", {"start": "1899-12", "end": "2025-03"}),
+            ("employment_dates", {"start": "2022-01", "end": "2100-01"}),
+            ("employment_dates", {"start": "2025-03", "end": "2022-01"}),
+            ("employment_dates", {"start": "2022-01", "end": None}),
+            ("employment_dates", {"start": "2022-01", "end": "Present"}),
+            (
+                "employment_dates",
+                {"start": "2022-01", "end": "2025-03", "extra": "no"},
+            ),
+            (
+                "project_outcome",
+                {
+                    "before_minutes": True,
+                    "after_minutes": 10,
+                    "activity": "synthetic setup",
+                },
+            ),
+            (
+                "project_outcome",
+                {
+                    "before_minutes": 30,
+                    "after_minutes": 525_601,
+                    "activity": "synthetic setup",
+                },
+            ),
+            (
+                "project_outcome",
+                {
+                    "before_minutes": 30,
+                    "after_minutes": 10,
+                    "activity": 7,
+                },
+            ),
+            (
+                "project_outcome",
+                {
+                    "before_minutes": 30,
+                    "after_minutes": 10,
+                    "activity": " ",
+                },
+            ),
+            (
+                "project_outcome",
+                {
+                    "before_minutes": 30,
+                    "after_minutes": 10,
+                    "activity": "A" * 513,
+                },
+            ),
+            (
+                "project_outcome",
+                {
+                    "before_minutes": 30,
+                    "after_minutes": 10,
+                    "activity": "setup",
+                    "extra": 1,
+                },
+            ),
+            (
+                "project_outcome",
+                {
+                    "before_minutes": 525_601,
+                    "after_minutes": 10,
+                    "activity": "synthetic setup",
+                },
+            ),
+            (
+                "project_outcome",
+                {
+                    "before_minutes": 30,
+                    "after_minutes": -1,
+                    "activity": "synthetic setup",
+                },
+            ),
+            (
+                "project_outcome",
+                {
+                    "before_minutes": 30.0,
+                    "after_minutes": 10,
+                    "activity": "synthetic setup",
+                },
+            ),
+            (
+                "project_contribution",
+                {"project": "Moonshot", "contribution": "Parsing code"},
+            ),
+            (
+                "project_contribution",
+                {
+                    "project": "Moonshot",
+                    "contribution": "Parsing code",
+                    "ownership": "invented-owner-level",
+                },
+            ),
+            (
+                "project_contribution",
+                {"project": 7, "contribution": "Parsing", "ownership": "owned"},
+            ),
+            (
+                "project_contribution",
+                {"project": " ", "contribution": "Parsing", "ownership": "owned"},
+            ),
+            (
+                "project_contribution",
+                {"project": "P" * 513, "contribution": "Parsing", "ownership": "owned"},
+            ),
+            (
+                "project_contribution",
+                {"project": "Moonshot", "contribution": 7, "ownership": "owned"},
+            ),
+            (
+                "project_contribution",
+                {"project": "Moonshot", "contribution": " ", "ownership": "owned"},
+            ),
+            (
+                "project_contribution",
+                {
+                    "project": "Moonshot",
+                    "contribution": "C" * 2049,
+                    "ownership": "owned",
+                },
+            ),
+            (
+                "project_contribution",
+                {"project": "Moonshot", "contribution": "Parsing", "ownership": 7},
+            ),
+            (
+                "project_contribution",
+                {"project": "Moonshot", "contribution": "Parsing", "ownership": " "},
+            ),
+            (
+                "project_contribution",
+                {
+                    "project": "Moonshot",
+                    "contribution": "Parsing",
+                    "ownership": "owned",
+                    "extra": "no",
+                },
+            ),
+            ("achievement", "x" * 2049),
+            ("language", "English\nembedded second claim"),
+        )
+
+        for index, (claim_type, value) in enumerate(invalid_values):
+            with self.subTest(index=index, claim_type=claim_type):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        claim_type=claim_type,
+                        value=value,
+                        idempotency_key=f"invalid-fields-{index}",
+                    )
+                )
+
+    def test_mutated_nested_value_is_revalidated_at_service_call_time(self) -> None:
+        mutable_value: dict[str, Any] = {
+            "employer": "Example Robotics LLC",
+            "title": "Software Engineer",
+        }
+        request = single_proposal_request(
+            claim_type="employment_title",
+            value=mutable_value,
+            idempotency_key="mutated-after-construction",
+        )
+        self.service.preview_import_proposal(request)
+        mutable_value["title"] = "api_key=SYNTHETIC_NOT_A_KEY_1234567890"
+
+        self.assert_rejected_before_storage(request)
+
+    def test_nested_value_is_snapshotted_before_the_storage_transaction(self) -> None:
+        mutable_value: dict[str, Any] = {
+            "employer": "Example Robotics LLC",
+            "title": "Software Engineer",
+        }
+        request = single_proposal_request(
+            claim_type="employment_title",
+            value=mutable_value,
+            idempotency_key="mutated-at-transaction-entry",
+        )
+        original_transaction = self.repository.transaction
+
+        def mutate_then_open_transaction() -> Any:
+            mutable_value["title"] = "api_key=SYNTHETIC_NOT_A_KEY_1234567890"
+            return original_transaction()
+
+        with patch.object(
+            self.repository,
+            "transaction",
+            side_effect=mutate_then_open_transaction,
+        ):
+            result = self.service.create_import_proposal(request, now=NOW)
+
+        self.assertEqual(
+            result.claims[0].value_json,
+            {"employer": "Example Robotics LLC", "title": "Software Engineer"},
+        )
+        self.assertEqual(
+            self.repository.list_claims()[0]["value_json"],
+            '{"employer":"Example Robotics LLC","title":"Software Engineer"}',
+        )
+
+    def test_scope_and_span_are_snapshotted_before_the_storage_transaction(
+        self,
+    ) -> None:
+        safe_scope_id = "qzxqzxqz"
+        unsafe_scope_id = "token=SYNTHETIC_NOT_A_TOKEN_1234567890"
+        mutable_scope = Scope(type=ScopeType.COMPANY, id=safe_scope_id)
+        safe = single_proposal_request()
+        mutable_span = safe.proposals[0].span
+        original_start = mutable_span.start
+        original_end = mutable_span.end
+        original_text = mutable_span.text
+        request = replace(
+            safe,
+            idempotency_key="mutated-scope-and-span-at-transaction-entry",
+            proposals=(
+                replace(
+                    safe.proposals[0],
+                    scope=mutable_scope,
+                    span=mutable_span,
+                ),
+            ),
+        )
+        original_transaction = self.repository.transaction
+
+        def mutate_then_open_transaction() -> Any:
+            object.__setattr__(mutable_scope, "id", unsafe_scope_id)
+            object.__setattr__(mutable_span, "start", 0)
+            object.__setattr__(mutable_span, "end", 1)
+            object.__setattr__(mutable_span, "text", request.source_text[:1])
+            return original_transaction()
+
+        with patch.object(
+            self.repository,
+            "transaction",
+            side_effect=mutate_then_open_transaction,
+        ):
+            result = self.service.create_import_proposal(request, now=NOW)
+
+        self.assertEqual(result.claims[0].scope.id, safe_scope_id)
+        self.assertEqual(result.evidence[0].source_text, original_text)
+        self.assertEqual(result.evidence[0].locator["start"], original_start)
+        self.assertEqual(result.evidence[0].locator["end"], original_end)
+        self.assertNotIn(unsafe_scope_id, str(self.repository.list_claims()))
+
+        retry_request = replace(
+            request,
+            proposals=(
+                replace(
+                    request.proposals[0],
+                    scope=Scope(type=ScopeType.COMPANY, id=safe_scope_id),
+                    span=TextSourceSpan(
+                        start=original_start,
+                        end=original_end,
+                        text=original_text,
+                    ),
+                ),
+            ),
+        )
+        self.assertEqual(
+            self.service.create_import_proposal(retry_request, now=NOW),
+            result,
+        )
+
+    def test_selected_evidence_has_per_claim_and_batch_limits(self) -> None:
+        prefix = "P" * 5000
+        selected = "E" * 4096
+        suffix = "S" * 5000
+        source_text = prefix + selected + suffix
+        span = TextSourceSpan(
+            start=len(prefix),
+            end=len(prefix) + len(selected),
+            text=selected,
+        )
+        one = single_proposal_request(
+            source_text=source_text,
+            span=span,
+            idempotency_key="evidence-batch-limit",
+        )
+        self.service.preview_import_proposal(one)
+        self.service.preview_import_proposal(replace(one, proposals=one.proposals * 16))
+        too_many = replace(one, proposals=one.proposals * 17)
+
+        self.assert_rejected_before_storage(
+            too_many,
+            message_pattern="batch limit",
+        )
+
+        oversized_selected = selected + "E"
+        oversized_source = prefix + oversized_selected + suffix
+        oversized_span = TextSourceSpan(
+            start=len(prefix),
+            end=len(prefix) + len(oversized_selected),
+            text=oversized_selected,
+        )
+        self.assert_rejected_before_storage(
+            single_proposal_request(
+                source_text=oversized_source,
+                span=oversized_span,
+                idempotency_key="evidence-item-limit",
+            ),
+            message_pattern="selected evidence exceeds the atomic claim limit",
+        )
+
+        sixteen_lines = "\n".join(f"synthetic evidence line {index}" for index in range(16))
+        line_source = "P" * 500 + sixteen_lines + "S" * 500
+        line_span = TextSourceSpan(
+            start=500,
+            end=500 + len(sixteen_lines),
+            text=sixteen_lines,
+        )
+        self.service.preview_import_proposal(
+            single_proposal_request(
+                source_text=line_source,
+                span=line_span,
+                idempotency_key="evidence-line-boundary",
+            )
+        )
+
+        seventeen_lines = sixteen_lines + "\nsynthetic evidence line 16"
+        seventeen_line_source = "P" * 500 + seventeen_lines + "S" * 500
+        self.assert_rejected_before_storage(
+            single_proposal_request(
+                source_text=seventeen_line_source,
+                span=TextSourceSpan(
+                    start=500,
+                    end=500 + len(seventeen_lines),
+                    text=seventeen_lines,
+                ),
+                idempotency_key="evidence-line-over-limit",
+            ),
+            message_pattern="too many lines",
+        )
+
+        canonical_boundary = single_proposal_request(
+            canonical_text="C" * 2048,
+            source_text=source_text,
+            span=span,
+        )
+        self.service.preview_import_proposal(canonical_boundary)
+        self.assert_rejected_before_storage(
+            replace(canonical_boundary, proposals=(replace(
+                canonical_boundary.proposals[0],
+                canonical_text="C" * 2049,
+            ),)),
+            message_pattern="canonical text exceeds the atomic claim limit",
+        )
+
+    def test_document_coverage_accepts_79_percent_and_rejects_80_percent(self) -> None:
+        source_text = "A" * 100
+        accepted_text = source_text[:79]
+        accepted = single_proposal_request(
+            value="Synthetic narrow fact",
+            canonical_text="Synthetic narrow fact",
+            source_text=source_text,
+            span=TextSourceSpan(start=0, end=79, text=accepted_text),
+            idempotency_key="coverage-79-percent",
+        )
+        self.service.preview_import_proposal(accepted)
+
+        rejected_text = source_text[:80]
+        self.assert_rejected_before_storage(
+            single_proposal_request(
+                value="Synthetic boundary fact",
+                canonical_text="Synthetic boundary fact",
+                source_text=source_text,
+                span=TextSourceSpan(start=0, end=80, text=rejected_text),
+                idempotency_key="coverage-80-percent",
+            ),
+            message_pattern="too broad|cover too much",
+        )
+
+    def test_service_source_limit_is_exactly_16_mib_of_utf8(self) -> None:
+        exact_source = "é" * (PROFILE_IMPORT_MAX_SOURCE_BYTES // 2)
+        proposal = ProposedImportClaim(
+            claim_type="skill_use",
+            value="Python",
+            canonical_text="Synthetic Python use",
+            span=TextSourceSpan(start=0, end=1, text="é"),
+        )
+        request = CreateImportProposal(
+            idempotency_key="exact-service-source-byte-limit",
+            source_ref="fixture://synthetic-profile/exact-source-limit.txt",
+            source_text=exact_source,
+            extraction_method="synthetic-schema-test@1",
+            proposals=(proposal,),
+        )
+
+        self.assertEqual(len(request.source_text.encode("utf-8")), 16 * 1024 * 1024)
+        self.service.preview_import_proposal(request)
+        with self.assertRaisesRegex(ValueError, "16 MiB"):
+            replace(request, source_text=exact_source + "a")
+
+    def test_maximum_safe_batch_with_assignment_punctuation_is_accepted(self) -> None:
+        evidence_text = "Synthetic evidence anchor."
+        source_text = evidence_text + " " + ("Z" * 10_000)
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="skill_use",
+                value=f"Tool{index}",
+                canonical_text=f"Synthetic work {index}: built tool",
+                span=TextSourceSpan(
+                    start=0,
+                    end=len(evidence_text),
+                    text=evidence_text,
+                ),
+            )
+            for index in range(1000)
+        )
+        request = CreateImportProposal(
+            idempotency_key="safe-maximum-proposal-batch",
+            source_ref="fixture://synthetic-profile/maximum-batch.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        preview = self.service.preview_import_proposal(request)
+
+        self.assertEqual(preview.proposal_count, 1000)
+
+    def test_total_persisted_metadata_limit_is_service_owned(self) -> None:
+        safe = single_proposal_request()
+        request = replace(
+            safe,
+            artifact_id="A" * 20,
+            proposals=(safe.proposals[0],) * 3,
+        )
+        unique_input_size = (
+            len(request.source_ref)
+            + len(request.extraction_method)
+            + len(request.artifact_id or "")
+            + sum(len(proposal.subject_type) for proposal in request.proposals)
+        )
+        persisted_size = len(request.proposals) * (
+            (2 * len(request.source_ref))
+            + len(request.extraction_method)
+            + len(request.artifact_id or "")
+        ) + sum(len(proposal.subject_type) for proposal in request.proposals)
+        test_limit = (unique_input_size + persisted_size) // 2
+        self.assertLess(unique_input_size, test_limit)
+        self.assertLess(test_limit, persisted_size)
+        with patch(
+            "grounded_apply.services.profile."
+            "PROFILE_IMPORT_MAX_TOTAL_METADATA_CODEPOINTS",
+            test_limit,
+        ):
+            self.assert_rejected_before_storage(
+                request,
+                message_pattern="metadata exceeds the batch limit",
+            )
+
+    def test_import_scope_identifier_is_revalidated_at_service_call_time(self) -> None:
+        mutable_scope = Scope(type=ScopeType.COMPANY, id="synthetic-company")
+        safe = single_proposal_request()
+        request = replace(
+            safe,
+            proposals=(replace(safe.proposals[0], scope=mutable_scope),),
+        )
+        object.__setattr__(mutable_scope, "id", "\ud800")
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="valid Unicode",
+        )
+
+    def assert_disallowed_content_on_every_surface(
+        self,
+        content: str,
+        *,
+        message_pattern: str = "disallowed sensitive",
+    ) -> None:
+        evidence_prefix = "Synthetic unselected prefix text. " * 3
+        evidence_suffix = " Synthetic unselected suffix text." * 3
+        evidence_source = evidence_prefix + content + evidence_suffix
+        requests = (
+            single_proposal_request(
+                value=content,
+                idempotency_key="unsafe-scalar-value",
+            ),
+            single_proposal_request(
+                claim_type="employment_title",
+                value={"employer": "Example Robotics LLC", "title": content},
+                idempotency_key="unsafe-structured-value",
+            ),
+            single_proposal_request(
+                canonical_text=content,
+                idempotency_key="unsafe-canonical-text",
+            ),
+            single_proposal_request(
+                source_text=evidence_source,
+                span=TextSourceSpan(
+                    start=len(evidence_prefix),
+                    end=len(evidence_prefix) + len(content),
+                    text=content,
+                ),
+                idempotency_key="unsafe-selected-evidence",
+            ),
+        )
+
+        for index, request in enumerate(requests):
+            with self.subTest(surface=index):
+                self.assert_rejected_before_storage(
+                    request,
+                    forbidden_text=content,
+                    message_pattern=message_pattern,
+                )
+
+    def test_work_authorization_cannot_hide_in_allowed_content(self) -> None:
+        for content in (
+            "Authorized to work in the United States.",
+            "Able to work in the United States.",
+            "Requires sponsorship.",
+            "Sponsorship will be required.",
+            "No sponsorship required.",
+            "Has the legal right to work in the United States.",
+            "Legally permitted to work in the U.S.",
+            "Has a valid work permit.",
+            "Employment eligibility confirmed.",
+            "Currently on OPT.",
+            "currently on opt.",
+            "OPT eligible.",
+            "CPT holder.",
+            "H-1B visa holder.",
+            "I hold an H-1B.",
+            "EAD holder.",
+            "Canadian citizen.",
+            "canadian citizen.",
+            "CANADIAN CITIZEN.",
+            "Citizen of Canada.",
+        ):
+            with self.subTest(content=content):
+                self.assert_disallowed_content_on_every_surface(content)
+
+    def test_government_identifiers_cannot_hide_in_allowed_content(self) -> None:
+        for content in (
+            "Social Security number (synthetic).",
+            "000-12-3456",
+            "Passport SYNTHETIC-P00000000",
+            "Passport #SYNTHETIC-P00000000",
+            "Driver license SYNTHETIC-D00000000",
+            "Drivers license #SYNTHETIC-D00000000",
+            "DL: SYNTHETIC-D00000000",
+            "EIN 00-0000000",
+            "Tax ID #SYNTHETIC-T00000000",
+            "Government ID #SYNTHETIC-G00000000",
+        ):
+            with self.subTest(content=content):
+                self.assert_disallowed_content_on_every_surface(content)
+
+    def test_credentials_and_tokens_cannot_hide_in_allowed_content(self) -> None:
+        for content in (
+            "api_token=SYNTHETIC_NOT_A_TOKEN_1234567890",
+            "token=SYNTHETIC_NOT_A_TOKEN_1234567890",
+            "secret=SYNTHETIC_NOT_A_SECRET_1234567890",
+            "session_token=SYNTHETIC_NOT_A_TOKEN_1234567890",
+            "AWS_SECRET_ACCESS_KEY=SYNTHETIC_NOT_A_KEY_1234567890",
+            "credential=SYNTHETIC_NOT_A_CREDENTIAL_1234567890",
+            "Cookie: sessionid=SYNTHETIC_NOT_A_COOKIE_1234567890",
+            "session_id=SYNTHETIC_NOT_A_SESSION_1234567890",
+            "api+key=SYNTHETIC_NOT_A_KEY_1234567890",
+            "Authorization: Bearer SYNTHETIC_NOT_A_TOKEN_1234567890",
+            "Authorization: Basic SYNTHETIC_NOT_A_CREDENTIAL_1234567890",
+            "https://synthetic-user:synthetic-password@portfolio.example.com/item",
+            "-----BEGIN PRIVATE KEY----- SYNTHETIC_NOT_A_PRIVATE_KEY",
+            f"github_pat_{'A' * 20}",
+            f"sk-proj-{'A' * 20}",
+            f"AKIA{'A' * 16}",
+            f"xoxb-{'A' * 16}",
+            f"eyJ{'A' * 12}.eyJ{'B' * 12}.eyJ{'C' * 12}",
+        ):
+            with self.subTest(content_kind=content.split(":", 1)[0]):
+                self.assert_disallowed_content_on_every_surface(content)
+
+    def test_sensitive_assignment_labels_cannot_hide_in_allowed_values(self) -> None:
+        assignments = (
+            "work_authorization=yes",
+            "sponsorship=no",
+            "visa=F-1",
+            "EAD=yes",
+            "passport=SYNTHETIC-P00000000",
+            "driver_license=SYNTHETIC-D00000000",
+            "tax_id=SYNTHETIC-T00000000",
+            "EIN=SYNTHETIC-E00000000",
+            "work.authorization=yes",
+            "api.key=SYNTHETIC_NOT_A_KEY_1234567890",
+            "passport.no=SYNTHETIC-P00000000",
+            "candidate work.authorization=yes",
+            "set api.key=SYNTHETIC_NOT_A_KEY_1234567890",
+            "id passport.no=SYNTHETIC-P00000000",
+            "https://example.com/?api.key=SYNTHETIC_NOT_A_KEY_1234567890",
+        )
+
+        for index, content in enumerate(assignments):
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        value=content,
+                        idempotency_key=f"sensitive-assignment-{index}",
+                    ),
+                    forbidden_text=content,
+                    message_pattern="disallowed sensitive",
+                )
+
+    def test_sensitive_content_cannot_be_fragmented_across_value_fields(self) -> None:
+        fragmented_values = (
+            {"employer": "api_to", "title": "ken=SYNTHETIC_NOT_A_TOKEN_1234567890"},
+            {"employer": "ken=SYNTHETIC_NOT_A_TOKEN_1234567890", "title": "api_to"},
+            {"employer": "Social Secu", "title": "rity number SYNTHETIC-ID"},
+            {"employer": "rity number SYNTHETIC-ID", "title": "Social Secu"},
+            {"employer": "Requires spon", "title": "sorship."},
+            {"employer": "sorship.", "title": "Requires spon"},
+        )
+
+        for index, value in enumerate(fragmented_values):
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        claim_type="employment_title",
+                        value=value,
+                        idempotency_key=f"fragmented-sensitive-value-{index}",
+                    ),
+                    message_pattern="fragmented sensitive",
+                )
+
+    def test_sensitive_content_cannot_be_fragmented_across_value_and_canonical_text(
+        self,
+    ) -> None:
+        request = single_proposal_request(
+            claim_type="employment_title",
+            value={
+                "employer": "Requires spon",
+                "title": "Software Engineer",
+            },
+            canonical_text="sorship.",
+            idempotency_key="cross-surface-fragmented-sensitive-content",
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="fragmented sensitive",
+        )
+
+    def test_control_padding_cannot_hide_cross_surface_sensitive_fragments(
+        self,
+    ) -> None:
+        request = single_proposal_request(
+            claim_type="employment_title",
+            value={
+                "employer": "sorship.",
+                "title": "Software Engineer",
+            },
+            canonical_text="Requires spon" + ("\u200b" * 65),
+            idempotency_key="control-padded-sensitive-fragments",
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="fragmented sensitive",
+        )
+
+    def test_percent_encoded_sensitive_content_is_rejected(self) -> None:
+        encoded = "token%253DSYNTHETIC_NOT_A_TOKEN_1234567890"
+        self.assert_rejected_before_storage(
+            single_proposal_request(
+                value=encoded,
+                idempotency_key="encoded-sensitive-value",
+            ),
+            forbidden_text=encoded,
+            message_pattern="disallowed sensitive",
+        )
+
+    def test_control_characters_cannot_obfuscate_sensitive_content(self) -> None:
+        for content in (
+            "Authorized\u200bto\u200bwork in the United States.",
+            "api_\x00key=SYNTHETIC_NOT_A_KEY_1234567890",
+            "Requires\x1bsponsorship.",
+        ):
+            with self.subTest(content=repr(content)):
+                self.assert_disallowed_content_on_every_surface(
+                    content,
+                    message_pattern=(
+                        "disallowed sensitive|one line without control or format"
+                    ),
+                )
+
+    def test_sensitive_classifier_allows_noneligibility_resume_language(self) -> None:
+        for index, content in enumerate(
+            (
+                "Able to work independently on cross-functional teams.",
+                "Contributed to a citizen science publication.",
+                "Built a passport renewal service.",
+                "Improved drivers license renewal workflow.",
+                "Designed passport photo upload UX.",
+                "DL: PyTorch",
+            )
+        ):
+            with self.subTest(index=index):
+                self.service.preview_import_proposal(
+                    single_proposal_request(
+                        value=content,
+                        idempotency_key=f"safe-sensitive-negative-control-{index}",
+                    )
+                )
+
+    def test_fragmented_assignment_detector_does_not_match_inside_a_label(self) -> None:
+        self.service.preview_import_proposal(
+            single_proposal_request(
+                claim_type="skill_use",
+                value="API",
+                canonical_text="Turnkey: delivered",
+                idempotency_key="safe-api-turnkey-boundary",
+            )
+        )
+
+    def test_sensitive_label_in_selected_line_blocks_answer_only_span(self) -> None:
+        cases = (
+            ("Work authorization: Yes.", "Yes", "Yes"),
+            (
+                "Passport: SYNTHETIC-P00000000",
+                "SYNTHETIC-P00000000",
+                "SYNTHETIC-P00000000",
+            ),
+            (
+                "API token: SYNTHETIC_RANDOM_VALUE_1234567890",
+                "SYNTHETIC_RANDOM_VALUE_1234567890",
+                "SYNTHETIC_RANDOM_VALUE_1234567890",
+            ),
+        )
+        for index, (line, selected, value) in enumerate(cases):
+            source_text = f"Synthetic header.\n{line}\nSynthetic footer."
+            start = source_text.index(selected)
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        value=value,
+                        canonical_text="Confirmed synthetic answer",
+                        source_text=source_text,
+                        span=TextSourceSpan(
+                            start=start,
+                            end=start + len(selected),
+                            text=selected,
+                        ),
+                        idempotency_key=f"answer-only-sensitive-line-{index}",
+                    ),
+                    forbidden_text=selected,
+                    message_pattern="disallowed sensitive",
+                )
+
+    def test_sensitive_label_on_preceding_line_blocks_answer_only_span(self) -> None:
+        cases = (
+            ("Work authorization:", "Yes", "\n"),
+            ("Passport number", "SYNTHETIC-P00000000", "\r\n"),
+            ("API token", "SYNTHETIC_RANDOM_VALUE_1234567890", "\u2028"),
+        )
+        for index, (label, selected, separator) in enumerate(cases):
+            source_text = (
+                f"Synthetic header.{separator}{label}{separator}{selected}"
+                f"{separator}Synthetic footer."
+            )
+            start = source_text.index(selected)
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        value=selected,
+                        canonical_text="Confirmed synthetic answer",
+                        source_text=source_text,
+                        span=TextSourceSpan(
+                            start=start,
+                            end=start + len(selected),
+                            text=selected,
+                        ),
+                        idempotency_key=f"preceding-sensitive-label-{index}",
+                    ),
+                    forbidden_text=selected,
+                    message_pattern="disallowed sensitive",
+                )
+
+    def test_credentials_cannot_hide_in_persisted_import_metadata(self) -> None:
+        safe = single_proposal_request()
+        token = "SYNTHETIC_NOT_A_TOKEN_1234567890"
+        metadata_cases = (
+            (
+                replace(
+                    safe,
+                    source_ref=(
+                        "https://synthetic-user:synthetic-password@"
+                        "profile.example.com/resume"
+                    ),
+                ),
+                "synthetic-password",
+            ),
+            (
+                replace(
+                    safe,
+                    source_ref=f"https://profile.example.com/resume?token={token}",
+                ),
+                token,
+            ),
+            (
+                replace(
+                    safe,
+                    source_ref=(
+                        "https://profile.example.com/resume?"
+                        "token%253DSYNTHETIC_NOT_A_TOKEN_1234567890"
+                    ),
+                ),
+                "SYNTHETIC_NOT_A_TOKEN_1234567890",
+            ),
+            (
+                replace(
+                    safe,
+                    extraction_method=f"extractor@ghp_{'A' * 30}",
+                ),
+                "ghp_",
+            ),
+            (replace(safe, artifact_id=f"token={token}"), token),
+            (
+                replace(
+                    safe,
+                    proposals=(
+                        replace(safe.proposals[0], subject_id=f"token={token}"),
+                    ),
+                ),
+                token,
+            ),
+            (
+                replace(
+                    safe,
+                    proposals=(
+                        replace(
+                            safe.proposals[0],
+                            scope=Scope(type=ScopeType.COMPANY, id=f"token={token}"),
+                        ),
+                    ),
+                ),
+                token,
+            ),
+        )
+
+        for index, (request, forbidden_text) in enumerate(metadata_cases):
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    request,
+                    forbidden_text=forbidden_text,
+                    message_pattern="disallowed sensitive",
+                )
+
+    def test_sensitive_content_cannot_be_split_across_metadata_fields(self) -> None:
+        token = "SYNTHETIC_NOT_A_TOKEN_1234567890"
+        safe = single_proposal_request()
+        proposal = replace(
+            safe.proposals[0],
+            subject_id="api_to",
+            scope=Scope(type=ScopeType.COMPANY, id=f"ken={token}"),
+        )
+
+        self.assert_rejected_before_storage(
+            replace(
+                safe,
+                idempotency_key="fragmented-sensitive-metadata",
+                proposals=(proposal,),
+            ),
+            forbidden_text=token,
+            message_pattern="fragmented sensitive",
+        )
+
+    def test_sensitive_assignment_fragments_cannot_hide_across_proposals(self) -> None:
+        safe = single_proposal_request()
+        values = (
+            "api_to",
+            "Synthetic harmless filler",
+            "ken=SYNTHETIC_NOT_A_TOKEN_1234567890",
+        )
+        proposals = tuple(
+            replace(
+                safe.proposals[0],
+                value=value,
+                canonical_text=f"Synthetic fragment claim {index}",
+            )
+            for index, value in enumerate(values)
+        )
+
+        self.assert_rejected_before_storage(
+            replace(
+                safe,
+                idempotency_key="nonadjacent-fragmented-assignment",
+                proposals=proposals,
+            ),
+            forbidden_text="SYNTHETIC_NOT_A_TOKEN_1234567890",
+            message_pattern="fragmented sensitive",
+        )
+
+    def test_fragmented_assignment_scan_indexes_legal_prefix_complements(
+        self,
+    ) -> None:
+        keys = profile_import_validation._SENSITIVE_ASSIGNMENT_KEYS
+        legal_prefixes = tuple(
+            sorted(
+                {
+                    key[:split]
+                    for key in keys
+                    for split in range(1, len(key))
+                }
+            )
+        )
+        components = (*legal_prefixes, "9=9")
+        assignment_fragment_hashes = {
+            hash(key[split:])
+            for key in keys
+            for split in range(1, len(key))
+        }
+        unmatched_fragment = "z"
+        while hash(unmatched_fragment) in assignment_fragment_hashes:
+            unmatched_fragment += "z"
+        comparison_count = 0
+
+        class ComparisonProbe(str):
+            __hash__ = str.__hash__
+
+            def __eq__(self, other: object) -> bool:
+                nonlocal comparison_count
+                comparison_count += 1
+                return bool(super().__eq__(other))
+
+            def __ne__(self, other: object) -> bool:
+                nonlocal comparison_count
+                comparison_count += 1
+                return bool(super().__ne__(other))
+
+        probe = ComparisonProbe(unmatched_fragment)
+        fragments_per_component = 64
+        with patch.object(
+            profile_import_validation,
+            "_assignment_left_fragments",
+            side_effect=lambda _: iter((probe,) * fragments_per_component),
+        ):
+            found = profile_import_validation._contains_fragmented_assignment(
+                components
+            )
+
+        self.assertFalse(found)
+        self.assertEqual(comparison_count, 0)
+
+    def test_whole_document_content_is_rejected_before_storage(self) -> None:
+        source_text, _ = load_fixture()
+        trimmed_source = source_text.strip()
+        safe_span = TextSourceSpan(start=87, end=127, text=source_text[87:127])
+        full_span = TextSourceSpan(
+            start=0,
+            end=len(source_text),
+            text=source_text,
+        )
+        trimmed_span = TextSourceSpan(
+            start=0,
+            end=len(trimmed_source),
+            text=trimmed_source,
+        )
+        requests = (
+            single_proposal_request(
+                claim_type="achievement",
+                value=" ".join(source_text.split()),
+                source_text=source_text,
+                span=safe_span,
+                idempotency_key="whole-document-value",
+            ),
+            single_proposal_request(
+                canonical_text=trimmed_source,
+                source_text=source_text,
+                span=safe_span,
+                idempotency_key="whole-document-canonical",
+            ),
+            single_proposal_request(
+                canonical_text=" ".join(source_text.split()),
+                source_text=source_text,
+                span=safe_span,
+                idempotency_key="normalized-whole-document-canonical",
+            ),
+            single_proposal_request(
+                source_text=source_text,
+                span=full_span,
+                idempotency_key="whole-document-evidence",
+            ),
+            single_proposal_request(
+                source_text=source_text,
+                span=trimmed_span,
+                idempotency_key="trimmed-whole-document-evidence",
+            ),
+        )
+
+        for request in requests:
+            with self.subTest(idempotency_key=request.idempotency_key):
+                self.assert_rejected_before_storage(
+                    request,
+                    message_pattern="whole source|too broad|cover too much",
+                )
+
+        short_source = "Synthetic Person\nPython developer"
+        short_span = TextSourceSpan(
+            start=0,
+            end=len(short_source),
+            text=short_source,
+        )
+        self.assert_rejected_before_storage(
+            single_proposal_request(
+                source_text=short_source,
+                span=short_span,
+                idempotency_key="short-whole-document",
+            ),
+            message_pattern="whole source|too broad|cover too much",
+        )
+
+    def test_whole_document_cannot_be_split_across_persisted_content_channels(
+        self,
+    ) -> None:
+        value_text = "A" * 120
+        canonical_text = "B" * 120
+        evidence_text = "C" * 60
+        source_text = value_text + canonical_text + evidence_text
+        request = single_proposal_request(
+            claim_type="achievement",
+            value=value_text,
+            canonical_text=canonical_text,
+            source_text=source_text,
+            span=TextSourceSpan(
+                start=len(value_text) + len(canonical_text),
+                end=len(source_text),
+                text=evidence_text,
+            ),
+            idempotency_key="cross-channel-whole-document",
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="content.*whole source",
+        )
+
+    def test_whole_document_cannot_be_split_across_structured_value_leaves(
+        self,
+    ) -> None:
+        source_text = "Example Robotics LLC Software Engineer"
+        evidence_text = "Example Robotics LLC"
+        request = single_proposal_request(
+            claim_type="employment_title",
+            value={
+                "employer": "Example Robotics LLC",
+                "title": "Software Engineer",
+            },
+            canonical_text="Synthetic title claim",
+            source_text=source_text,
+            span=TextSourceSpan(
+                start=0,
+                end=len(evidence_text),
+                text=evidence_text,
+            ),
+            idempotency_key="split-document-value",
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="whole source|too broad",
+        )
+
+    def test_whole_document_cannot_be_split_across_reordered_values(self) -> None:
+        chunks = ("A" * 200, "B" * 200, "C" * 200)
+        source_text = "".join(chunks)
+        evidence_text = source_text[:40]
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="achievement",
+                value=chunk,
+                canonical_text=f"Synthetic chunk {index}",
+                span=TextSourceSpan(
+                    start=0,
+                    end=len(evidence_text),
+                    text=evidence_text,
+                ),
+            )
+            for index, chunk in enumerate(reversed(chunks))
+        )
+        request = CreateImportProposal(
+            idempotency_key="reordered-whole-document-values",
+            source_ref="fixture://synthetic-profile/reordered-values.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="whole source|too broad",
+        )
+
+    def test_short_chunks_cannot_reconstruct_a_source_in_arbitrary_order(self) -> None:
+        source_text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        chunks = tuple(source_text[index : index + 2] for index in range(0, 36, 2))
+        permutation = chunks[4:11] + chunks[:4] + chunks[11:]
+        evidence_text = source_text[:4]
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="achievement",
+                value=chunk,
+                canonical_text=f"Synthetic fragment {index}",
+                span=TextSourceSpan(start=0, end=4, text=evidence_text),
+            )
+            for index, chunk in enumerate(permutation)
+        )
+        request = CreateImportProposal(
+            idempotency_key="short-reordered-whole-document",
+            source_ref="fixture://synthetic-profile/short-reordered.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="too broad",
+        )
+
+    def test_single_character_chunks_cannot_reconstruct_a_source(self) -> None:
+        source_text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        chunks = tuple(source_text)
+        permutation = chunks[7:19] + chunks[:7] + chunks[19:]
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="achievement",
+                value=chunk,
+                canonical_text=f"Synthetic character {index}",
+                span=TextSourceSpan(start=0, end=2, text=source_text[:2]),
+            )
+            for index, chunk in enumerate(permutation)
+        )
+        request = CreateImportProposal(
+            idempotency_key="single-character-whole-document",
+            source_ref="fixture://synthetic-profile/single-character-chunks.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="too broad",
+        )
+
+    def test_punctuation_cannot_hide_reordered_single_character_chunks(self) -> None:
+        source_text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        chunks = tuple(source_text)
+        permutation = chunks[7:19] + chunks[:7] + chunks[19:]
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="achievement",
+                value=chunk + ("!" * 20),
+                canonical_text=f"Synthetic padded character {index}",
+                span=TextSourceSpan(start=0, end=2, text=source_text[:2]),
+            )
+            for index, chunk in enumerate(permutation)
+        )
+        request = CreateImportProposal(
+            idempotency_key="punctuation-padded-source-characters",
+            source_ref="fixture://synthetic-profile/padded-characters.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="too broad",
+        )
+
+    def test_repeated_source_character_padding_cannot_hide_reordered_chunks(
+        self,
+    ) -> None:
+        source_text = "0123456789"
+        permutation = source_text[3:8] + source_text[:3] + source_text[8:]
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="achievement",
+                value=character + ("0" * 20),
+                canonical_text="Synthetic padded digit claim",
+                span=TextSourceSpan(start=0, end=1, text=source_text[:1]),
+            )
+            for character in permutation
+        )
+        request = CreateImportProposal(
+            idempotency_key="source-character-padded-document",
+            source_ref="fixture://synthetic-profile/source-character-padding.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="raw values.*too broad",
+        )
+
+    def test_unrelated_aggregate_value_length_is_not_document_coverage(self) -> None:
+        source_text = "A" * 600
+        evidence_text = source_text[:40]
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="achievement",
+                value="Z" * 200,
+                canonical_text=f"Synthetic unrelated claim {index}",
+                span=TextSourceSpan(
+                    start=0,
+                    end=len(evidence_text),
+                    text=evidence_text,
+                ),
+            )
+            for index in range(3)
+        )
+        request = CreateImportProposal(
+            idempotency_key="unrelated-value-length",
+            source_ref="fixture://synthetic-profile/unrelated-values.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        self.service.preview_import_proposal(request)
+
+    def test_whole_document_cannot_hide_in_persisted_metadata(self) -> None:
+        source_text = "SYNTHETICPRIVATESOURCE" * 12
+        evidence_text = source_text[:30]
+        span = TextSourceSpan(start=0, end=len(evidence_text), text=evidence_text)
+        safe = single_proposal_request(
+            canonical_text="Synthetic metadata claim",
+            source_text=source_text,
+            span=span,
+            idempotency_key="whole-document-metadata",
+        )
+        requests = (
+            replace(
+                safe,
+                proposals=(replace(safe.proposals[0], subject_id=source_text),),
+            ),
+            replace(safe, source_ref=f"fixture://whole/{source_text}"),
+            replace(
+                safe,
+                proposals=(
+                    replace(
+                        safe.proposals[0],
+                        subject_id=source_text[: len(source_text) // 2],
+                        scope=Scope(
+                            type=ScopeType.COMPANY,
+                            id=source_text[len(source_text) // 2 :],
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        for index, request in enumerate(requests):
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    request,
+                    message_pattern="metadata.*whole source|metadata.*too broad",
+                )
+
+        short_source = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+        selected = "Alpha"
+        encoded_source_ref = "fixture://whole/" + quote(
+            quote(short_source, safe=""),
+            safe="",
+        )
+        self.assertLessEqual(len(encoded_source_ref), 512)
+        short_safe = single_proposal_request(
+            canonical_text="Synthetic encoded metadata claim",
+            source_text=short_source,
+            span=TextSourceSpan(start=0, end=len(selected), text=selected),
+            idempotency_key="encoded-whole-document-metadata",
+        )
+        self.assert_rejected_before_storage(
+            replace(short_safe, source_ref=encoded_source_ref),
+            message_pattern="metadata.*whole source|metadata.*too broad",
+        )
+
+    def test_percent_encoded_whole_document_content_is_rejected(self) -> None:
+        source_text, _ = load_fixture()
+        encoded_source = quote(source_text, safe="")
+        safe_span = TextSourceSpan(start=87, end=127, text=source_text[87:127])
+        for index, request in enumerate(
+            (
+                single_proposal_request(
+                    claim_type="achievement",
+                    value=encoded_source,
+                    source_text=source_text,
+                    span=safe_span,
+                    idempotency_key="encoded-whole-document-value",
+                ),
+                single_proposal_request(
+                    canonical_text=encoded_source,
+                    source_text=source_text,
+                    span=safe_span,
+                    idempotency_key="encoded-whole-document-canonical",
+                ),
+            )
+        ):
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    request,
+                    message_pattern="whole source|too broad",
+                )
+
+    def test_raw_percent_syntax_cannot_hide_an_exact_whole_document_value(self) -> None:
+        source_text = "%41" * 100
+        request = single_proposal_request(
+            claim_type="achievement",
+            value=source_text,
+            canonical_text="Synthetic percent syntax claim",
+            source_text=source_text,
+            span=TextSourceSpan(start=0, end=1, text="%"),
+            idempotency_key="raw-percent-whole-document",
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="whole source|too broad",
+        )
+
+    def test_intermediate_percent_decode_layer_cannot_hide_whole_document_value(
+        self,
+    ) -> None:
+        source_text = "A%42" * 100
+        request = single_proposal_request(
+            claim_type="achievement",
+            value="A%2542" * 100,
+            canonical_text="Synthetic intermediate encoding claim",
+            source_text=source_text,
+            span=TextSourceSpan(start=0, end=1, text="A"),
+            idempotency_key="intermediate-percent-layer-whole-document",
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            forbidden_text=source_text,
+            message_pattern=(
+                "values percent-decode layer 1.*reconstructs the whole source"
+            ),
+        )
+
+    def test_split_whole_document_evidence_is_rejected_before_storage(self) -> None:
+        source_text, _ = load_fixture()
+        boundaries = (0, len(source_text) // 3, 2 * len(source_text) // 3, len(source_text))
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="achievement",
+                value=f"Synthetic achievement {index}",
+                canonical_text=f"Synthetic achievement {index}",
+                span=TextSourceSpan(
+                    start=start,
+                    end=end,
+                    text=source_text[start:end],
+                ),
+            )
+            for index, (start, end) in enumerate(
+                zip(boundaries[:-1], boundaries[1:], strict=True)
+            )
+        )
+        request = CreateImportProposal(
+            idempotency_key="split-whole-document",
+            source_ref="fixture://synthetic-profile/split-document.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        self.assert_rejected_before_storage(request)
+
+    def test_whitespace_padding_cannot_hide_split_whole_document_evidence(self) -> None:
+        source_body, _ = load_fixture()
+        padding = " " * 10_000
+        source_text = padding + source_body + padding
+        body_start = len(padding)
+        boundaries = (
+            body_start,
+            body_start + len(source_body) // 3,
+            body_start + 2 * len(source_body) // 3,
+            body_start + len(source_body),
+        )
+        intervals = tuple(zip(boundaries[:-1], boundaries[1:], strict=True))
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="achievement",
+                value=f"Synthetic padded achievement {index}",
+                canonical_text=f"Synthetic padded achievement {index}",
+                span=TextSourceSpan(
+                    start=start,
+                    end=end,
+                    text=source_text[start:end],
+                ),
+            )
+            for index, (start, end) in enumerate(reversed(intervals))
+        )
+        request = CreateImportProposal(
+            idempotency_key="padded-split-whole-document",
+            source_ref="fixture://synthetic-profile/padded-split-document.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="whole source|too broad|cover too much",
+        )
+
+    def test_invisible_and_punctuation_padding_cannot_hide_document_coverage(self) -> None:
+        source_body, _ = load_fixture()
+        padding = "\u200b.!?" * 5_000
+        source_text = padding + source_body + padding
+        body_start = len(padding)
+        boundaries = (
+            body_start,
+            body_start + len(source_body) // 3,
+            body_start + 2 * len(source_body) // 3,
+            body_start + len(source_body),
+        )
+        proposals = tuple(
+            ProposedImportClaim(
+                claim_type="achievement",
+                value=f"Synthetic padded content {index}",
+                canonical_text=f"Synthetic padded content {index}",
+                span=TextSourceSpan(start=start, end=end, text=source_text[start:end]),
+            )
+            for index, (start, end) in enumerate(
+                reversed(tuple(zip(boundaries[:-1], boundaries[1:], strict=True)))
+            )
+        )
+        request = CreateImportProposal(
+            idempotency_key="invisible-padded-document",
+            source_ref="fixture://synthetic-profile/invisible-padding.txt",
+            source_text=source_text,
+            extraction_method="synthetic-schema-test@1",
+            proposals=proposals,
+        )
+
+        self.assert_rejected_before_storage(
+            request,
+            message_pattern="whole source|too broad|cover too much",
+        )
+
+    def test_unselected_sensitive_source_content_is_not_scanned_or_stored(self) -> None:
+        private_unselected = "api_token=SYNTHETIC_UNSELECTED_TOKEN_1234567890"
+        selected = "Built a synthetic Python fixture."
+        source_text = f"{private_unselected}\n{selected}\nSynthetic footer."
+        start = source_text.index(selected)
+        request = single_proposal_request(
+            source_text=source_text,
+            span=TextSourceSpan(
+                start=start,
+                end=start + len(selected),
+                text=selected,
+            ),
+            idempotency_key="unselected-sensitive-source",
+        )
+
+        self.service.preview_import_proposal(request)
+        result = self.service.create_import_proposal(request, now=NOW)
+
+        self.assertNotIn(private_unselected, str(result))
+        self.assertNotIn(private_unselected, str(self.repository.list_claims()))
+        self.assertNotIn(private_unselected, str(self.repository.list_evidence()))
+        self.assertNotIn(private_unselected, str(self.repository.list_workflow_runs()))
+
+    def test_invalid_later_proposal_fails_before_storage_is_touched(self) -> None:
+        safe_request = single_proposal_request()
+        unsafe_later = replace(
+            safe_request.proposals[0],
+            canonical_text="Social Security number 000-00-0000 (synthetic).",
+        )
+        request = replace(
+            safe_request,
+            idempotency_key="invalid-later-proposal",
+            proposals=(safe_request.proposals[0], unsafe_later),
+        )
+
+        self.assert_rejected_before_storage(request)
+
+    def test_rejected_import_does_not_reserve_its_idempotency_key(self) -> None:
+        unsafe = single_proposal_request(
+            value="password=SYNTHETIC_NOT_A_PASSWORD_123456",
+            idempotency_key="reusable-after-rejection",
+        )
+        self.assert_rejected_before_storage(unsafe)
+
+        corrected = single_proposal_request(
+            idempotency_key=unsafe.idempotency_key,
+        )
+        result = self.service.create_import_proposal(corrected, now=NOW)
+
+        self.assertEqual(len(result.claims), 1)
+        self.assertEqual(len(self.repository.list_claims()), 1)
+        self.assertEqual(len(self.repository.list_evidence()), 1)
+        self.assertEqual(len(self.repository.list_workflow_runs()), 1)
 
     def test_preview_validates_without_reserving_records_or_idempotency(self) -> None:
         request = import_request()
@@ -277,6 +2105,9 @@ class ProfileImportProposalTests(unittest.TestCase):
         self.assertNotIn(request.idempotency_key, str(workflow))
         self.assertNotIn("Avery Quill", str(workflow["input_json"]))
         self.assertNotIn("Ignore previous instructions", str(workflow["input_json"]))
+        workflow_input = json.loads(str(workflow["input_json"]))
+        self.assertEqual(workflow_input["value_schema_version"], 1)
+        self.assertEqual(workflow_input["content_policy_version"], 1)
 
     def test_retry_rejects_a_corrupted_persisted_result_manifest(self) -> None:
         request = import_request()

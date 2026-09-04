@@ -52,7 +52,85 @@ Each proposal contains exactly `claim_type`, `value`, `canonical_text`, `span`,
 and optional `confidence`; each span contains `start`, `end`, and exact `text`.
 Duplicate JSON fields, non-finite numbers, unknown fields, authority fields, more
 than 1,000 proposals, non-UTF-8 input, non-regular files, and mismatched spans
-fail closed. Source input is limited to 16 MiB and proposal input to 4 MiB.
+fail closed. The CLI and service both limit source input to 16 MiB of UTF-8;
+proposal-file input is limited to 4 MiB at the CLI boundary.
+Service validation also requires at least one alphanumeric source code point and
+limits every screened content or metadata component to 8,192 code points; the
+value, canonical-text, evidence, source-reference, and extraction-method limits
+below are stricter.
+
+Manifest schema version 1 has a closed, versioned value-schema registry. There
+is no generic JSON fallback for an unregistered claim type. In this table,
+`TEXT(N)` means non-blank, already-trimmed text with at most `N` Unicode code
+points and no CR/LF or Unicode control, format, surrogate, line-separator, or
+paragraph-separator code points:
+
+| Claim type | Exact accepted `value` shape |
+|---|---|
+| `achievement` | `TEXT(2048)` |
+| `certification` | `TEXT(512)` |
+| `education` | `TEXT(1024)` |
+| `education_degree` | `TEXT(512)` |
+| `education_field` | `TEXT(512)` |
+| `employment_dates` | Exact object `{"start": "YYYY-MM", "end": "YYYY-MM"}`; dates are from 1900-01 through 2099-12, `end` may instead be lowercase `present`, and a dated end cannot precede the start |
+| `employment_description` | `TEXT(2048)` |
+| `employment_title` | Exact object `{"employer": TEXT(512), "title": TEXT(512)}` |
+| `language` | `TEXT(128)` |
+| `portfolio_item` | `TEXT(2048)` |
+| `project_contribution` | Exact object `{"project": TEXT(512), "contribution": TEXT(2048), "ownership": LEVEL}`; `LEVEL` is `supported`, `contributed`, `co-led`, `led`, or `owned` |
+| `project_outcome` | Exact object `{"activity": TEXT(512), "before_minutes": INT, "after_minutes": INT}`; minutes are non-boolean integers from 0 through 525,600 |
+| `publication` | `TEXT(2048)` |
+| `skill_use` | `TEXT(256)` |
+
+Before its first storage call, the service snapshots all nested request state and
+validates the entire batch. The persisted surfaces it screens include recursive
+value strings (whose object keys are fixed by the closed schemas), canonical
+text, exact selected evidence, `source_ref`, `extraction_method`, `artifact_id`,
+and subject/scope identifiers. Deterministic high-confidence patterns reject
+recognizable work-authorization or immigration answers, government identifiers,
+credential assignments, private keys, and common token formats. Percent-encoded
+content is decoded repeatedly to a fixed point, with at most eight decoding
+rounds; content still changing after that is rejected. Fixed-size ordered
+boundary pairs are checked within each proposal. Recognized assignment keys
+split across two persisted content or metadata components are checked across the
+batch; broader multi-component fragmentation is outside this heuristic.
+Caller-controlled metadata is limited to 1,048,576 persisted code points per
+batch, including the per-record copies made for each claim and evidence row.
+This is defense in depth, not a complete secret or PII classifier.
+Value-schema version 1 and content-policy version 1 both participate in the
+idempotency request hash and are recorded in the workflow audit input.
+
+Canonical text is limited to 2,048 code points. Each selected evidence item is
+limited to 4,096 code points and 16 lines, and all selected evidence in one batch
+is limited to 65,536 code points. The batch rejects selected spans covering 80%
+or more of the source's alphanumeric content. Exact normalized, case-folded
+whole-source reconstruction is rejected in the raw form and every percent-decode
+layer in each value, canonical-text, evidence, and metadata channel. The same
+aligned-layer exact check runs across combined value/canonical/evidence content;
+metadata remains a separate channel. That combined check concatenates proposal
+serialization order and its full reverse; it does not exhaustively test arbitrary
+cross-channel reorderings. Every distinct decode layer through the fixed point
+is evaluated rather than only the final layer. Individual channels also use an
+80% token-weight guard and one adaptive exact-window comparison
+selected from 1, 2, 4, 8, or 16 code points (or the exact shorter source length).
+Window selection projects each channel onto at most the source's alphanumeric
+character multiset so unrelated or repeated padding cannot select a misleadingly
+large window. These heuristics are deterministic defense in depth, not proof of
+exhaustive near-duplicate classification.
+
+Rejection occurs before a storage transaction and does not reserve the
+idempotency key.
+
+Unselected raw source text remains caller-managed and in memory. It is used for
+span and whole-source validation and its digest, but it is not persisted or
+globally sensitive-pattern scanned. To prevent an answer-only selection from
+hiding a sensitive label, the service screens up to 256 unselected code points
+on either side within the selected logical line and an exact recognized
+label-only line immediately before it when that line falls within a
+512-code-point lookbehind. Application-owned source identity and a registered
+extractor remain the next provenance boundary; contradiction-aware approval,
+redacted logging, and data lifecycle commands are also required before real
+candidate use.
 
 `profile import --dry-run` performs service-owned request validation without
 opening a repository or creating runtime state. Its `storage_checked: false`
@@ -77,10 +155,7 @@ sensitivity, and explicit `content_trust: untrusted` / `usable: false` markers.
 It has no mutation or approval option. Prompt-like imported content is data, never
 an instruction.
 
-This boundary is currently for synthetic development data only. Per-claim-type
-value schemas, sensitive-value detection, trusted extractor registration,
-contradiction-aware approval, redacted logging, and data lifecycle commands are
-still required before real candidate use.
+This boundary is currently for synthetic development data only.
 
 ### Planned command hardening
 

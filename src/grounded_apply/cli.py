@@ -25,7 +25,6 @@ from grounded_apply.json_support import dumps
 
 
 Command = Callable[[argparse.Namespace], int]
-_MAX_SOURCE_INPUT_BYTES = 16 * 1024 * 1024
 _MAX_PROPOSAL_INPUT_BYTES = 4 * 1024 * 1024
 _IDEMPOTENCY_KEY_CHARACTERS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
@@ -460,7 +459,10 @@ def _open_initialized_profile_repository(
 
 def _command_profile_import(args: argparse.Namespace) -> int:
     from grounded_apply.domain import to_jsonable
-    from grounded_apply.services import ProfileService
+    from grounded_apply.services import (
+        PROFILE_IMPORT_MAX_SOURCE_BYTES,
+        ProfileService,
+    )
 
     paths = resolve_runtime_paths()
     require_runtime_outside_repository(paths)
@@ -471,7 +473,7 @@ def _command_profile_import(args: argparse.Namespace) -> int:
     source_text = _read_utf8_input(
         args.source_file,
         label="source input",
-        max_bytes=_MAX_SOURCE_INPUT_BYTES,
+        max_bytes=PROFILE_IMPORT_MAX_SOURCE_BYTES,
     )
     proposal_text = _read_utf8_input(
         args.proposals_file,

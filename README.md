@@ -92,6 +92,22 @@ no inline command-line option. Dry-run performs persistence-independent request
 validation and reports `storage_checked: false`; it does not create or open
 profile storage. A real import requires an earlier `profile init`, remains
 idempotent under its opaque key, and creates only pending, unusable records.
+Every allowed claim type has a closed schema-version-1 value shape. Before any
+storage transaction, the service snapshots all nested request state and validates
+the whole batch with deterministic high-confidence checks over persisted claim
+content and import metadata, including fixed-point percent decoding,
+fragmented-content checks, evidence bounds, and normalized/alphanumeric
+whole-source guards. These checks are defense in depth, not complete secret or
+PII classification.
+The value-schema and content-policy versions are recorded in workflow audit data
+and participate in idempotency identity.
+Unselected raw source text is not persisted or globally sensitive-pattern
+scanned. To prevent an answer-only span from hiding its label, validation also
+checks a bounded same-line neighborhood and a recognized label-only line
+immediately preceding the selection when it falls within the 512-code-point
+lookbehind.
+Application-owned source identity and a registered extractor remain required
+before real candidate use.
 Import and review fail unchanged if the private data directory or database gains
 group/other access, if the database target escapes its data directory, or if a
 portable runtime child escapes `GROUNDED_APPLY_HOME`.
