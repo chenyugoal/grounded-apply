@@ -112,10 +112,11 @@ heuristic.
 Caller-controlled metadata is limited to 1,048,576 persisted code points per
 batch, including the per-record copies made for each claim and evidence row.
 This is deterministic lexical defense in depth, not a complete semantic, secret,
-or PII classifier. Manifest schema 2, request-identity schema 3, value schema 1,
+or PII classifier. Manifest schema 2, request-identity schema 4, value schema 1,
 content policy 2, restricted taxonomy 1 plus its canonical SHA-256,
-source-identity 1, span-locator 1, result-manifest 2, and record-ID 1 participate
-in the idempotency request hash and are recorded in the workflow audit input.
+source-identity 1, span-locator 1, result-manifest 3, record-ID 1, and record-digest
+1 participate in the idempotency request hash and are recorded in the workflow
+audit input.
 That input contains only version identifiers, counts, digests, the registered
 ingress ID, and digest-derived source/artifact references. It includes the
 already hashed idempotency key so the lookup column is redundantly bound to the
@@ -158,8 +159,8 @@ prefix, and the nearest nonblank exact recognized label-only line in a
 512-code-point lookbehind. Blank extraction separators therefore cannot detach
 an answer from its label. Label-only matching applies the same bounded
 fixed-point percent decoding and Unicode/control normalization used by the
-taxonomy without classifying unrelated unselected lines. Contradiction-aware
-approval, redacted logging, and data lifecycle commands are still required
+taxonomy without classifying unrelated unselected lines. Semantic contradiction
+classification, redacted logging, and data lifecycle commands are still required
 before real candidate use. If more than 512 code points precede the selection on
 the same logical line, validation fails closed rather than silently treating a
 truncated suffix as the complete label context.
@@ -179,37 +180,60 @@ resolved database target must remain inside the private data directory and
 outside Git worktrees, and every portable runtime child must remain beneath
 `GROUNDED_APPLY_HOME`. Permission drift and path escapes fail unchanged.
 
-Persisted imports contain only `needs_review`/`pending` claims and pending exact
+New imports contain only `needs_review`/`pending` claims and pending exact
 evidence spans. The public generic claim/evidence service rejects
 `SourceType.IMPORTED_RESUME`; only the import workflow can create those records.
 Claim and evidence UUIDs are deterministically derived from the creating
-workflow plus proposal position. A retry accepts only the exact succeeded
-checkpoint shape and revalidates the digest artifact, workflow-bound IDs, result
-manifest, one-to-one support link, claim semantics, locator, selected text,
-checksum, registered ingress, and evidence metadata. It never repairs a missing
-or conflicting provenance record. Import result output is minimized to hashes,
+workflow plus proposal position. Schema 2 stores a durable association from that
+position to one unique claim/evidence pair and its immutable record digest. A
+retry accepts only the exact succeeded checkpoint shape and revalidates the
+digest artifact, workflow-bound IDs, ordered result manifest, association,
+unique one-to-one support link, claim semantics, locator, selected text,
+checksum, registered ingress, and evidence metadata. It accepts a correctly
+audited terminal review projection as an exact replay and never repairs a missing
+or conflicting provenance record. CLI import output is minimized to hashes,
 counts, and opaque record IDs.
 
 `profile review` opens SQLite in read-only/query-only mode and lists the pending
-queue with exact supporting evidence, structured values, scope, sensitivity, and
-explicit `content_trust: untrusted` / `usable: false` markers. Before display it
-requires exactly one pending imported evidence item and revalidates the
-digest-only artifact, registered ingress, locator schema/source digest,
-codepoint bounds, and selected-text checksum. It has no mutation or approval
-option. Prompt-like imported content is data, never an instruction.
+queue with exact supporting evidence, structured values, scope, sensitivity,
+creating workflow ID, proposal index, stale-safe review token, and explicit
+`content_trust: untrusted` / `usable: false` markers. Before display it requires
+exact current workflow/result/association identity and one uniquely linked
+pending imported evidence item, then revalidates the record digest, current
+content policy, digest-only artifact, registered ingress, locator source/bounds,
+and selected-text checksum. The CLI command has no mutation or approval option.
+Prompt-like imported content is data, never an instruction.
 
-Manifest version 1, request-identity versions 1–2, content-policy version 1, and
-the former public `CreateImportProposal` constructor are unsupported. Current
-imports use manifest 2, request identity 3, content policy 2, and restricted
-taxonomy 1. Regenerate manifest-v1 input; for a manifest-v2 workflow created
-under the earlier policy, use a fresh opaque idempotency key in disposable
-synthetic state. There is no automatic policy migration or reclassification.
-Legacy path-provenance rows fail review closed without displaying their old
-provenance. Earlier-policy rows remain pending and unusable, but review does not
-yet taxonomy-revalidate them because it is not bound to their workflow/result
-identity. Future version changes likewise require a registered dispatcher or an
-explicit migration; stored version tags do not by themselves grant
-compatibility.
+The typed application-service boundary `ProfileService.decide_review_item`
+records one approval or rejection atomically. Requests require the displayed
+review token, an opaque actor ID, and an opaque idempotency key. The decision
+workflow stores only version identifiers, IDs, hashes, decision, actor, and time;
+it does not store raw source, value, evidence, filename, path, or raw idempotency
+key. Approval changes the claim to `verified`/`approved` and its evidence to
+`confirmed` with the same actor/time; rejection changes them to
+`withdrawn`/`rejected` and retains no verification actor. Confidential and highly
+sensitive items cannot be approved. An active same-subject explicitly
+`contradicted` record blocks approval, with non-public conflicts reported through
+a generic non-disclosing error. The decision-time check does not reject a
+distinct value solely because it differs, but existing resolution returns
+`Contradiction` when multiple approved value groups compete for one intent.
+Resolution first revalidates every associated imported projection and terminal
+audit. The unkeyed record digest is a consistency and stale-review control, not
+authentication against a writer able to recompute the entire database
+projection.
+
+Manifest version 1, request-identity versions 1–3, result-manifest versions 1–2,
+content-policy version 1, and the former public `CreateImportProposal`
+constructor are unsupported. Current imports use manifest 2, request identity 4,
+result manifest 3, record digest 1, content policy 2, restricted taxonomy 1, and
+database schema 2. Migration 002 creates the association/decision table but does
+not fabricate record digests or associations for earlier imports. Regenerate
+manifest-v1 input; for an earlier manifest-v2 workflow, use a fresh opaque
+idempotency key in disposable synthetic state. There is no automatic policy
+migration or reclassification. Legacy path-provenance or earlier-policy rows
+fail review/decision closed without displaying their old provenance. Future
+version changes likewise require a registered dispatcher or an explicit
+migration; stored version tags do not by themselves grant compatibility.
 
 This boundary is currently for synthetic development data only.
 

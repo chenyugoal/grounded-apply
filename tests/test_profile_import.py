@@ -2585,8 +2585,8 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            ValueError,
-            "source provenance is not application-owned",
+            RepositoryError,
+            "review provenance failed integrity checks",
         ) as error:
             self.service.list_review_items()
 
@@ -2731,7 +2731,9 @@ class ProfileImportProposalTests(unittest.TestCase):
                 "manifest_schema_version",
                 "proposal_count",
                 "proposals_sha256",
+                "record_digest_schema_version",
                 "record_id_schema_version",
+                "record_sha256s",
                 "request_schema_version",
                 "restricted_taxonomy_sha256",
                 "restricted_taxonomy_version",
@@ -2746,10 +2748,11 @@ class ProfileImportProposalTests(unittest.TestCase):
                 "value_schema_version",
             },
         )
-        self.assertEqual(workflow_input["request_schema_version"], 3)
+        self.assertEqual(workflow_input["request_schema_version"], 4)
         self.assertEqual(workflow_input["manifest_schema_version"], 2)
-        self.assertEqual(workflow_input["result_manifest_schema_version"], 2)
+        self.assertEqual(workflow_input["result_manifest_schema_version"], 3)
         self.assertEqual(workflow_input["record_id_schema_version"], 1)
+        self.assertEqual(workflow_input["record_digest_schema_version"], 1)
         self.assertEqual(workflow_input["source_identity_schema_version"], 1)
         self.assertEqual(workflow_input["span_locator_schema_version"], 1)
         self.assertEqual(workflow_input["value_schema_version"], 1)
@@ -2774,6 +2777,12 @@ class ProfileImportProposalTests(unittest.TestCase):
         self.assertEqual(
             workflow_input["source_artifact_id"], request.source_artifact_id
         )
+        result_manifest = json.loads(str(workflow["generated_artifacts_json"]))
+        self.assertEqual(result_manifest["schema_version"], 3)
+        self.assertEqual(
+            workflow_input["record_sha256s"],
+            [record["record_sha256"] for record in result_manifest["records"]],
+        )
         self.assertEqual(
             workflow["input_hash_sha256"],
             hashlib.sha256(str(workflow["input_json"]).encode("utf-8")).hexdigest(),
@@ -2791,6 +2800,18 @@ class ProfileImportProposalTests(unittest.TestCase):
         current_input = profile_service_module._import_workflow_input(
             request,
             idempotency_key_sha256=stored_key,
+            record_sha256s=tuple(
+                profile_service_module._profile_import_record_sha256_for_proposal(
+                    request,
+                    proposal,
+                    exact_text,
+                )
+                for proposal, exact_text in zip(
+                    request.proposals,
+                    profile_service_module._validated_source_spans(request),
+                    strict=True,
+                )
+            ),
         )
         earlier_input = {
             key: value
@@ -2926,7 +2947,10 @@ class ProfileImportProposalTests(unittest.TestCase):
             generated_artifacts=substituted_manifest,
         )
 
-        with self.assertRaisesRegex(RepositoryError, "record identities") as error:
+        with self.assertRaisesRegex(
+            RepositoryError,
+            "workflow provenance failed integrity checks",
+        ) as error:
             self.service.create_import_proposal(first_request, now=NOW)
 
         self.assertNotIn(first_request.source_text, str(error.exception))
@@ -2947,31 +2971,32 @@ class ProfileImportProposalTests(unittest.TestCase):
             ),
         )
 
-        with self.assertRaisesRegex(RepositoryError, "does not match its request"):
+        with self.assertRaisesRegex(
+            RepositoryError,
+            "workflow provenance failed integrity checks",
+        ):
             self.service.create_import_proposal(request, now=NOW)
 
     def test_retry_rejects_same_length_manifest_pairs_in_the_wrong_order(self) -> None:
         request = import_request()
         first = self.service.create_import_proposal(request, now=NOW)
-        reversed_pairs = tuple(
-            {
-                "claim_id": claim.id,
-                "evidence_id": evidence.id,
-            }
-            for claim, evidence in reversed(
-                tuple(zip(first.claims, first.evidence, strict=True))
-            )
-        )
+        workflow = self.repository.get_workflow_run(first.workflow_run_id)
+        assert workflow is not None
+        stored_manifest = json.loads(str(workflow["generated_artifacts_json"]))
+        reversed_records = tuple(reversed(stored_manifest["records"]))
         self.repository.update_workflow_run(
             first.workflow_run_id,
             generated_artifacts={
-                "schema_version": 2,
+                "schema_version": 3,
                 "source_artifact_id": request.source_artifact_id,
-                "records": reversed_pairs,
+                "records": reversed_records,
             },
         )
 
-        with self.assertRaisesRegex(RepositoryError, "record identities"):
+        with self.assertRaisesRegex(
+            RepositoryError,
+            "workflow provenance failed integrity checks",
+        ):
             self.service.create_import_proposal(request, now=NOW)
 
     def test_retry_revalidates_every_persisted_provenance_copy(self) -> None:
@@ -3037,7 +3062,7 @@ class ProfileImportProposalTests(unittest.TestCase):
 
                     with self.assertRaisesRegex(
                         RepositoryError,
-                        "evidence links are invalid",
+                        "review provenance failed integrity checks",
                     ) as error:
                         service.create_import_proposal(request, now=NOW)
 
@@ -3159,7 +3184,7 @@ class ProfileImportProposalTests(unittest.TestCase):
 
                     with self.assertRaisesRegex(
                         RepositoryError,
-                        "checkpoint|safely retryable",
+                        "workflow provenance failed integrity checks",
                     ) as error:
                         service.create_import_proposal(request, now=NOW)
 
@@ -3187,9 +3212,15 @@ class ProfileImportProposalTests(unittest.TestCase):
             created_at=NOW_TEXT,
         )
 
-        with self.assertRaisesRegex(ValueError, "complete pending"):
+        with self.assertRaisesRegex(
+            RepositoryError,
+            "review provenance failed integrity checks",
+        ):
             self.service.list_review_items()
-        with self.assertRaisesRegex(RepositoryError, "evidence links are invalid"):
+        with self.assertRaisesRegex(
+            RepositoryError,
+            "review provenance failed integrity checks",
+        ):
             self.service.create_import_proposal(request, now=NOW)
 
     def test_reusing_an_idempotency_key_with_different_input_fails_closed(self) -> None:

@@ -21,10 +21,13 @@ nine-category restricted-text taxonomy for deterministic high-confidence
 screening of persisted content and metadata, whole-source minimization guards, a
 stable-descriptor file/stdin CLI boundary, application-owned digest provenance,
 a registered manifest ingress, replay-bound workflow records,
-provenance-validating read-only review, and the first synthetic profile fixture
-are implemented. Review decisions, semantic and broader obfuscation
-classification, registered derivations, data lifecycle tools, and all end-user
-application workflows in Phases 1–5 remain planned or in progress.
+provenance-validating read-only review, durable record-digest associations,
+stale-safe review tokens, atomic audited service-level approve/reject decisions,
+resolution-time imported-record revalidation, and the first synthetic profile
+fixture are implemented. A CLI decision action, edit/semantic contradiction
+workflows, semantic and broader obfuscation classification, registered
+derivations, data lifecycle tools, and all end-user application workflows in
+Phases 1–5 remain planned or in progress.
 
 ## Phase 0 — Repository and truth layer
 
@@ -42,8 +45,8 @@ facts and provenance without placing private data in the repository.
 | Typed atomic claims, evidence, status, scope, and sensitivity | Implemented | Domain invariants and serialization tests pass |
 | `NeedInfo`, `Contradiction`, and claim-packet resolution | Implemented | Missing/conflicting/stale/sensitive cases fail closed |
 | SQLite schema and migration mechanism | Implemented | Atomic fresh/concurrent init, future refusal, checksum validation, and existing-only no-migration writes pass |
-| Repository/service boundaries for validated mutation | In progress | Claim/evidence service round trips and CLI import use services; approval mutation remains |
-| Resume import, extraction proposal, and human review | In progress | Manifest-v2 file/stdin proposals snapshot nested state, bind exact source bytes to a path-free digest artifact and registered ingress, use closed value schemas plus a versioned nine-category restricted-text taxonomy and bounded minimization guards, create workflow/index-bound records, and revalidate provenance for replay/read-only review; extraction, semantic/novel-obfuscation classification, and review decisions remain |
+| Repository/service boundaries for validated mutation | In progress | Claim/evidence service round trips, CLI import, and imported-item approve/reject transitions use typed services and atomic repository mutations; CLI decision exposure, edit, and broader lifecycle services remain |
+| Resume import, extraction proposal, and human review | In progress | Manifest-v2 file/stdin proposals snapshot nested state, bind exact source bytes to a path-free digest artifact and registered ingress, use closed value schemas plus a versioned nine-category restricted-text taxonomy and bounded minimization guards, create workflow/index-bound record digests and stale-safe review tokens, and support audited service-level approve/reject with replay and resolution revalidation; extraction, edit/semantic contradiction handling, CLI decisions, and semantic/novel-obfuscation classification remain |
 | Redacted logging, backup, export, and deletion | Planned | Privacy and round-trip tests pass on synthetic data |
 | Synthetic candidate/job fixtures and adversarial corpus | In progress | One synthetic profile plus adversarial schema, all nine taxonomy-category positives, explicit lexical false-positive controls, secret, percent-encoding, fragmentation, whole-source, padding, mutation, and no-write import cases exist; broader candidate/job corpus remains |
 

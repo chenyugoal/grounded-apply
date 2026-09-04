@@ -8,6 +8,7 @@ import stat
 import sqlite3
 import tempfile
 import unittest
+import uuid
 from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,9 +16,13 @@ from unittest.mock import patch
 
 from grounded_apply import __version__
 from grounded_apply.cli import main
-from grounded_apply.domain import SourceType
+from grounded_apply.domain import ApprovalStatus, SourceType
 from grounded_apply.repositories import SQLiteRepository
-from grounded_apply.services import PROFILE_IMPORT_EXTRACTOR_ID
+from grounded_apply.services import (
+    CreateProfileReviewDecision,
+    PROFILE_IMPORT_EXTRACTOR_ID,
+    ProfileService,
+)
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "synthetic_profile"
@@ -86,6 +91,15 @@ REVIEW_EVIDENCE_KEYS = {
     "source_ref",
     "source_text",
     "source_type",
+}
+REVIEW_ITEM_KEYS = {
+    "claim",
+    "content_trust",
+    "evidence",
+    "import_workflow_run_id",
+    "proposal_index",
+    "review_token",
+    "usable",
 }
 
 
@@ -184,8 +198,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual((first_stderr, second_stderr), ("", ""))
             self.assertTrue(first["data"]["config_created"])
             self.assertFalse(second["data"]["config_created"])
-            self.assertEqual(first["data"]["schema_version"], 1)
-            self.assertEqual(second["data"]["schema_version"], 1)
+            self.assertEqual(first["data"]["schema_version"], 2)
+            self.assertEqual(second["data"]["schema_version"], 2)
             self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
 
@@ -457,13 +471,33 @@ class CliTests(unittest.TestCase):
             )
             self.assertTrue(review["data"]["read_only"])
             self.assertEqual(review["data"]["pending_count"], 5)
+            workflow_run_id = imported["data"]["workflow_run_id"]
+            parsed_workflow_run_id = uuid.UUID(workflow_run_id)
+            self.assertEqual(str(parsed_workflow_run_id), workflow_run_id)
+            self.assertEqual(parsed_workflow_run_id.version, 4)
+            proposal_indexes: list[int] = []
+            review_tokens: list[str] = []
             for item in review["data"]["items"]:
-                self.assertEqual(
-                    set(item), {"claim", "content_trust", "evidence", "usable"}
-                )
+                self.assertEqual(set(item), REVIEW_ITEM_KEYS)
                 self.assertEqual(set(item["claim"]), REVIEW_CLAIM_KEYS)
                 self.assertEqual(len(item["evidence"]), 1)
                 self.assertEqual(set(item["evidence"][0]), REVIEW_EVIDENCE_KEYS)
+                self.assertEqual(item["import_workflow_run_id"], workflow_run_id)
+                self.assertIs(type(item["proposal_index"]), int)
+                self.assertGreaterEqual(item["proposal_index"], 0)
+                self.assertRegex(item["review_token"], r"\A[0-9a-f]{64}\Z")
+                proposal_indexes.append(item["proposal_index"])
+                review_tokens.append(item["review_token"])
+                self.assertEqual(
+                    item["claim"]["id"],
+                    imported["data"]["claim_ids"][item["proposal_index"]],
+                )
+                self.assertEqual(
+                    item["evidence"][0]["id"],
+                    imported["data"]["evidence_ids"][item["proposal_index"]],
+                )
+            self.assertEqual(proposal_indexes, list(range(5)))
+            self.assertEqual(len(set(review_tokens)), 5)
             self.assertEqual(
                 {item["claim"]["approval_status"] for item in review["data"]["items"]},
                 {"pending"},
@@ -510,6 +544,51 @@ class CliTests(unittest.TestCase):
             self.assertTrue(
                 any("not instructions" in warning for warning in review["warnings"])
             )
+            self.assertTrue(
+                any(
+                    "current CLI review command is read-only" in warning
+                    for warning in review["warnings"]
+                )
+            )
+
+    def test_profile_import_replay_warning_describes_only_pending_items(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "profile-home"
+            self.invoke("profile", "init", "--json", home=str(home))
+            self.invoke(*self.profile_import_arguments(), home=str(home))
+            database = home / "data" / "grounded_apply.db"
+
+            with SQLiteRepository(database, existing_only=True) as repository:
+                service = ProfileService(repository)
+                item = service.list_review_items()[0]
+                service.decide_review_item(
+                    CreateProfileReviewDecision(
+                        claim_id=item.claim.id,
+                        review_token=item.review_token,
+                        decision=ApprovalStatus.APPROVED,
+                        actor_id="synthetic-cli-reviewer",
+                        idempotency_key="synthetic-cli-review-decision-1",
+                    ),
+                    now=item.claim.created_at,
+                )
+
+            result, stdout, stderr = self.invoke(
+                *self.profile_import_arguments(), home=str(home)
+            )
+            payload = json.loads(stdout)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(stderr, "")
+            self.assertTrue(payload["data"]["review_required"])
+            self.assertEqual(len(payload["warnings"]), 1)
+            self.assertIn("Pending imported facts remain", payload["warnings"][0])
+            self.assertNotIn("Imported facts remain", payload["warnings"][0])
+            review_result, review_stdout, review_stderr = self.invoke(
+                "profile", "review", "--json", home=str(home)
+            )
+            self.assertEqual(review_result, 0)
+            self.assertEqual(review_stderr, "")
+            self.assertEqual(json.loads(review_stdout)["data"]["pending_count"], 4)
 
     def test_profile_import_is_idempotent_through_the_cli(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1223,7 +1302,17 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(result, 2)
                     self.assertNotIn(private_source_ref, stdout + stderr)
                     self.assertNotIn("SYNTHETIC_PRIVATE_PERSON", stdout + stderr)
-                    self.assertIn("not application-owned", stdout + stderr)
+                    self.assertIn(
+                        "Profile import review provenance failed integrity checks",
+                        stdout + stderr,
+                    )
+                    if json_output:
+                        payload = json.loads(stdout)
+                        self.assertEqual(payload["error"]["type"], "RepositoryError")
+                        self.assertEqual(
+                            payload["error"]["message"],
+                            "Profile import review provenance failed integrity checks",
+                        )
 
     def test_profile_review_does_not_echo_a_corrupt_stored_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1255,7 +1344,17 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(result, 2)
                     self.assertNotIn(private_marker, stdout + stderr)
                     self.assertNotIn("SYNTHETIC_PRIVATE_PERSON", stdout + stderr)
-                    self.assertIn("captured_at", stdout + stderr)
+                    self.assertIn(
+                        "Profile import review provenance failed integrity checks",
+                        stdout + stderr,
+                    )
+                    if json_output:
+                        payload = json.loads(stdout)
+                        self.assertEqual(payload["error"]["type"], "RepositoryError")
+                        self.assertEqual(
+                            payload["error"]["message"],
+                            "Profile import review provenance failed integrity checks",
+                        )
 
     def test_profile_review_is_physically_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

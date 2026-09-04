@@ -40,6 +40,7 @@ _STARTED_WORKFLOW_STATUSES = frozenset(
     {"running", "waiting_for_input", "succeeded", "failed"}
 )
 _DECIDED_MEMORY_STATUSES = frozenset({"approved", "rejected"})
+_PROFILE_IMPORT_REVIEW_DECISIONS = frozenset({"approved", "rejected"})
 
 
 class RepositoryError(RuntimeError):
@@ -641,6 +642,446 @@ class SQLiteRepository:
             limit=limit,
             offset=offset,
         )
+
+    def add_profile_import_review_item(
+        self,
+        *,
+        import_workflow_run_id: str,
+        proposal_index: int,
+        claim_id: str,
+        evidence_id: str,
+        record_sha256: str,
+        created_at: str | None = None,
+    ) -> Record:
+        """Bind one imported claim/evidence pair to its immutable review slot.
+
+        Repeating the exact association is safe, including after it has been
+        decided. A conflicting slot, claim, evidence, or record digest fails
+        without changing the existing association.
+        """
+
+        if isinstance(proposal_index, bool) or not isinstance(proposal_index, int):
+            raise TypeError("proposal_index must be an integer")
+        if proposal_index < 0:
+            raise ValueError("proposal_index must not be negative")
+        if not isinstance(record_sha256, str):
+            raise TypeError("record_sha256 must be text")
+        if (
+            len(record_sha256) != 64
+            or record_sha256 != record_sha256.lower()
+            or any(character not in "0123456789abcdef" for character in record_sha256)
+        ):
+            raise ValueError("record_sha256 must be a lowercase SHA-256 digest")
+        now = created_at or utc_now()
+
+        with self.transaction():
+            existing = self.get_profile_import_review_item(claim_id)
+            if existing is not None:
+                if (
+                    existing["import_workflow_run_id"] == import_workflow_run_id
+                    and existing["proposal_index"] == proposal_index
+                    and existing["evidence_id"] == evidence_id
+                    and existing["record_sha256"] == record_sha256
+                ):
+                    if existing["decision"] is None:
+                        self._require_pending_profile_import_review_item(existing)
+                        self._require_pending_profile_import_review_projection(
+                            claim_id,
+                            evidence_id,
+                        )
+                    else:
+                        self._require_decided_profile_import_review_projection(existing)
+                    return existing
+                raise RepositoryError(
+                    "Profile import review claim is already bound to another record"
+                )
+
+            occupied_slot = self._get_profile_import_review_slot(
+                import_workflow_run_id,
+                proposal_index,
+            )
+            if occupied_slot is not None:
+                raise RepositoryError("Profile import review slot is already occupied")
+            evidence_binding = self._connection.execute(
+                """
+                SELECT 1
+                FROM profile_import_review_items
+                WHERE evidence_id = ?
+                """,
+                (evidence_id,),
+            ).fetchone()
+            if evidence_binding is not None:
+                raise RepositoryError(
+                    "Profile import review evidence is already bound to another record"
+                )
+
+            self._require_pending_profile_import_review_projection(claim_id, evidence_id)
+            self._connection.execute(
+                """
+                INSERT INTO profile_import_review_items (
+                    import_workflow_run_id,
+                    proposal_index,
+                    claim_id,
+                    evidence_id,
+                    record_sha256,
+                    decision,
+                    decision_workflow_run_id,
+                    decided_by,
+                    decided_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)
+                """,
+                (
+                    import_workflow_run_id,
+                    proposal_index,
+                    claim_id,
+                    evidence_id,
+                    record_sha256,
+                    now,
+                    now,
+                ),
+            )
+
+        record = self.get_profile_import_review_item(claim_id)
+        assert record is not None
+        return record
+
+    def get_profile_import_review_item(self, claim_id: str) -> Record | None:
+        """Return the durable import-review association for one claim."""
+
+        self._require_initialized()
+        row = self._connection.execute(
+            """
+            SELECT *
+            FROM profile_import_review_items
+            WHERE claim_id = ?
+            """,
+            (claim_id,),
+        ).fetchone()
+        return None if row is None else _row_record(row)
+
+    def list_profile_import_review_items(
+        self,
+        *,
+        import_workflow_run_id: str | None = None,
+        decision: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Record]:
+        """List review associations in stable import/proposal order."""
+
+        if decision is not None and not isinstance(decision, str):
+            raise TypeError("decision must be text or null")
+        if decision is not None and decision not in _PROFILE_IMPORT_REVIEW_DECISIONS:
+            expected = ", ".join(sorted(_PROFILE_IMPORT_REVIEW_DECISIONS))
+            raise ValueError(f"decision must be one of: {expected}")
+        filters = _without_none(
+            {
+                "import_workflow_run_id": import_workflow_run_id,
+                "decision": decision,
+            }
+        )
+        return self._list(
+            "profile_import_review_items",
+            filters=filters,
+            order_by="created_at, import_workflow_run_id, proposal_index",
+            limit=limit,
+            offset=offset,
+        )
+
+    def decide_profile_import_review_item(
+        self,
+        claim_id: str,
+        *,
+        decision: str,
+        decision_workflow_run_id: str,
+        decided_by: str,
+        decided_at: str,
+    ) -> Record:
+        """Atomically apply one terminal import-review trust transition.
+
+        The method is intentionally narrower than generic claim/evidence update
+        APIs. It accepts only the two legal pending transitions and uses guarded
+        updates so concurrent or malformed state fails closed.
+        """
+
+        if not isinstance(decision, str):
+            raise TypeError("decision must be text")
+        if decision not in _PROFILE_IMPORT_REVIEW_DECISIONS:
+            expected = ", ".join(sorted(_PROFILE_IMPORT_REVIEW_DECISIONS))
+            raise ValueError(f"decision must be one of: {expected}")
+        for field_name, value in (
+            ("decision_workflow_run_id", decision_workflow_run_id),
+            ("decided_by", decided_by),
+            ("decided_at", decided_at),
+        ):
+            if not isinstance(value, str):
+                raise TypeError(f"{field_name} must be text")
+            if not value.strip():
+                raise ValueError(f"{field_name} must not be blank")
+
+        with self.transaction():
+            review_item = self.get_profile_import_review_item(claim_id)
+            if review_item is None:
+                raise RecordNotFoundError(
+                    f"Profile import review item does not exist: {claim_id}"
+                )
+            current_decision = review_item["decision"]
+            if current_decision is not None:
+                if (
+                    current_decision == decision
+                    and review_item["decision_workflow_run_id"]
+                    == decision_workflow_run_id
+                    and review_item["decided_by"] == decided_by
+                    and review_item["decided_at"] == decided_at
+                ):
+                    self._require_decided_profile_import_review_projection(review_item)
+                    return review_item
+                raise RepositoryError(
+                    f"Profile import review item is already decided: {claim_id}"
+                )
+
+            evidence_id = review_item["evidence_id"]
+            if not isinstance(evidence_id, str):
+                raise RepositoryError("Profile import review association is malformed")
+            self._require_pending_profile_import_review_item(review_item)
+            self._require_pending_profile_import_review_projection(claim_id, evidence_id)
+
+            if decision == "approved":
+                claim_status = "verified"
+                approval_status = "approved"
+                evidence_status = "confirmed"
+                verified_at: str | None = decided_at
+                verified_by: str | None = decided_by
+                confirmed_at: str | None = decided_at
+                confirmed_by: str | None = decided_by
+            else:
+                claim_status = "withdrawn"
+                approval_status = "rejected"
+                evidence_status = "rejected"
+                verified_at = None
+                verified_by = None
+                confirmed_at = None
+                confirmed_by = None
+
+            claim_cursor = self._connection.execute(
+                """
+                UPDATE claims
+                SET status = ?,
+                    approval_status = ?,
+                    verified_at = ?,
+                    verified_by = ?,
+                    updated_at = ?
+                WHERE id = ?
+                  AND source_type = 'imported_resume'
+                  AND status = 'needs_review'
+                  AND approval_status = 'pending'
+                  AND verified_at IS NULL
+                  AND verified_by IS NULL
+                """,
+                (
+                    claim_status,
+                    approval_status,
+                    verified_at,
+                    verified_by,
+                    decided_at,
+                    claim_id,
+                ),
+            )
+            if claim_cursor.rowcount != 1:
+                raise RepositoryError("Profile import claim is not pending review")
+
+            evidence_cursor = self._connection.execute(
+                """
+                UPDATE evidence
+                SET confirmation_status = ?,
+                    confirmed_at = ?,
+                    confirmed_by = ?,
+                    updated_at = ?
+                WHERE id = ?
+                  AND source_type = 'imported_resume'
+                  AND confirmation_status = 'pending'
+                  AND confirmed_at IS NULL
+                  AND confirmed_by IS NULL
+                """,
+                (
+                    evidence_status,
+                    confirmed_at,
+                    confirmed_by,
+                    decided_at,
+                    evidence_id,
+                ),
+            )
+            if evidence_cursor.rowcount != 1:
+                raise RepositoryError("Profile import evidence is not pending review")
+
+            review_cursor = self._connection.execute(
+                """
+                UPDATE profile_import_review_items
+                SET decision = ?,
+                    decision_workflow_run_id = ?,
+                    decided_by = ?,
+                    decided_at = ?,
+                    updated_at = ?
+                WHERE claim_id = ?
+                  AND decision IS NULL
+                  AND decision_workflow_run_id IS NULL
+                  AND decided_by IS NULL
+                  AND decided_at IS NULL
+                """,
+                (
+                    decision,
+                    decision_workflow_run_id,
+                    decided_by,
+                    decided_at,
+                    decided_at,
+                    claim_id,
+                ),
+            )
+            if review_cursor.rowcount != 1:
+                raise RepositoryError("Profile import review item is not pending")
+
+            decided = self.get_profile_import_review_item(claim_id)
+            assert decided is not None
+            self._require_decided_profile_import_review_projection(decided)
+            return decided
+
+    def _get_profile_import_review_slot(
+        self,
+        import_workflow_run_id: str,
+        proposal_index: int,
+    ) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute(
+            """
+            SELECT *
+            FROM profile_import_review_items
+            WHERE import_workflow_run_id = ? AND proposal_index = ?
+            """,
+            (import_workflow_run_id, proposal_index),
+        ).fetchone()
+        return None if row is None else _row_record(row)
+
+    def _require_profile_import_review_support_link(
+        self,
+        claim_id: str,
+        evidence_id: str,
+    ) -> None:
+        claim_links = self.list_claim_evidence(claim_id=claim_id)
+        evidence_links = self.list_claim_evidence(evidence_id=evidence_id)
+        expected = {
+            "claim_id": claim_id,
+            "evidence_id": evidence_id,
+            "relationship": "supports",
+            "strength": 1.0,
+            "note": None,
+        }
+        if len(claim_links) != 1 or len(evidence_links) != 1:
+            raise RepositoryError("Profile import review support link is invalid")
+        for link in (claim_links[0], evidence_links[0]):
+            if any(link.get(field) != value for field, value in expected.items()):
+                raise RepositoryError("Profile import review support link is invalid")
+
+    def _require_pending_profile_import_review_projection(
+        self,
+        claim_id: str,
+        evidence_id: str,
+    ) -> None:
+        claim = self.get_claim(claim_id)
+        if claim is None:
+            raise RecordNotFoundError(f"Claim does not exist: {claim_id}")
+        evidence = self.get_evidence(evidence_id)
+        if evidence is None:
+            raise RecordNotFoundError(f"Evidence does not exist: {evidence_id}")
+        if (
+            claim.get("source_type") != "imported_resume"
+            or claim.get("status") != "needs_review"
+            or claim.get("approval_status") != "pending"
+            or claim.get("verified_at") is not None
+            or claim.get("verified_by") is not None
+            or claim.get("updated_at") != claim.get("created_at")
+        ):
+            raise RepositoryError("Profile import claim is not pending review")
+        if (
+            evidence.get("source_type") != "imported_resume"
+            or evidence.get("confirmation_status") != "pending"
+            or evidence.get("confirmed_at") is not None
+            or evidence.get("confirmed_by") is not None
+            or evidence.get("updated_at") != evidence.get("created_at")
+        ):
+            raise RepositoryError("Profile import evidence is not pending review")
+        self._require_profile_import_review_support_link(claim_id, evidence_id)
+
+    @staticmethod
+    def _require_pending_profile_import_review_item(review_item: Record) -> None:
+        if (
+            review_item.get("decision") is not None
+            or review_item.get("decision_workflow_run_id") is not None
+            or review_item.get("decided_by") is not None
+            or review_item.get("decided_at") is not None
+            or review_item.get("updated_at") != review_item.get("created_at")
+        ):
+            raise RepositoryError("Profile import review association is not pending")
+
+    def _require_decided_profile_import_review_projection(
+        self,
+        review_item: Record,
+    ) -> None:
+        claim_id = review_item.get("claim_id")
+        evidence_id = review_item.get("evidence_id")
+        decision = review_item.get("decision")
+        decision_workflow_run_id = review_item.get("decision_workflow_run_id")
+        decided_by = review_item.get("decided_by")
+        decided_at = review_item.get("decided_at")
+        if (
+            not isinstance(claim_id, str)
+            or not isinstance(evidence_id, str)
+            or decision not in _PROFILE_IMPORT_REVIEW_DECISIONS
+            or not isinstance(decision_workflow_run_id, str)
+            or not decision_workflow_run_id.strip()
+            or not isinstance(decided_by, str)
+            or not decided_by.strip()
+            or not isinstance(decided_at, str)
+            or not decided_at.strip()
+            or review_item.get("updated_at") != decided_at
+        ):
+            raise RepositoryError("Profile import review decision is malformed")
+        claim = self.get_claim(claim_id)
+        evidence = self.get_evidence(evidence_id)
+        if claim is None or evidence is None:
+            raise RepositoryError("Profile import review decision projection is missing")
+        if decision == "approved":
+            claim_projection = (
+                claim.get("status") == "verified"
+                and claim.get("approval_status") == "approved"
+                and claim.get("verified_at") == decided_at
+                and claim.get("verified_by") == decided_by
+                and claim.get("updated_at") == decided_at
+            )
+            evidence_projection = (
+                evidence.get("confirmation_status") == "confirmed"
+                and evidence.get("confirmed_at") == decided_at
+                and evidence.get("confirmed_by") == decided_by
+                and evidence.get("updated_at") == decided_at
+            )
+        else:
+            claim_projection = (
+                claim.get("status") == "withdrawn"
+                and claim.get("approval_status") == "rejected"
+                and claim.get("verified_at") is None
+                and claim.get("verified_by") is None
+                and claim.get("updated_at") == decided_at
+            )
+            evidence_projection = (
+                evidence.get("confirmation_status") == "rejected"
+                and evidence.get("confirmed_at") is None
+                and evidence.get("confirmed_by") is None
+                and evidence.get("updated_at") == decided_at
+            )
+        if not claim_projection or not evidence_projection:
+            raise RepositoryError("Profile import review decision projection is inconsistent")
+        self._require_profile_import_review_support_link(claim_id, evidence_id)
 
     def add_memory_proposal(
         self,

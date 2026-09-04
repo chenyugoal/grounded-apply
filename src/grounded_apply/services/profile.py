@@ -18,6 +18,7 @@ from grounded_apply.domain import (
     Claim,
     ClaimStatus,
     ClaimUsePolicy,
+    Contradiction,
     Derivation,
     Evidence,
     EvidenceConfirmationStatus,
@@ -52,6 +53,7 @@ from grounded_apply.services.profile_import_validation import (
 
 
 _PROFILE_IMPORT_WORKFLOW = "profile_import_proposal"
+_PROFILE_IMPORT_REVIEW_WORKFLOW = "profile_import_review_decision"
 _MAX_IMPORT_PROPOSALS = 1000
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -59,11 +61,14 @@ _PROFILE_IMPORT_SOURCE_REF_PATTERN = re.compile(r"sha256:(?P<digest>[0-9a-f]{64}
 _LINE_BREAK_PATTERN = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION = 2
-PROFILE_IMPORT_REQUEST_SCHEMA_VERSION = 3
+PROFILE_IMPORT_REQUEST_SCHEMA_VERSION = 4
 PROFILE_IMPORT_SOURCE_IDENTITY_SCHEMA_VERSION = 1
-PROFILE_IMPORT_RESULT_MANIFEST_SCHEMA_VERSION = 2
+PROFILE_IMPORT_RESULT_MANIFEST_SCHEMA_VERSION = 3
 PROFILE_IMPORT_SPAN_LOCATOR_SCHEMA_VERSION = 1
 PROFILE_IMPORT_RECORD_ID_SCHEMA_VERSION = 1
+PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION = 1
+PROFILE_IMPORT_REVIEW_DECISION_SCHEMA_VERSION = 1
+PROFILE_IMPORT_REVIEW_RESULT_SCHEMA_VERSION = 1
 PROFILE_IMPORT_EXTRACTOR_ID = "grounded-apply.profile-import.manifest@1"
 
 _PROFILE_IMPORT_EXTRACTORS: Mapping[str, int] = MappingProxyType(
@@ -222,9 +227,13 @@ def _require_profile_import_source_artifact_record(
     if artifact is None:
         raise RepositoryError("Profile import source identity record is missing")
     try:
-        metadata = _json_value(
+        metadata = _canonical_stored_json(
             artifact.get("metadata_json"),
             field_name="artifact metadata_json",
+        )
+        artifact_timestamps = tuple(
+            _required_timestamp(artifact, field_name)
+            for field_name in ("captured_at", "created_at", "updated_at")
         )
     except (TypeError, ValueError) as error:
         raise RepositoryError(
@@ -265,6 +274,15 @@ def _require_profile_import_source_artifact_record(
         or artifact.get("sensitivity") != Sensitivity.PERSONAL.value
         or codepoint_size_invalid
         or metadata != _profile_import_artifact_metadata(source_codepoint_size)
+        or any(
+            _timestamp(timestamp) != artifact.get(field_name)
+            for field_name, timestamp in zip(
+                ("captured_at", "created_at", "updated_at"),
+                artifact_timestamps,
+                strict=True,
+            )
+        )
+        or len(set(artifact_timestamps)) != 1
     ):
         raise RepositoryError(
             "Profile import source identity record failed integrity checks"
@@ -494,7 +512,7 @@ class CreateImportProposal:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ImportProposalResult:
-    """Persisted, review-only claims and their exact pending evidence."""
+    """Persisted imported records in their current review lifecycle state."""
 
     workflow_run_id: str
     source_sha256: str
@@ -522,25 +540,53 @@ class ImportProposalResult:
             for claim, evidence in zip(self.claims, self.evidence, strict=True)
         ):
             raise ValueError("import result evidence must align with its claims")
-        if any(
-            claim.status is not ClaimStatus.NEEDS_REVIEW
-            or claim.approval_status is not ApprovalStatus.PENDING
-            or claim.verified_at is not None
-            or claim.verified_by is not None
-            or claim.source_type is not SourceType.IMPORTED_RESUME
-            or claim.source_ref != self.source_ref
+        for claim, item in zip(self.claims, self.evidence, strict=True):
+            lifecycle_is_valid = (
+                (
+                    claim.status is ClaimStatus.NEEDS_REVIEW
+                    and claim.approval_status is ApprovalStatus.PENDING
+                    and claim.verified_at is None
+                    and claim.verified_by is None
+                    and item.confirmation_status
+                    is EvidenceConfirmationStatus.PENDING
+                )
+                or (
+                    claim.status is ClaimStatus.VERIFIED
+                    and claim.approval_status is ApprovalStatus.APPROVED
+                    and claim.verified_at is not None
+                    and isinstance(claim.verified_by, str)
+                    and bool(claim.verified_by.strip())
+                    and item.confirmation_status
+                    is EvidenceConfirmationStatus.CONFIRMED
+                )
+                or (
+                    claim.status is ClaimStatus.WITHDRAWN
+                    and claim.approval_status is ApprovalStatus.REJECTED
+                    and claim.verified_at is None
+                    and claim.verified_by is None
+                    and item.confirmation_status
+                    is EvidenceConfirmationStatus.REJECTED
+                )
+            )
+            if not lifecycle_is_valid:
+                raise ValueError("import result contains an invalid review lifecycle state")
+            if (
+                claim.source_type is not SourceType.IMPORTED_RESUME
+                or claim.source_ref != self.source_ref
+                or item.source_type is not SourceType.IMPORTED_RESUME
+                or item.source_ref != self.source_ref
+                or item.artifact_id != self.source_artifact_id
+                or item.extraction_method != self.extractor_id
+            ):
+                raise ValueError("import result provenance is not application-owned")
+
+    @property
+    def review_required(self) -> bool:
+        return any(
+            claim.status is ClaimStatus.NEEDS_REVIEW
+            and claim.approval_status is ApprovalStatus.PENDING
             for claim in self.claims
-        ):
-            raise ValueError("import result claims must remain pending user review")
-        if any(
-            item.confirmation_status is not EvidenceConfirmationStatus.PENDING
-            or item.source_type is not SourceType.IMPORTED_RESUME
-            or item.source_ref != self.source_ref
-            or item.artifact_id != self.source_artifact_id
-            or item.extraction_method != self.extractor_id
-            for item in self.evidence
-        ):
-            raise ValueError("import result evidence must remain pending user review")
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -588,6 +634,102 @@ class ImportProposalPreview:
             or self.planned_evidence_count != self.proposal_count
         ):
             raise ValueError("an import preview requires one claim and evidence per proposal")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CreateProfileReviewDecision:
+    """One explicit, stale-safe decision for an imported review item."""
+
+    claim_id: str
+    review_token: str
+    decision: ApprovalStatus
+    actor_id: str
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.claim_id, "claim_id")
+        if not _is_canonical_uuid(self.claim_id, version=5):
+            raise ValueError("claim_id must identify an application-owned review item")
+        if (
+            not isinstance(self.review_token, str)
+            or _SHA256_PATTERN.fullmatch(self.review_token) is None
+        ):
+            raise ValueError("review_token must contain a lowercase SHA-256 digest")
+        if not isinstance(self.decision, ApprovalStatus) or self.decision not in {
+            ApprovalStatus.APPROVED,
+            ApprovalStatus.REJECTED,
+        }:
+            raise ValueError("decision must be approved or rejected")
+        for value, field_name in (
+            (self.actor_id, "actor_id"),
+            (self.idempotency_key, "idempotency_key"),
+        ):
+            _require_text(value, field_name)
+            if _IDEMPOTENCY_KEY_PATTERN.fullmatch(value) is None:
+                raise ValueError(f"{field_name} must be an opaque identifier")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProfileReviewDecisionResult:
+    """The audited terminal state of one imported review item."""
+
+    decision_workflow_run_id: str
+    import_workflow_run_id: str
+    proposal_index: int
+    decision: ApprovalStatus
+    actor_id: str
+    decided_at: datetime
+    claim: Claim
+    evidence: Evidence
+
+    def __post_init__(self) -> None:
+        if not _is_canonical_uuid(self.decision_workflow_run_id, version=4):
+            raise ValueError("decision workflow identity is invalid")
+        if not _is_canonical_uuid(self.import_workflow_run_id, version=4):
+            raise ValueError("import workflow identity is invalid")
+        if (
+            isinstance(self.proposal_index, bool)
+            or not isinstance(self.proposal_index, int)
+            or self.proposal_index < 0
+        ):
+            raise ValueError("proposal_index must be a non-negative integer")
+        if not isinstance(self.decision, ApprovalStatus) or self.decision not in {
+            ApprovalStatus.APPROVED,
+            ApprovalStatus.REJECTED,
+        }:
+            raise ValueError("decision result must be approved or rejected")
+        _require_text(self.actor_id, "actor_id")
+        if not isinstance(self.decided_at, datetime):
+            raise TypeError("decided_at must be a datetime")
+        if self.decided_at.tzinfo is None or self.decided_at.utcoffset() is None:
+            raise ValueError("decided_at must be timezone-aware")
+        if not isinstance(self.claim, Claim) or not isinstance(
+            self.evidence,
+            Evidence,
+        ):
+            raise TypeError("decision result requires Claim and Evidence records")
+        if self.claim.id != self.evidence.claim_id:
+            raise ValueError("decision evidence must belong to its claim")
+        if self.decision is ApprovalStatus.APPROVED:
+            valid = (
+                self.claim.status is ClaimStatus.VERIFIED
+                and self.claim.approval_status is ApprovalStatus.APPROVED
+                and self.claim.verified_at == self.decided_at
+                and self.claim.verified_by == self.actor_id
+                and self.evidence.confirmation_status
+                is EvidenceConfirmationStatus.CONFIRMED
+            )
+        else:
+            valid = (
+                self.claim.status is ClaimStatus.WITHDRAWN
+                and self.claim.approval_status is ApprovalStatus.REJECTED
+                and self.claim.verified_at is None
+                and self.claim.verified_by is None
+                and self.evidence.confirmation_status
+                is EvidenceConfirmationStatus.REJECTED
+            )
+        if not valid:
+            raise ValueError("decision result does not match its terminal projection")
 
 
 def _profile_import_evidence_has_valid_identity(
@@ -638,6 +780,9 @@ class ProfileReviewItem:
 
     claim: Claim
     evidence: tuple[Evidence, ...]
+    import_workflow_run_id: str | None = None
+    proposal_index: int | None = None
+    review_token: str | None = None
     content_trust: str = field(default="untrusted", init=False)
     usable: bool = field(default=False, init=False)
 
@@ -677,6 +822,19 @@ class ProfileReviewItem:
                 "imported review claims require complete pending imported evidence"
             )
         if self.claim.source_type is SourceType.IMPORTED_RESUME:
+            if not _is_canonical_uuid(self.import_workflow_run_id, version=4):
+                raise ValueError("review import workflow identity is invalid")
+            if (
+                isinstance(self.proposal_index, bool)
+                or not isinstance(self.proposal_index, int)
+                or self.proposal_index < 0
+            ):
+                raise ValueError("review proposal index must be a non-negative integer")
+            if (
+                not isinstance(self.review_token, str)
+                or _SHA256_PATTERN.fullmatch(self.review_token) is None
+            ):
+                raise ValueError("review token must contain a lowercase SHA-256 digest")
             source_sha256 = _profile_import_source_digest(self.claim.source_ref)
             if source_sha256 is None:
                 raise ValueError(
@@ -705,6 +863,15 @@ class ProfileReviewItem:
                 raise ValueError(
                     "imported review evidence provenance failed integrity checks"
                 )
+        elif any(
+            value is not None
+            for value in (
+                self.import_workflow_run_id,
+                self.proposal_index,
+                self.review_token,
+            )
+        ):
+            raise ValueError("non-imported review items cannot carry import identity")
 
 
 def _text_span_locator(span: TextSourceSpan, source_sha256: str) -> dict[str, JsonValue]:
@@ -727,6 +894,193 @@ def _json_identity(value: JsonValue) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _profile_import_record_sha256(
+    *,
+    claim_type: str,
+    value: JsonValue,
+    canonical_text: str,
+    subject_type: str,
+    subject_id: str | None,
+    confidence: float,
+    sensitivity: Sensitivity,
+    scope: Scope,
+    source_ref: str,
+    artifact_id: str,
+    locator: JsonValue,
+    evidence_text: str,
+    extraction_method: str,
+) -> str:
+    """Hash the immutable projection of one imported claim/evidence pair.
+
+    Only the digest is persisted in workflow and review metadata. The payload
+    deliberately excludes lifecycle fields that a review decision changes.
+    """
+
+    _validate_json_value(value)
+    _validate_json_value(locator, "locator")
+    normalized_confidence = float(confidence)
+    if normalized_confidence == 0.0:
+        normalized_confidence = 0.0
+    payload: dict[str, JsonValue] = {
+        "schema_version": PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION,
+        "claim_type": claim_type,
+        "value_sha256": _text_sha256(_json_identity(value)),
+        "canonical_text_sha256": _text_sha256(canonical_text),
+        "subject_type": subject_type,
+        "subject_id": subject_id,
+        "confidence": normalized_confidence,
+        "sensitivity": sensitivity.value,
+        "scope_type": scope.type.value,
+        "scope_id": scope.id,
+        "source_ref": source_ref,
+        "artifact_id": artifact_id,
+        "locator": locator,
+        "evidence_text_sha256": _text_sha256(evidence_text),
+        "extraction_method": extraction_method,
+    }
+    return _text_sha256(_json_identity(payload))
+
+
+def _profile_import_record_sha256_for_proposal(
+    request: CreateImportProposal,
+    proposal: ProposedImportClaim,
+    exact_text: str,
+) -> str:
+    return _profile_import_record_sha256(
+        claim_type=proposal.claim_type,
+        value=proposal.value,
+        canonical_text=proposal.canonical_text,
+        subject_type=proposal.subject_type,
+        subject_id=proposal.subject_id,
+        confidence=float(proposal.confidence),
+        sensitivity=_import_sensitivity(proposal),
+        scope=proposal.scope,
+        source_ref=request.source_ref,
+        artifact_id=request.source_artifact_id,
+        locator=_text_span_locator(proposal.span, request.source_sha256),
+        evidence_text=exact_text,
+        extraction_method=request.extractor_id,
+    )
+
+
+def _profile_review_token(
+    *,
+    import_workflow_run_id: str,
+    proposal_index: int,
+    claim_id: str,
+    evidence_id: str,
+    record_sha256: str,
+    workflow_input_sha256: str,
+    workflow_result_sha256: str,
+    association_created_at: str,
+    link_created_at: str,
+) -> str:
+    payload: dict[str, JsonValue] = {
+        "schema_version": PROFILE_IMPORT_REVIEW_DECISION_SCHEMA_VERSION,
+        "import_workflow_run_id": import_workflow_run_id,
+        "proposal_index": proposal_index,
+        "claim_id": claim_id,
+        "evidence_id": evidence_id,
+        "record_sha256": record_sha256,
+        "workflow_input_sha256": workflow_input_sha256,
+        "workflow_result_sha256": workflow_result_sha256,
+        "association_created_at": association_created_at,
+        "link_created_at": link_created_at,
+    }
+    return _text_sha256(_json_identity(payload))
+
+
+def _canonical_stored_json(value: object, *, field_name: str) -> JsonValue:
+    decoded = _json_value(value, field_name=field_name)
+    _validate_json_value(decoded, field_name)
+    if not isinstance(value, str) or value != _json_identity(decoded):
+        raise ValueError(f"Stored {field_name} must use canonical JSON")
+    return decoded
+
+
+@dataclass(frozen=True, slots=True)
+class _ProfileImportRecordIdentity:
+    claim_id: str
+    evidence_id: str
+    record_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ProfileImportWorkflowIdentity:
+    workflow_id: str
+    source_sha256: str
+    source_ref: str
+    source_artifact_id: str
+    extractor_id: str
+    source_byte_size: int
+    source_codepoint_size: int
+    input_sha256: str
+    result_sha256: str
+    created_at: str
+    records: tuple[_ProfileImportRecordIdentity, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProfileImportReviewState:
+    workflow: _ProfileImportWorkflowIdentity
+    association: Record
+    record: _ProfileImportRecordIdentity
+    claim: Claim
+    evidence: Evidence
+    evidence_record: Record
+    link: Record
+    review_token: str
+
+
+def _profile_review_workflow_input(
+    request: CreateProfileReviewDecision,
+    state: _ProfileImportReviewState,
+    *,
+    idempotency_key_sha256: str,
+) -> dict[str, JsonValue]:
+    proposal_index = state.association.get("proposal_index")
+    if type(proposal_index) is not int:
+        raise RepositoryError("Profile import review association is malformed")
+    return {
+        "review_decision_schema_version": PROFILE_IMPORT_REVIEW_DECISION_SCHEMA_VERSION,
+        "review_result_schema_version": PROFILE_IMPORT_REVIEW_RESULT_SCHEMA_VERSION,
+        "record_digest_schema_version": PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION,
+        "content_policy_version": PROFILE_IMPORT_CONTENT_POLICY_VERSION,
+        "restricted_taxonomy_version": PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
+        "restricted_taxonomy_sha256": PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
+        "value_schema_version": PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
+        "import_workflow_run_id": state.workflow.workflow_id,
+        "import_workflow_input_sha256": state.workflow.input_sha256,
+        "import_workflow_result_sha256": state.workflow.result_sha256,
+        "proposal_index": proposal_index,
+        "claim_id": state.record.claim_id,
+        "evidence_id": state.record.evidence_id,
+        "record_sha256": state.record.record_sha256,
+        "review_token": state.review_token,
+        "decision": request.decision.value,
+        "actor_id": request.actor_id,
+        "idempotency_key_sha256": idempotency_key_sha256,
+    }
+
+
+def _profile_review_result_manifest(
+    request: CreateProfileReviewDecision,
+    state: _ProfileImportReviewState,
+) -> dict[str, JsonValue]:
+    proposal_index = state.association.get("proposal_index")
+    if type(proposal_index) is not int:
+        raise RepositoryError("Profile import review association is malformed")
+    return {
+        "schema_version": PROFILE_IMPORT_REVIEW_RESULT_SCHEMA_VERSION,
+        "import_workflow_run_id": state.workflow.workflow_id,
+        "proposal_index": proposal_index,
+        "claim_id": state.record.claim_id,
+        "evidence_id": state.record.evidence_id,
+        "record_sha256": state.record.record_sha256,
+        "decision": request.decision.value,
+    }
 
 
 def _snapshot_import_request(request: CreateImportProposal) -> CreateImportProposal:
@@ -757,13 +1111,19 @@ def _import_workflow_input(
     request: CreateImportProposal,
     *,
     idempotency_key_sha256: str,
+    record_sha256s: tuple[str, ...],
 ) -> dict[str, JsonValue]:
     proposals = to_jsonable(request.proposals)
+    if len(record_sha256s) != len(request.proposals) or any(
+        _SHA256_PATTERN.fullmatch(item) is None for item in record_sha256s
+    ):
+        raise ValueError("profile import record digests do not match the proposals")
     return {
         "request_schema_version": PROFILE_IMPORT_REQUEST_SCHEMA_VERSION,
         "manifest_schema_version": PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION,
         "result_manifest_schema_version": PROFILE_IMPORT_RESULT_MANIFEST_SCHEMA_VERSION,
         "record_id_schema_version": PROFILE_IMPORT_RECORD_ID_SCHEMA_VERSION,
+        "record_digest_schema_version": PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION,
         "source_identity_schema_version": PROFILE_IMPORT_SOURCE_IDENTITY_SCHEMA_VERSION,
         "span_locator_schema_version": PROFILE_IMPORT_SPAN_LOCATOR_SCHEMA_VERSION,
         "content_policy_version": PROFILE_IMPORT_CONTENT_POLICY_VERSION,
@@ -774,6 +1134,7 @@ def _import_workflow_input(
         "idempotency_key_sha256": idempotency_key_sha256,
         "proposal_count": len(request.proposals),
         "proposals_sha256": _text_sha256(_json_identity(proposals)),
+        "record_sha256s": list(record_sha256s),
         "source_artifact_id": request.source_artifact_id,
         "source_byte_size": len(request.source_text.encode("utf-8")),
         "source_codepoint_size": len(request.source_text),
@@ -910,6 +1271,21 @@ def _import_sensitivity(proposal: ProposedImportClaim) -> Sensitivity:
     if proposal.sensitivity is Sensitivity.PUBLIC:
         return Sensitivity.PERSONAL
     return proposal.sensitivity
+
+
+def _scopes_overlap(left: Scope, right: Scope) -> bool:
+    return (
+        left.type is ScopeType.GLOBAL
+        or right.type is ScopeType.GLOBAL
+        or left == right
+    )
+
+
+def _claim_is_active_at(claim: Claim, when: datetime) -> bool:
+    return not (
+        (claim.effective_from is not None and when < claim.effective_from)
+        or (claim.effective_to is not None and when >= claim.effective_to)
+    )
 
 
 class ProfileService:
@@ -1101,6 +1477,505 @@ class ProfileService:
         )
         return validated_artifact
 
+    def _profile_import_workflow_identity(
+        self,
+        workflow_id: str,
+    ) -> _ProfileImportWorkflowIdentity:
+        """Revalidate a succeeded import and its ordered review associations."""
+
+        workflow = self._repository.get_workflow_run(workflow_id)
+        try:
+            if workflow is None:
+                raise ValueError("workflow is missing")
+            stored_workflow_id = _required_text(workflow, "id")
+            if stored_workflow_id != workflow_id or not _is_canonical_uuid(
+                stored_workflow_id,
+                version=4,
+            ):
+                raise ValueError("workflow identity is invalid")
+            workflow_input = _canonical_stored_json(
+                workflow.get("input_json"),
+                field_name="workflow input_json",
+            )
+            completed_steps = _canonical_stored_json(
+                workflow.get("completed_steps_json"),
+                field_name="workflow completed_steps_json",
+            )
+            result_manifest = _canonical_stored_json(
+                workflow.get("generated_artifacts_json"),
+                field_name="workflow generated_artifacts_json",
+            )
+            outstanding_need_info = _canonical_stored_json(
+                workflow.get("outstanding_need_info_json"),
+                field_name="workflow outstanding_need_info_json",
+            )
+            retry_policy = _canonical_stored_json(
+                workflow.get("retry_policy_json"),
+                field_name="workflow retry_policy_json",
+            )
+            if not isinstance(workflow_input, dict):
+                raise ValueError("workflow input is not an object")
+            expected_input_fields = {
+                "request_schema_version",
+                "manifest_schema_version",
+                "result_manifest_schema_version",
+                "record_id_schema_version",
+                "record_digest_schema_version",
+                "source_identity_schema_version",
+                "span_locator_schema_version",
+                "content_policy_version",
+                "restricted_taxonomy_sha256",
+                "restricted_taxonomy_version",
+                "value_schema_version",
+                "extractor_id",
+                "idempotency_key_sha256",
+                "proposal_count",
+                "proposals_sha256",
+                "record_sha256s",
+                "source_artifact_id",
+                "source_byte_size",
+                "source_codepoint_size",
+                "source_ref",
+                "source_sha256",
+            }
+            if set(workflow_input) != expected_input_fields:
+                raise ValueError("workflow input fields are invalid")
+            source_sha256 = workflow_input.get("source_sha256")
+            source_ref = workflow_input.get("source_ref")
+            source_artifact_id = workflow_input.get("source_artifact_id")
+            extractor_id = workflow_input.get("extractor_id")
+            idempotency_key_sha256 = workflow_input.get("idempotency_key_sha256")
+            proposals_sha256 = workflow_input.get("proposals_sha256")
+            proposal_count = workflow_input.get("proposal_count")
+            source_byte_size = workflow_input.get("source_byte_size")
+            source_codepoint_size = workflow_input.get("source_codepoint_size")
+            record_sha256s = workflow_input.get("record_sha256s")
+            if (
+                workflow_input.get("request_schema_version")
+                != PROFILE_IMPORT_REQUEST_SCHEMA_VERSION
+                or workflow_input.get("manifest_schema_version")
+                != PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION
+                or workflow_input.get("result_manifest_schema_version")
+                != PROFILE_IMPORT_RESULT_MANIFEST_SCHEMA_VERSION
+                or workflow_input.get("record_id_schema_version")
+                != PROFILE_IMPORT_RECORD_ID_SCHEMA_VERSION
+                or workflow_input.get("record_digest_schema_version")
+                != PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION
+                or workflow_input.get("source_identity_schema_version")
+                != PROFILE_IMPORT_SOURCE_IDENTITY_SCHEMA_VERSION
+                or workflow_input.get("span_locator_schema_version")
+                != PROFILE_IMPORT_SPAN_LOCATOR_SCHEMA_VERSION
+                or workflow_input.get("content_policy_version")
+                != PROFILE_IMPORT_CONTENT_POLICY_VERSION
+                or workflow_input.get("restricted_taxonomy_sha256")
+                != PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256
+                or workflow_input.get("restricted_taxonomy_version")
+                != PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION
+                or workflow_input.get("value_schema_version")
+                != PROFILE_IMPORT_VALUE_SCHEMA_VERSION
+                or not isinstance(source_sha256, str)
+                or _SHA256_PATTERN.fullmatch(source_sha256) is None
+                or source_ref != _profile_import_source_ref(source_sha256)
+                or source_artifact_id
+                != _profile_import_source_artifact_id(source_sha256)
+                or not isinstance(extractor_id, str)
+                or _profile_import_extractor_manifest_version(extractor_id)
+                != PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION
+                or not isinstance(idempotency_key_sha256, str)
+                or _SHA256_PATTERN.fullmatch(idempotency_key_sha256) is None
+                or workflow.get("idempotency_key") != idempotency_key_sha256
+                or not isinstance(proposals_sha256, str)
+                or _SHA256_PATTERN.fullmatch(proposals_sha256) is None
+                or type(proposal_count) is not int
+                or not 1 <= proposal_count <= _MAX_IMPORT_PROPOSALS
+                or type(source_byte_size) is not int
+                or not 1 <= source_byte_size <= PROFILE_IMPORT_MAX_SOURCE_BYTES
+                or type(source_codepoint_size) is not int
+                or not 1 <= source_codepoint_size <= source_byte_size
+                or not isinstance(record_sha256s, list)
+                or len(record_sha256s) != proposal_count
+                or any(
+                    not isinstance(item, str)
+                    or _SHA256_PATTERN.fullmatch(item) is None
+                    for item in record_sha256s
+                )
+            ):
+                raise ValueError("workflow input identity is invalid")
+            input_sha256 = _text_sha256(_json_identity(workflow_input))
+            if workflow.get("input_hash_sha256") != input_sha256:
+                raise ValueError("workflow input hash is invalid")
+            created_at = _required_text(workflow, "created_at")
+            _required_timestamp(workflow, "created_at")
+            _required_timestamp(workflow, "updated_at")
+            if (
+                workflow.get("workflow_type") != _PROFILE_IMPORT_WORKFLOW
+                or workflow.get("status") != "succeeded"
+                or workflow.get("current_step") != "awaiting_review"
+                or completed_steps
+                != [
+                    "validate_source_binding",
+                    "validate_source_spans",
+                    "persist_source_identity",
+                    "persist_reviewable_claims",
+                ]
+                or outstanding_need_info != []
+                or retry_policy != {}
+                or workflow.get("model_name") is not None
+                or workflow.get("prompt_version") is not None
+                or workflow.get("failure_code") is not None
+                or workflow.get("failure_reason") is not None
+                or workflow.get("started_at") != created_at
+                or workflow.get("finished_at") != created_at
+            ):
+                raise ValueError("workflow checkpoint is invalid")
+            if (
+                not isinstance(result_manifest, dict)
+                or set(result_manifest)
+                != {"schema_version", "source_artifact_id", "records"}
+                or result_manifest.get("schema_version")
+                != PROFILE_IMPORT_RESULT_MANIFEST_SCHEMA_VERSION
+                or result_manifest.get("source_artifact_id") != source_artifact_id
+                or not isinstance(result_manifest.get("records"), list)
+                or len(result_manifest["records"]) != proposal_count
+            ):
+                raise ValueError("workflow result manifest is invalid")
+            records: list[_ProfileImportRecordIdentity] = []
+            seen_claim_ids: set[str] = set()
+            seen_evidence_ids: set[str] = set()
+            for index, item in enumerate(result_manifest["records"]):
+                if not isinstance(item, dict) or set(item) != {
+                    "claim_id",
+                    "evidence_id",
+                    "record_sha256",
+                }:
+                    raise ValueError("workflow result record is invalid")
+                claim_id = item.get("claim_id")
+                evidence_id = item.get("evidence_id")
+                record_sha256 = item.get("record_sha256")
+                expected_claim_id, expected_evidence_id = _profile_import_record_ids(
+                    workflow_id,
+                    index,
+                )
+                if (
+                    claim_id != expected_claim_id
+                    or evidence_id != expected_evidence_id
+                    or not isinstance(record_sha256, str)
+                    or record_sha256 != record_sha256s[index]
+                    or claim_id in seen_claim_ids
+                    or evidence_id in seen_evidence_ids
+                ):
+                    raise ValueError("workflow result record identity is invalid")
+                seen_claim_ids.add(claim_id)
+                seen_evidence_ids.add(evidence_id)
+                records.append(
+                    _ProfileImportRecordIdentity(
+                        claim_id=claim_id,
+                        evidence_id=evidence_id,
+                        record_sha256=record_sha256,
+                    )
+                )
+            associations = self._repository.list_profile_import_review_items(
+                import_workflow_run_id=workflow_id,
+            )
+            if len(associations) != proposal_count:
+                raise ValueError("workflow review associations are incomplete")
+            associations_by_index = {
+                association.get("proposal_index"): association
+                for association in associations
+            }
+            if len(associations_by_index) != proposal_count:
+                raise ValueError("workflow review association indexes are invalid")
+            for index, record in enumerate(records):
+                association = associations_by_index.get(index)
+                if (
+                    association is None
+                    or association.get("import_workflow_run_id") != workflow_id
+                    or association.get("claim_id") != record.claim_id
+                    or association.get("evidence_id") != record.evidence_id
+                    or association.get("record_sha256") != record.record_sha256
+                    or association.get("created_at") != created_at
+                ):
+                    raise ValueError("workflow review association is invalid")
+                decision = association.get("decision")
+                decision_fields = (
+                    association.get("decision_workflow_run_id"),
+                    association.get("decided_by"),
+                    association.get("decided_at"),
+                )
+                if decision is None:
+                    if any(value is not None for value in decision_fields):
+                        raise ValueError("pending review association has decision fields")
+                elif (
+                    decision not in {
+                        ApprovalStatus.APPROVED.value,
+                        ApprovalStatus.REJECTED.value,
+                    }
+                    or any(
+                        not isinstance(value, str) or not value.strip()
+                        for value in decision_fields
+                    )
+                    or not _is_canonical_uuid(decision_fields[0], version=4)
+                ):
+                    raise ValueError("terminal review association is invalid")
+                if association.get("updated_at") != (
+                    created_at if decision is None else association.get("decided_at")
+                ):
+                    raise ValueError("review association audit time is invalid")
+            assert isinstance(source_ref, str)
+            assert isinstance(source_artifact_id, str)
+            assert isinstance(extractor_id, str)
+            assert isinstance(source_byte_size, int)
+            assert isinstance(source_codepoint_size, int)
+            _require_profile_import_source_artifact_record(
+                self._repository.get_artifact(source_artifact_id),
+                source_sha256=source_sha256,
+                expected_byte_size=source_byte_size,
+                expected_codepoint_size=source_codepoint_size,
+            )
+            return _ProfileImportWorkflowIdentity(
+                workflow_id=workflow_id,
+                source_sha256=source_sha256,
+                source_ref=source_ref,
+                source_artifact_id=source_artifact_id,
+                extractor_id=extractor_id,
+                source_byte_size=source_byte_size,
+                source_codepoint_size=source_codepoint_size,
+                input_sha256=input_sha256,
+                result_sha256=_text_sha256(_json_identity(result_manifest)),
+                created_at=created_at,
+                records=tuple(records),
+            )
+        except (TypeError, ValueError, IndexError) as error:
+            raise RepositoryError(
+                "Profile import workflow provenance failed integrity checks"
+            ) from error
+
+    def _profile_import_review_state(
+        self,
+        claim_id: str,
+        *,
+        workflow_identity: _ProfileImportWorkflowIdentity | None = None,
+    ) -> _ProfileImportReviewState:
+        """Load one review item only after rechecking its immutable projection."""
+
+        association = self._repository.get_profile_import_review_item(claim_id)
+        try:
+            if association is None:
+                raise ValueError("review association is missing")
+            workflow_id = _required_text(association, "import_workflow_run_id")
+            workflow = workflow_identity or self._profile_import_workflow_identity(
+                workflow_id
+            )
+            if workflow.workflow_id != workflow_id:
+                raise ValueError("review workflow identity does not match association")
+            proposal_index = association.get("proposal_index")
+            if (
+                type(proposal_index) is not int
+                or not 0 <= proposal_index < len(workflow.records)
+            ):
+                raise ValueError("review proposal index is invalid")
+            record = workflow.records[proposal_index]
+            if (
+                association.get("claim_id") != claim_id
+                or record.claim_id != claim_id
+                or association.get("evidence_id") != record.evidence_id
+                or association.get("record_sha256") != record.record_sha256
+            ):
+                raise ValueError("review record identity is invalid")
+            claim_record = self._repository.get_claim(claim_id)
+            evidence_record = self._repository.get_evidence(record.evidence_id)
+            if claim_record is None or evidence_record is None:
+                raise ValueError("review projection record is missing")
+            claim_value = _canonical_stored_json(
+                claim_record.get("value_json"),
+                field_name="claim value_json",
+            )
+            locator = _canonical_stored_json(
+                evidence_record.get("locator_json"),
+                field_name="evidence locator_json",
+            )
+            evidence_metadata = _canonical_stored_json(
+                evidence_record.get("metadata_json"),
+                field_name="evidence metadata_json",
+            )
+            if evidence_metadata != {}:
+                raise ValueError("review evidence metadata is invalid")
+            claim = self._claim_from_record(claim_record)
+            evidence_items = self._evidence_for_claim(claim_id)
+            outgoing_links = self._repository.list_claim_evidence(claim_id=claim_id)
+            incoming_links = self._repository.list_claim_evidence(
+                evidence_id=record.evidence_id,
+            )
+            if (
+                len(evidence_items) != 1
+                or evidence_items[0].id != record.evidence_id
+                or len(outgoing_links) != 1
+                or len(incoming_links) != 1
+                or outgoing_links[0] != incoming_links[0]
+            ):
+                raise ValueError("review evidence is not uniquely linked")
+            evidence = evidence_items[0]
+            link = outgoing_links[0]
+            if (
+                link.get("claim_id") != claim_id
+                or link.get("evidence_id") != record.evidence_id
+                or link.get("relationship") != "supports"
+                or link.get("strength") != 1.0
+                or link.get("note") is not None
+                or link.get("created_at") != workflow.created_at
+                or claim.evidence_ids != (record.evidence_id,)
+                or claim.value_json != claim_value
+                or claim.source_type is not SourceType.IMPORTED_RESUME
+                or claim.source_ref != workflow.source_ref
+                or claim.effective_from is not None
+                or claim.effective_to is not None
+                or claim.derivation is not None
+                or claim.supersedes_id is not None
+                or claim.created_at != _parse_timestamp(
+                    workflow.created_at,
+                    field_name="workflow created_at",
+                )
+                or evidence.source_type is not SourceType.IMPORTED_RESUME
+                or evidence.source_ref != workflow.source_ref
+                or evidence.artifact_id != workflow.source_artifact_id
+                or evidence.extraction_method != workflow.extractor_id
+                or evidence.locator != locator
+                or evidence_record.get("created_at") != workflow.created_at
+                or evidence_record.get("captured_at") != workflow.created_at
+            ):
+                raise ValueError("review projection provenance is invalid")
+            if not _profile_import_evidence_has_valid_identity(
+                evidence,
+                source_sha256=workflow.source_sha256,
+            ):
+                raise ValueError("review evidence identity is invalid")
+            assert isinstance(locator, dict)
+            end = locator.get("end")
+            if type(end) is not int or end > workflow.source_codepoint_size:
+                raise ValueError("review evidence locator is out of bounds")
+            source_text = evidence.source_text
+            if not isinstance(source_text, str):
+                raise ValueError("review evidence text is missing")
+            validate_profile_import_metadata(
+                (
+                    claim.subject_type,
+                    claim.subject_id,
+                    claim.scope.id,
+                    workflow.source_ref,
+                    workflow.source_artifact_id,
+                    workflow.extractor_id,
+                )
+            )
+            validate_profile_import_proposal(
+                claim_type=claim.claim_type,
+                value=claim.value_json,
+                canonical_text=claim.canonical_text,
+                evidence_text=source_text,
+                evidence_context=source_text,
+                evidence_prefix="",
+                preceding_line=None,
+            )
+            current_record_sha256 = _profile_import_record_sha256(
+                claim_type=claim.claim_type,
+                value=claim.value_json,
+                canonical_text=claim.canonical_text,
+                subject_type=claim.subject_type,
+                subject_id=claim.subject_id,
+                confidence=claim.confidence,
+                sensitivity=claim.sensitivity,
+                scope=claim.scope,
+                source_ref=workflow.source_ref,
+                artifact_id=workflow.source_artifact_id,
+                locator=evidence.locator,
+                evidence_text=source_text,
+                extraction_method=workflow.extractor_id,
+            )
+            if current_record_sha256 != record.record_sha256:
+                raise ValueError("review projection digest is invalid")
+            review_token = _profile_review_token(
+                import_workflow_run_id=workflow.workflow_id,
+                proposal_index=proposal_index,
+                claim_id=record.claim_id,
+                evidence_id=record.evidence_id,
+                record_sha256=record.record_sha256,
+                workflow_input_sha256=workflow.input_sha256,
+                workflow_result_sha256=workflow.result_sha256,
+                association_created_at=_required_text(association, "created_at"),
+                link_created_at=_required_text(link, "created_at"),
+            )
+            decision = association.get("decision")
+            decided_at_text = association.get("decided_at")
+            decided_by = association.get("decided_by")
+            if decision is None:
+                projection_is_valid = (
+                    claim.status is ClaimStatus.NEEDS_REVIEW
+                    and claim.approval_status is ApprovalStatus.PENDING
+                    and claim.verified_at is None
+                    and claim.verified_by is None
+                    and evidence.confirmation_status
+                    is EvidenceConfirmationStatus.PENDING
+                    and evidence_record.get("confirmed_at") is None
+                    and evidence_record.get("confirmed_by") is None
+                    and _timestamp(claim.updated_at) == workflow.created_at
+                    and evidence_record.get("updated_at") == workflow.created_at
+                )
+            elif (
+                isinstance(decided_at_text, str)
+                and isinstance(decided_by, str)
+                and decided_by.strip()
+            ):
+                decided_at = _parse_timestamp(
+                    decided_at_text,
+                    field_name="review decided_at",
+                )
+                projection_is_valid = (
+                    decided_at is not None
+                    and _timestamp(claim.updated_at) == decided_at_text
+                    and evidence_record.get("updated_at") == decided_at_text
+                    and (
+                        (
+                            decision == ApprovalStatus.APPROVED.value
+                            and claim.status is ClaimStatus.VERIFIED
+                            and claim.approval_status is ApprovalStatus.APPROVED
+                            and claim.verified_at == decided_at
+                            and claim.verified_by == decided_by
+                            and evidence.confirmation_status
+                            is EvidenceConfirmationStatus.CONFIRMED
+                            and evidence_record.get("confirmed_at") == decided_at_text
+                            and evidence_record.get("confirmed_by") == decided_by
+                        )
+                        or (
+                            decision == ApprovalStatus.REJECTED.value
+                            and claim.status is ClaimStatus.WITHDRAWN
+                            and claim.approval_status is ApprovalStatus.REJECTED
+                            and claim.verified_at is None
+                            and claim.verified_by is None
+                            and evidence.confirmation_status
+                            is EvidenceConfirmationStatus.REJECTED
+                            and evidence_record.get("confirmed_at") is None
+                            and evidence_record.get("confirmed_by") is None
+                        )
+                    )
+                )
+            else:
+                projection_is_valid = False
+            if not projection_is_valid:
+                raise ValueError("review lifecycle projection is invalid")
+            return _ProfileImportReviewState(
+                workflow=workflow,
+                association=association,
+                record=record,
+                claim=claim,
+                evidence=evidence,
+                evidence_record=evidence_record,
+                link=link,
+                review_token=review_token,
+            )
+        except (TypeError, ValueError, IndexError) as error:
+            raise RepositoryError(
+                "Profile import review provenance failed integrity checks"
+            ) from error
+
     def create_import_proposal(
         self,
         request: CreateImportProposal,
@@ -1120,10 +1995,19 @@ class ProfileService:
         created_at_text = _timestamp(created_at)
         assert created_at_text is not None
         exact_spans = _validated_source_spans(request)
+        record_sha256s = tuple(
+            _profile_import_record_sha256_for_proposal(request, proposal, exact_text)
+            for proposal, exact_text in zip(
+                request.proposals,
+                exact_spans,
+                strict=True,
+            )
+        )
         stored_idempotency_key = _text_sha256(request.idempotency_key)
         workflow_input = _import_workflow_input(
             request,
             idempotency_key_sha256=stored_idempotency_key,
+            record_sha256s=record_sha256s,
         )
         request_sha256 = _import_request_sha256(workflow_input)
 
@@ -1157,8 +2041,13 @@ class ProfileService:
             claim_ids: list[str] = []
             evidence_items: list[Evidence] = []
             generated_records: list[dict[str, str]] = []
-            for index, (proposal, exact_text) in enumerate(
-                zip(request.proposals, exact_spans, strict=True)
+            for index, (proposal, exact_text, record_sha256) in enumerate(
+                zip(
+                    request.proposals,
+                    exact_spans,
+                    record_sha256s,
+                    strict=True,
+                )
             ):
                 claim_id, evidence_id = _profile_import_record_ids(workflow_id, index)
                 claim = self._create_claim(
@@ -1199,8 +2088,20 @@ class ProfileService:
                 )
                 claim_ids.append(claim.id)
                 evidence_items.append(evidence)
+                self._repository.add_profile_import_review_item(
+                    import_workflow_run_id=workflow_id,
+                    proposal_index=index,
+                    claim_id=claim.id,
+                    evidence_id=evidence.id,
+                    record_sha256=record_sha256,
+                    created_at=created_at_text,
+                )
                 generated_records.append(
-                    {"claim_id": claim.id, "evidence_id": evidence.id}
+                    {
+                        "claim_id": claim.id,
+                        "evidence_id": evidence.id,
+                        "record_sha256": record_sha256,
+                    }
                 )
 
             self._repository.update_workflow_run(
@@ -1271,71 +2172,398 @@ class ProfileService:
     def list_review_items(self) -> tuple[ProfileReviewItem, ...]:
         """Return the pending review queue without changing trust state."""
 
+        associations = self._repository.list_profile_import_review_items()
+        associations_by_claim: dict[str, Record] = {}
+        pending_import_states: dict[str, _ProfileImportReviewState] = {}
+        workflow_identities: dict[str, _ProfileImportWorkflowIdentity] = {}
+        items: list[ProfileReviewItem] = []
+        for association in associations:
+            claim_id = association.get("claim_id")
+            decision = association.get("decision")
+            if (
+                not isinstance(claim_id, str)
+                or claim_id in associations_by_claim
+                or decision not in {
+                    None,
+                    ApprovalStatus.APPROVED.value,
+                    ApprovalStatus.REJECTED.value,
+                }
+            ):
+                raise RepositoryError(
+                    "Profile import review association failed integrity checks"
+                )
+            associations_by_claim[claim_id] = association
+            if decision is not None:
+                continue
+            workflow_id = association.get("import_workflow_run_id")
+            workflow_identity: _ProfileImportWorkflowIdentity | None = None
+            if isinstance(workflow_id, str):
+                workflow_identity = workflow_identities.get(workflow_id)
+                if workflow_identity is None:
+                    workflow_identity = self._profile_import_workflow_identity(
+                        workflow_id
+                    )
+                    workflow_identities[workflow_id] = workflow_identity
+            state = self._profile_import_review_state(
+                claim_id,
+                workflow_identity=workflow_identity,
+            )
+            if state.association.get("decision") is not None:
+                raise RepositoryError(
+                    "Profile import review lifecycle failed integrity checks"
+                )
+            pending_import_states[claim_id] = state
+            items.append(
+                ProfileReviewItem(
+                    claim=state.claim,
+                    evidence=(state.evidence,),
+                    import_workflow_run_id=state.workflow.workflow_id,
+                    proposal_index=state.association["proposal_index"],
+                    review_token=state.review_token,
+                )
+            )
+
         claims = self.list_claims(
             status=ClaimStatus.NEEDS_REVIEW,
             approval_status=ApprovalStatus.PENDING,
         )
-        items: list[ProfileReviewItem] = []
+        listed_import_claim_ids: set[str] = set()
         for claim in claims:
-            item = ProfileReviewItem(
-                claim=claim,
-                evidence=self._evidence_for_claim(claim.id),
-            )
-            if claim.source_type is SourceType.IMPORTED_RESUME:
-                source_sha256 = _profile_import_source_digest(claim.source_ref)
-                assert source_sha256 is not None
-                evidence = item.evidence[0]
-                links = self._repository.list_claim_evidence(claim_id=claim.id)
-                evidence_record = self._repository.get_evidence(evidence.id)
-                if evidence_record is None:
+            import_association = associations_by_claim.get(claim.id)
+            if import_association is not None:
+                state = pending_import_states.get(claim.id)
+                if state is None:
                     raise RepositoryError(
-                        "Profile import review provenance failed integrity checks"
+                        "Profile import review lifecycle failed integrity checks"
                     )
-                try:
-                    evidence_metadata = _json_value(
-                        evidence_record.get("metadata_json"),
-                        field_name="evidence metadata_json",
-                    )
-                except (TypeError, ValueError) as error:
-                    raise RepositoryError(
-                        "Profile import review provenance failed integrity checks"
-                    ) from error
-                if (
-                    claim.effective_from is not None
-                    or claim.effective_to is not None
-                    or claim.supersedes_id is not None
-                    or len(links) != 1
-                    or links[0].get("evidence_id") != evidence.id
-                    or links[0].get("relationship") != "supports"
-                    or links[0].get("strength") != 1.0
-                    or links[0].get("note") is not None
-                    or evidence_metadata != {}
-                    or evidence_record.get("confirmed_at") is not None
-                    or evidence_record.get("confirmed_by") is not None
-                ):
-                    raise RepositoryError(
-                        "Profile import review provenance failed integrity checks"
-                    )
-                _, source_codepoint_size = _require_profile_import_source_artifact_record(
-                    self._repository.get_artifact(
-                        _profile_import_source_artifact_id(source_sha256)
-                    ),
-                    source_sha256=source_sha256,
-                    expected_byte_size=None,
-                    expected_codepoint_size=None,
+                listed_import_claim_ids.add(claim.id)
+                continue
+            elif claim.source_type is SourceType.IMPORTED_RESUME:
+                self._profile_import_review_state(claim.id)
+                raise RepositoryError(
+                    "Profile import review lifecycle failed integrity checks"
                 )
-                if any(
-                    not isinstance(evidence.locator, dict)
-                    or not isinstance(evidence.locator.get("end"), int)
-                    or isinstance(evidence.locator.get("end"), bool)
-                    or evidence.locator["end"] > source_codepoint_size
-                    for evidence in item.evidence
+            else:
+                item = ProfileReviewItem(
+                    claim=claim,
+                    evidence=self._evidence_for_claim(claim.id),
+                )
+            items.append(item)
+        if listed_import_claim_ids != set(pending_import_states):
+            raise RepositoryError(
+                "Profile import review lifecycle failed integrity checks"
+            )
+        return tuple(items)
+
+    def _profile_review_approval_contradiction(
+        self,
+        claim: Claim,
+        *,
+        decided_at: datetime,
+    ) -> Contradiction | None:
+        conflicts: list[Claim] = []
+        for existing in self.list_claims(claim_type=claim.claim_type):
+            if (
+                existing.id == claim.id
+                or existing.subject_type != claim.subject_type
+                or existing.subject_id != claim.subject_id
+                or not _scopes_overlap(existing.scope, claim.scope)
+                or not _claim_is_active_at(existing, decided_at)
+                or existing.status in {
+                    ClaimStatus.SUPERSEDED,
+                    ClaimStatus.WITHDRAWN,
+                }
+            ):
+                continue
+            if existing.status is ClaimStatus.CONTRADICTED:
+                conflicts.append(existing)
+        if not conflicts:
+            return None
+        if any(item.sensitivity is not Sensitivity.PUBLIC for item in conflicts):
+            raise RepositoryError(
+                "Profile review approval is blocked by an unresolved sensitive claim"
+            )
+        return Contradiction(
+            intent=claim.claim_type,
+            question=(
+                "Resolve the existing conflicting claim before approving this "
+                "imported proposal."
+            ),
+            requested_scope=claim.scope,
+            conflicting_claims=tuple(conflicts),
+            detail=(
+                "Approval was not recorded because the same subject and claim type "
+                "has an active, overlapping, explicitly contradicted record. This "
+                "does not infer that the imported proposal is its opposing fact."
+            ),
+        )
+
+    def _profile_review_decision_result_from_state(
+        self,
+        state: _ProfileImportReviewState,
+    ) -> ProfileReviewDecisionResult:
+        """Validate the append-only decision workflow against its projection."""
+
+        association = state.association
+        try:
+            decision = ApprovalStatus(_required_text(association, "decision"))
+            if decision not in {ApprovalStatus.APPROVED, ApprovalStatus.REJECTED}:
+                raise ValueError("review decision is invalid")
+            decision_workflow_id = _required_text(
+                association,
+                "decision_workflow_run_id",
+            )
+            actor_id = _required_text(association, "decided_by")
+            decided_at = _required_timestamp(association, "decided_at")
+            workflow = self._repository.get_workflow_run(decision_workflow_id)
+            if workflow is None:
+                raise ValueError("decision workflow is missing")
+            workflow_input = _canonical_stored_json(
+                workflow.get("input_json"),
+                field_name="review workflow input_json",
+            )
+            completed_steps = _canonical_stored_json(
+                workflow.get("completed_steps_json"),
+                field_name="review workflow completed_steps_json",
+            )
+            result_manifest = _canonical_stored_json(
+                workflow.get("generated_artifacts_json"),
+                field_name="review workflow generated_artifacts_json",
+            )
+            outstanding_need_info = _canonical_stored_json(
+                workflow.get("outstanding_need_info_json"),
+                field_name="review workflow outstanding_need_info_json",
+            )
+            retry_policy = _canonical_stored_json(
+                workflow.get("retry_policy_json"),
+                field_name="review workflow retry_policy_json",
+            )
+            if not isinstance(workflow_input, dict):
+                raise ValueError("review workflow input is not an object")
+            expected_fields = {
+                "review_decision_schema_version",
+                "review_result_schema_version",
+                "record_digest_schema_version",
+                "content_policy_version",
+                "restricted_taxonomy_version",
+                "restricted_taxonomy_sha256",
+                "value_schema_version",
+                "import_workflow_run_id",
+                "import_workflow_input_sha256",
+                "import_workflow_result_sha256",
+                "proposal_index",
+                "claim_id",
+                "evidence_id",
+                "record_sha256",
+                "review_token",
+                "decision",
+                "actor_id",
+                "idempotency_key_sha256",
+            }
+            idempotency_key_sha256 = workflow_input.get("idempotency_key_sha256")
+            expected_result: dict[str, JsonValue] = {
+                "schema_version": PROFILE_IMPORT_REVIEW_RESULT_SCHEMA_VERSION,
+                "import_workflow_run_id": state.workflow.workflow_id,
+                "proposal_index": association.get("proposal_index"),
+                "claim_id": state.record.claim_id,
+                "evidence_id": state.record.evidence_id,
+                "record_sha256": state.record.record_sha256,
+                "decision": decision.value,
+            }
+            if (
+                set(workflow_input) != expected_fields
+                or workflow_input.get("review_decision_schema_version")
+                != PROFILE_IMPORT_REVIEW_DECISION_SCHEMA_VERSION
+                or workflow_input.get("review_result_schema_version")
+                != PROFILE_IMPORT_REVIEW_RESULT_SCHEMA_VERSION
+                or workflow_input.get("record_digest_schema_version")
+                != PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION
+                or workflow_input.get("content_policy_version")
+                != PROFILE_IMPORT_CONTENT_POLICY_VERSION
+                or workflow_input.get("restricted_taxonomy_version")
+                != PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION
+                or workflow_input.get("restricted_taxonomy_sha256")
+                != PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256
+                or workflow_input.get("value_schema_version")
+                != PROFILE_IMPORT_VALUE_SCHEMA_VERSION
+                or workflow_input.get("import_workflow_run_id")
+                != state.workflow.workflow_id
+                or workflow_input.get("import_workflow_input_sha256")
+                != state.workflow.input_sha256
+                or workflow_input.get("import_workflow_result_sha256")
+                != state.workflow.result_sha256
+                or workflow_input.get("proposal_index")
+                != association.get("proposal_index")
+                or workflow_input.get("claim_id") != state.record.claim_id
+                or workflow_input.get("evidence_id") != state.record.evidence_id
+                or workflow_input.get("record_sha256")
+                != state.record.record_sha256
+                or workflow_input.get("review_token") != state.review_token
+                or workflow_input.get("decision") != decision.value
+                or workflow_input.get("actor_id") != actor_id
+                or not isinstance(idempotency_key_sha256, str)
+                or _SHA256_PATTERN.fullmatch(idempotency_key_sha256) is None
+                or workflow.get("idempotency_key") != idempotency_key_sha256
+                or workflow.get("input_hash_sha256")
+                != _text_sha256(_json_identity(workflow_input))
+                or result_manifest != expected_result
+            ):
+                raise ValueError("review workflow identity is invalid")
+            decided_at_text = _timestamp(decided_at)
+            if (
+                workflow.get("id") != decision_workflow_id
+                or not _is_canonical_uuid(decision_workflow_id, version=4)
+                or workflow.get("workflow_type") != _PROFILE_IMPORT_REVIEW_WORKFLOW
+                or workflow.get("status") != "succeeded"
+                or workflow.get("current_step") != "decision_recorded"
+                or completed_steps
+                != [
+                    "validate_import_provenance",
+                    "validate_review_token",
+                    "validate_decision_policy",
+                    "persist_review_decision",
+                ]
+                or outstanding_need_info != []
+                or retry_policy != {}
+                or workflow.get("model_name") is not None
+                or workflow.get("prompt_version") is not None
+                or workflow.get("failure_code") is not None
+                or workflow.get("failure_reason") is not None
+                or workflow.get("created_at") != decided_at_text
+                or workflow.get("started_at") != decided_at_text
+                or workflow.get("finished_at") != decided_at_text
+            ):
+                raise ValueError("review workflow checkpoint is invalid")
+            _required_timestamp(workflow, "updated_at")
+            proposal_index = association.get("proposal_index")
+            if type(proposal_index) is not int:
+                raise ValueError("review proposal index is invalid")
+            return ProfileReviewDecisionResult(
+                decision_workflow_run_id=decision_workflow_id,
+                import_workflow_run_id=state.workflow.workflow_id,
+                proposal_index=proposal_index,
+                decision=decision,
+                actor_id=actor_id,
+                decided_at=decided_at,
+                claim=state.claim,
+                evidence=state.evidence,
+            )
+        except (TypeError, ValueError, KeyError) as error:
+            raise RepositoryError(
+                "Profile import review decision audit failed integrity checks"
+            ) from error
+
+    def decide_review_item(
+        self,
+        request: CreateProfileReviewDecision,
+        *,
+        now: datetime | None = None,
+    ) -> ProfileReviewDecisionResult | Contradiction:
+        """Approve or reject one imported proposal through an audited transition."""
+
+        if not isinstance(request, CreateProfileReviewDecision):
+            raise TypeError("request must be a CreateProfileReviewDecision")
+        decided_at = now or utc_now()
+        decided_at_text = _timestamp(decided_at)
+        assert decided_at_text is not None
+        stored_idempotency_key = _text_sha256(request.idempotency_key)
+
+        with self._repository.transaction():
+            state = self._profile_import_review_state(request.claim_id)
+            if request.review_token != state.review_token:
+                raise ValueError("review token is stale or does not match the review item")
+            workflow_input = _profile_review_workflow_input(
+                request,
+                state,
+                idempotency_key_sha256=stored_idempotency_key,
+            )
+            request_sha256 = _text_sha256(_json_identity(workflow_input))
+            existing_workflow = self._repository.get_workflow_run_by_idempotency_key(
+                _PROFILE_IMPORT_REVIEW_WORKFLOW,
+                stored_idempotency_key,
+            )
+            if state.association.get("decision") is not None:
+                if existing_workflow is None:
+                    raise RepositoryError("Profile import review item is already decided")
+                workflow = self._repository.add_workflow_run(
+                    workflow_type=_PROFILE_IMPORT_REVIEW_WORKFLOW,
+                    status="running",
+                    idempotency_key=stored_idempotency_key,
+                    input_hash_sha256=request_sha256,
+                    input_data=workflow_input,
+                    current_step="persist_review_decision",
+                    created_at=decided_at_text,
+                )
+                if workflow.get("id") != state.association.get(
+                    "decision_workflow_run_id"
                 ):
                     raise RepositoryError(
-                        "Profile import review provenance failed integrity checks"
+                        "Profile import review decision does not match its audit"
                     )
-            items.append(item)
-        return tuple(items)
+                return self._profile_review_decision_result_from_state(state)
+            import_created_at = _parse_timestamp(
+                state.workflow.created_at,
+                field_name="import workflow created_at",
+            )
+            assert import_created_at is not None
+            if decided_at < import_created_at:
+                raise ValueError("review decision time cannot precede the import")
+            if existing_workflow is not None:
+                self._repository.add_workflow_run(
+                    workflow_type=_PROFILE_IMPORT_REVIEW_WORKFLOW,
+                    status="running",
+                    idempotency_key=stored_idempotency_key,
+                    input_hash_sha256=request_sha256,
+                    input_data=workflow_input,
+                    current_step="persist_review_decision",
+                    created_at=decided_at_text,
+                )
+                raise RepositoryError(
+                    "Profile import review decision audit is not terminal"
+                )
+            if request.decision is ApprovalStatus.APPROVED:
+                if state.claim.sensitivity is not Sensitivity.PERSONAL:
+                    raise ValueError(
+                        "Sensitive imported proposals cannot be approved by this workflow"
+                    )
+                contradiction = self._profile_review_approval_contradiction(
+                    state.claim,
+                    decided_at=decided_at,
+                )
+                if contradiction is not None:
+                    return contradiction
+            workflow = self._repository.add_workflow_run(
+                workflow_type=_PROFILE_IMPORT_REVIEW_WORKFLOW,
+                status="running",
+                idempotency_key=stored_idempotency_key,
+                input_hash_sha256=request_sha256,
+                input_data=workflow_input,
+                current_step="persist_review_decision",
+                created_at=decided_at_text,
+            )
+            decision_workflow_id = _required_text(workflow, "id")
+            self._repository.decide_profile_import_review_item(
+                request.claim_id,
+                decision=request.decision.value,
+                decision_workflow_run_id=decision_workflow_id,
+                decided_by=request.actor_id,
+                decided_at=decided_at_text,
+            )
+            self._repository.update_workflow_run(
+                decision_workflow_id,
+                status="succeeded",
+                current_step="decision_recorded",
+                completed_steps=(
+                    "validate_import_provenance",
+                    "validate_review_token",
+                    "validate_decision_policy",
+                    "persist_review_decision",
+                ),
+                generated_artifacts=_profile_review_result_manifest(request, state),
+                finished_at=decided_at_text,
+            )
+            decided_state = self._profile_import_review_state(request.claim_id)
+            return self._profile_review_decision_result_from_state(decided_state)
 
     def resolve(
         self,
@@ -1346,13 +2574,50 @@ class ProfileService:
         requested_sensitivity: Sensitivity = Sensitivity.PERSONAL,
     ) -> ResolutionOutcome:
         claims = self.list_claims()
-        evidence = tuple(
-            item
-            for claim in claims
-            for item in self._evidence_for_claim(claim.id)
-        )
+        validated_claims: list[Claim] = []
+        evidence: list[Evidence] = []
+        workflow_identities: dict[str, _ProfileImportWorkflowIdentity] = {}
+        for claim in claims:
+            import_association = (
+                self._repository.get_profile_import_review_item(claim.id)
+            )
+            if (
+                import_association is None
+                and claim.source_type is SourceType.IMPORTED_RESUME
+                and claim.status is ClaimStatus.NEEDS_REVIEW
+                and claim.approval_status is ApprovalStatus.PENDING
+                and claim.verified_at is None
+                and claim.verified_by is None
+            ):
+                validated_claims.append(claim)
+                continue
+            if (
+                import_association is not None
+                or claim.source_type is SourceType.IMPORTED_RESUME
+            ):
+                workflow_identity: _ProfileImportWorkflowIdentity | None = None
+                if import_association is not None:
+                    workflow_id = import_association.get("import_workflow_run_id")
+                    if isinstance(workflow_id, str):
+                        workflow_identity = workflow_identities.get(workflow_id)
+                        if workflow_identity is None:
+                            workflow_identity = self._profile_import_workflow_identity(
+                                workflow_id
+                            )
+                            workflow_identities[workflow_id] = workflow_identity
+                state = self._profile_import_review_state(
+                    claim.id,
+                    workflow_identity=workflow_identity,
+                )
+                if state.association.get("decision") is not None:
+                    self._profile_review_decision_result_from_state(state)
+                validated_claims.append(state.claim)
+                evidence.append(state.evidence)
+                continue
+            validated_claims.append(claim)
+            evidence.extend(self._evidence_for_claim(claim.id))
         return resolve_claims(
-            claims,
+            validated_claims,
             intent=intent,
             policy=policy,
             evidence=evidence,
@@ -1370,171 +2635,66 @@ class ProfileService:
         workflow_id = _required_text(workflow, "id")
         if not _is_canonical_uuid(workflow_id, version=4):
             raise RepositoryError("Profile import proposal checkpoint identity is invalid")
-        try:
-            completed_steps = _json_value(
-                workflow.get("completed_steps_json"),
-                field_name="completed_steps_json",
-            )
-            outstanding_need_info = _json_value(
-                workflow.get("outstanding_need_info_json"),
-                field_name="outstanding_need_info_json",
-            )
-            retry_policy = _json_value(
-                workflow.get("retry_policy_json"),
-                field_name="retry_policy_json",
-            )
-        except (TypeError, ValueError) as error:
-            raise RepositoryError(
-                f"Profile import proposal checkpoint is malformed: {workflow_id}"
-            ) from error
-        if (
-            workflow.get("status") != "succeeded"
-            or workflow.get("current_step") != "awaiting_review"
-            or completed_steps
-            != [
-                "validate_source_binding",
-                "validate_source_spans",
-                "persist_source_identity",
-                "persist_reviewable_claims",
-            ]
-            or outstanding_need_info != []
-            or retry_policy != {}
-            or workflow.get("model_name") is not None
-            or workflow.get("prompt_version") is not None
-            or workflow.get("failure_code") is not None
-            or workflow.get("failure_reason") is not None
-            or workflow.get("started_at") != workflow.get("created_at")
-            or workflow.get("finished_at") != workflow.get("created_at")
-        ):
-            raise RepositoryError(
-                f"Profile import proposal is not safely retryable: {workflow_id}"
-            )
-        stored_manifest = _json_value(
-            workflow.get("generated_artifacts_json"),
-            field_name="generated_artifacts_json",
-        )
-        if (
-            not isinstance(stored_manifest, dict)
-            or set(stored_manifest)
-            != {"schema_version", "source_artifact_id", "records"}
-            or stored_manifest.get("schema_version")
-            != PROFILE_IMPORT_RESULT_MANIFEST_SCHEMA_VERSION
-            or stored_manifest.get("source_artifact_id")
-            != request.source_artifact_id
-            or not isinstance(stored_manifest.get("records"), list)
-        ):
-            raise RepositoryError(
-                f"Profile import proposal result does not match its request: {workflow_id}"
-            )
-        stored_items = stored_manifest["records"]
-        assert isinstance(stored_items, list)
-        if len(stored_items) != len(request.proposals):
-            raise RepositoryError(
-                f"Profile import proposal result does not match its request: {workflow_id}"
-            )
-
-        claims: list[Claim] = []
-        evidence_items: list[Evidence] = []
-        seen_claim_ids: set[str] = set()
-        seen_evidence_ids: set[str] = set()
-        for index, (item, proposal, exact_text) in enumerate(
-            zip(
-                stored_items,
+        identity = self._profile_import_workflow_identity(workflow_id)
+        expected_record_sha256s = tuple(
+            _profile_import_record_sha256_for_proposal(request, proposal, exact_text)
+            for proposal, exact_text in zip(
                 request.proposals,
                 exact_spans,
                 strict=True,
             )
+        )
+        if (
+            identity.source_sha256 != request.source_sha256
+            or identity.source_ref != request.source_ref
+            or identity.source_artifact_id != request.source_artifact_id
+            or identity.extractor_id != request.extractor_id
+            or identity.source_byte_size != len(request.source_text.encode("utf-8"))
+            or identity.source_codepoint_size != len(request.source_text)
+            or len(identity.records) != len(request.proposals)
+            or tuple(record.record_sha256 for record in identity.records)
+            != expected_record_sha256s
         ):
-            if not isinstance(item, dict):
-                raise RepositoryError(
-                    f"Profile import proposal result is malformed: {workflow_id}"
-                )
-            if set(item) != {"claim_id", "evidence_id"}:
-                raise RepositoryError(
-                    f"Profile import proposal result is malformed: {workflow_id}"
-                )
-            claim_id = item.get("claim_id")
-            evidence_id = item.get("evidence_id")
-            if not isinstance(claim_id, str) or not isinstance(evidence_id, str):
-                raise RepositoryError(
-                    f"Profile import proposal result is malformed: {workflow_id}"
-                )
-            expected_claim_id, expected_evidence_id = _profile_import_record_ids(
-                workflow_id,
-                index,
+            raise RepositoryError(
+                f"Profile import proposal result does not match its request: {workflow_id}"
             )
-            if (claim_id, evidence_id) != (expected_claim_id, expected_evidence_id):
-                raise RepositoryError(
-                    "Profile import proposal record identities are invalid: "
-                    f"{workflow_id}"
-                )
-            if claim_id in seen_claim_ids or evidence_id in seen_evidence_ids:
-                raise RepositoryError(
-                    f"Profile import proposal result contains duplicates: {workflow_id}"
-                )
-            seen_claim_ids.add(claim_id)
-            seen_evidence_ids.add(evidence_id)
-            claim = self.get_claim(claim_id)
-            links = self._repository.list_claim_evidence(claim_id=claim_id)
-            linked_evidence = self._evidence_for_claim(claim_id)
-            if (
-                len(links) != 1
-                or links[0].get("claim_id") != claim_id
-                or links[0].get("evidence_id") != evidence_id
-                or links[0].get("relationship") != "supports"
-                or links[0].get("strength") != 1.0
-                or links[0].get("note") is not None
-                or len(linked_evidence) != 1
-                or linked_evidence[0].id != evidence_id
-                or claim.evidence_ids != (evidence_id,)
-            ):
-                raise RepositoryError(
-                    f"Profile import proposal evidence links are invalid: {workflow_id}"
-                )
-            evidence = linked_evidence[0]
-            evidence_record = self._repository.get_evidence(evidence_id)
-            assert evidence_record is not None
-            try:
-                evidence_metadata = _json_value(
-                    evidence_record.get("metadata_json"),
-                    field_name="evidence metadata_json",
-                )
-            except (TypeError, ValueError) as error:
-                raise RepositoryError(
-                    f"Profile import proposal evidence is malformed: {workflow_id}"
-                ) from error
+        claims: list[Claim] = []
+        evidence_items: list[Evidence] = []
+        for record, proposal, exact_text in zip(
+            identity.records,
+            request.proposals,
+            exact_spans,
+            strict=True,
+        ):
+            state = self._profile_import_review_state(
+                record.claim_id,
+                workflow_identity=identity,
+            )
             expected_locator = _text_span_locator(
                 proposal.span,
                 request.source_sha256,
             )
             if (
-                claim.claim_type != proposal.claim_type
-                or _json_identity(claim.value_json) != _json_identity(proposal.value)
-                or claim.canonical_text != proposal.canonical_text
-                or claim.subject_type != proposal.subject_type
-                or claim.subject_id != proposal.subject_id
-                or claim.confidence != proposal.confidence
-                or claim.sensitivity is not _import_sensitivity(proposal)
-                or claim.scope != proposal.scope
-                or claim.source_ref != request.source_ref
-                or claim.effective_from is not None
-                or claim.effective_to is not None
-                or claim.supersedes_id is not None
-                or evidence.artifact_id != request.source_artifact_id
-                or evidence.locator != expected_locator
-                or evidence.source_text != exact_text
-                or evidence.extraction_method != request.extractor_id
-                or evidence.checksum != _text_sha256(exact_text)
-                or evidence.source_ref != request.source_ref
-                or evidence_metadata != {}
-                or evidence_record.get("confirmed_at") is not None
-                or evidence_record.get("confirmed_by") is not None
+                state.claim.claim_type != proposal.claim_type
+                or _json_identity(state.claim.value_json)
+                != _json_identity(proposal.value)
+                or state.claim.canonical_text != proposal.canonical_text
+                or state.claim.subject_type != proposal.subject_type
+                or state.claim.subject_id != proposal.subject_id
+                or state.claim.confidence != proposal.confidence
+                or state.claim.sensitivity is not _import_sensitivity(proposal)
+                or state.claim.scope != proposal.scope
+                or state.evidence.locator != expected_locator
+                or state.evidence.source_text != exact_text
+                or state.evidence.checksum != _text_sha256(exact_text)
             ):
                 raise RepositoryError(
                     f"Profile import proposal result failed integrity checks: {workflow_id}"
                 )
-            claims.append(claim)
-            evidence_items.append(evidence)
+            if state.association.get("decision") is not None:
+                self._profile_review_decision_result_from_state(state)
+            claims.append(state.claim)
+            evidence_items.append(state.evidence)
 
         return ImportProposalResult(
             workflow_run_id=workflow_id,

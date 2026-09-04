@@ -17,9 +17,11 @@ real candidate data until the relevant privacy, persistence, export, and deletio
 controls are implemented and verified.
 
 The current scaffold can validate and persist strictly structured text-import
-proposals, then display their pending claims and exact selected evidence through a
-read-only review command. It does not extract claims from a resume, approve or
-reject proposals, or make imported facts usable.
+proposals, display their pending claims and exact selected evidence through a
+read-only CLI review command, and apply an explicit approve/reject decision
+through the typed application service. It does not extract claims from a resume,
+offer a CLI decision command, edit proposals, or resolve contradictions for the
+user.
 
 The single live checkpoint is [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md).
 It records what is actually implemented, the last verification results, known
@@ -110,14 +112,16 @@ criminal/legal attestations, conflicts of interest, demographic
 self-identification, government identifiers, and authentication credentials.
 The taxonomy uses deterministic high-confidence context, exact-assignment, and
 label rules, plus fixed-point percent decoding and bounded fragmentation checks.
-Its version and canonical SHA-256 are recorded in request-identity schema 3.
+Its version and canonical SHA-256 are recorded in request-identity schema 4.
 These checks are defense in depth, not complete semantic, secret, or PII
 classification. Manifest, request, value, content-policy, restricted-taxonomy,
-locator, result-manifest, source-identity, and record-ID versions are bound into
-the workflow audit identity. Claim and evidence IDs are deterministically bound
-to the creating workflow and proposal position, and an idempotent retry
-revalidates the checkpoint, source artifact, result manifest, links, and stored
-records before returning them.
+locator, result-manifest, source-identity, record-ID, and record-digest versions
+are bound into the workflow audit identity. Claim and evidence IDs are
+deterministically bound to the creating workflow and proposal position. Each
+immutable claim/evidence projection has a stable digest in result-manifest schema
+3 and a durable schema-2 review association. An idempotent retry revalidates the
+checkpoint, source artifact, ordered result records, association, links, and
+stored content before returning them.
 
 Raw source text is used in memory for digest, span, context, and whole-source
 checks but is not persisted or globally sensitive-pattern scanned. From the
@@ -136,22 +140,40 @@ group/other access, if the database target escapes its data directory, or if a
 portable runtime child escapes `GROUNDED_APPLY_HOME`.
 
 `profile review` is physically read-only. Its output contains untrusted candidate
-content for inspection, clearly marks every item unusable, and cannot record an
-approval or rejection. Before display it revalidates the path-free source
-artifact, registered ingress, one-to-one evidence link, locator digest and
-bounds, and selected-text checksum. Generic claim/evidence mutation APIs reject
-`imported_resume`; only the import workflow can create that provenance.
+content for inspection, clearly marks every item unusable, and exposes the
+creating workflow ID, proposal index, and a stale-safe review token; it cannot
+record an approval or rejection. Before display it revalidates the exact current
+import workflow/result identity, path-free source artifact, registered ingress,
+unique one-to-one evidence link, immutable record digest, locator bounds,
+selected-text checksum, and current content policy. Generic claim/evidence
+mutation APIs reject `imported_resume`; only the import workflow can create that
+provenance.
 
-Manifest version 1, request-identity versions 1–2, content-policy version 1, and
-the former public `CreateImportProposal` shape are intentionally unsupported.
-Current imports use manifest 2, request identity 3, content policy 2, and
-restricted taxonomy 1. Regenerate manifest-v1 input; for a manifest-v2 workflow
-created under the earlier policy, use a fresh opaque idempotency key in
-disposable synthetic state. There is no automatic policy migration or
-reclassification. Legacy path-provenance rows fail review closed. Earlier-policy
-rows remain pending and unusable, but the read-only review path does not yet
-taxonomy-revalidate them because it is not bound to their workflow/result
-identity.
+The typed `ProfileService.decide_review_item` boundary can approve or reject one
+imported item atomically. It requires the review token, an opaque actor, and an
+idempotency key; stores only IDs, hashes, decision, actor, and time in its audit;
+and revalidates provenance and content before changing trust state. Approval
+transitions the claim/evidence pair to verified/approved and confirmed. Rejection
+preserves it as withdrawn/rejected history. Confidential and highly sensitive
+imports cannot be approved through this boundary. An active same-subject
+explicitly contradicted record blocks approval, but the service does not
+preemptively reject a distinct value solely because it differs. Existing claim
+resolution still returns `Contradiction` when multiple approved value groups
+compete for one intent. Approved imported claims are revalidated again before
+they may enter a resolved claim packet. The unkeyed record hashes provide
+consistency and stale-review detection; they are not authentication against an
+attacker who can rewrite the database and recompute every related hash.
+
+Manifest version 1, request-identity versions 1–3, result-manifest versions 1–2,
+content-policy version 1, and the former public `CreateImportProposal` shape are
+intentionally unsupported. Current imports use manifest 2, request identity 4,
+result manifest 3, record digest 1, content policy 2, restricted taxonomy 1, and
+database schema 2. Migration 002 upgrades the schema but deliberately does not
+invent review associations or record digests for earlier imports. Regenerate
+manifest-v1 input; for an earlier manifest-v2 workflow, use a fresh opaque
+idempotency key in disposable synthetic state. There is no automatic policy
+migration or reclassification. Legacy or earlier-policy rows remain unusable and
+fail review/decision closed rather than being promoted or repaired.
 
 ## Product shape
 

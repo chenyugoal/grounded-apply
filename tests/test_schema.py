@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import stat
 import tempfile
@@ -107,6 +108,59 @@ class SchemaMigrationTests(unittest.TestCase):
 
             self.assertEqual(versions, [LATEST_SCHEMA_VERSION] * worker_count)
             self.assertEqual(inspect_schema(database), LATEST_SCHEMA_VERSION)
+
+    def test_version_one_database_upgrades_without_rewriting_the_initial_migration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "version-one.db"
+            connection = self.connect(database)
+            self.addCleanup(connection.close)
+            migrations = default_migrations_directory()
+            first_path = migrations / "001_initial.sql"
+            first_sql = first_path.read_text(encoding="utf-8")
+            connection.executescript(first_sql)
+            connection.execute(
+                """
+                INSERT INTO schema_migrations (
+                    version,
+                    name,
+                    checksum_sha256,
+                    applied_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    1,
+                    first_path.name,
+                    hashlib.sha256(first_sql.encode("utf-8")).hexdigest(),
+                    "2026-08-11T12:00:00Z",
+                ),
+            )
+            connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_schema "
+                    "WHERE type = 'table' AND name = 'profile_import_review_items'"
+                ).fetchone()
+            )
+
+            version = initialize_schema(connection, migrations)
+
+            self.assertEqual(version, 2)
+            self.assertIsNotNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_schema "
+                    "WHERE type = 'table' AND name = 'profile_import_review_items'"
+                ).fetchone()
+            )
+            applied = connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            self.assertEqual(
+                applied,
+                [(1, "001_initial.sql"), (2, "002_profile_import_review_items.sql")],
+            )
 
 
 if __name__ == "__main__":

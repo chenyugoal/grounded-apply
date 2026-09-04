@@ -15,6 +15,52 @@ from grounded_apply.repositories import (
 )
 
 
+IMPORT_TIME = "2026-08-11T12:00:00Z"
+DECISION_TIME = "2026-08-11T13:00:00Z"
+
+
+def add_import_review_fixture(
+    repository: SQLiteRepository,
+    *,
+    suffix: str,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]:
+    workflow = repository.add_workflow_run(
+        run_id=f"import-workflow-{suffix}",
+        workflow_type="profile_import_proposal",
+        status="succeeded",
+        input_data={"fixture": suffix},
+        current_step="awaiting_review",
+        created_at=IMPORT_TIME,
+    )
+    claim = repository.add_claim(
+        claim_id=f"import-claim-{suffix}",
+        claim_type="skill_use",
+        value="Python",
+        canonical_text="Used Python in a fictional project",
+        source_type="imported_resume",
+        source_ref=f"sha256:{'a' * 64}",
+        created_at=IMPORT_TIME,
+    )
+    evidence = repository.add_evidence(
+        evidence_id=f"import-evidence-{suffix}",
+        claim_id=str(claim["id"]),
+        source_type="imported_resume",
+        source_ref=f"sha256:{'a' * 64}",
+        source_text="Synthetic selected evidence",
+        extraction_method="grounded-apply.profile-import.manifest@1",
+        created_at=IMPORT_TIME,
+    )
+    review_item = repository.add_profile_import_review_item(
+        import_workflow_run_id=str(workflow["id"]),
+        proposal_index=0,
+        claim_id=str(claim["id"]),
+        evidence_id=str(evidence["id"]),
+        record_sha256="b" * 64,
+        created_at=IMPORT_TIME,
+    )
+    return workflow, claim, evidence, review_item
+
+
 class SQLiteRepositoryTests(unittest.TestCase):
     def test_data_access_requires_explicit_initialization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -229,6 +275,249 @@ class SQLiteRepositoryTests(unittest.TestCase):
             self.assertIsNotNone(stored)
             assert stored is not None
             self.assertEqual(stored["canonical_text"], created["canonical_text"])
+
+    def test_profile_import_review_association_is_unique_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with SQLiteRepository(Path(directory) / "profile.db") as repository:
+                workflow, claim, evidence, first = add_import_review_fixture(
+                    repository,
+                    suffix="association",
+                )
+
+                with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+                    repository.add_profile_import_review_item(
+                        import_workflow_run_id=str(workflow["id"]),
+                        proposal_index=0,
+                        claim_id=str(claim["id"]),
+                        evidence_id=str(evidence["id"]),
+                        record_sha256="B" * 64,
+                    )
+
+                replay = repository.add_profile_import_review_item(
+                    import_workflow_run_id=str(workflow["id"]),
+                    proposal_index=0,
+                    claim_id=str(claim["id"]),
+                    evidence_id=str(evidence["id"]),
+                    record_sha256="b" * 64,
+                    created_at=DECISION_TIME,
+                )
+
+                self.assertEqual(replay, first)
+                self.assertEqual(first["record_sha256"], "b" * 64)
+                self.assertIsNone(first["decision"])
+                self.assertEqual(first["updated_at"], first["created_at"])
+                self.assertEqual(claim["updated_at"], claim["created_at"])
+                self.assertEqual(evidence["updated_at"], evidence["created_at"])
+                self.assertEqual(
+                    repository.get_profile_import_review_item(str(claim["id"])),
+                    first,
+                )
+                self.assertEqual(
+                    repository.list_profile_import_review_items(
+                        import_workflow_run_id=str(workflow["id"])
+                    ),
+                    [first],
+                )
+
+                with self.assertRaisesRegex(RepositoryError, "another record"):
+                    repository.add_profile_import_review_item(
+                        import_workflow_run_id=str(workflow["id"]),
+                        proposal_index=1,
+                        claim_id=str(claim["id"]),
+                        evidence_id=str(evidence["id"]),
+                        record_sha256="c" * 64,
+                    )
+
+    def test_profile_import_review_approval_updates_one_audited_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with SQLiteRepository(Path(directory) / "profile.db") as repository:
+                _, claim, evidence, _ = add_import_review_fixture(
+                    repository,
+                    suffix="approval",
+                )
+                decision_workflow = repository.add_workflow_run(
+                    run_id="decision-workflow-approval",
+                    workflow_type="profile_import_review_decision",
+                    status="running",
+                    idempotency_key="decision-approval",
+                    input_data={"claim_id": claim["id"], "decision": "approved"},
+                    created_at=DECISION_TIME,
+                )
+
+                decided = repository.decide_profile_import_review_item(
+                    str(claim["id"]),
+                    decision="approved",
+                    decision_workflow_run_id=str(decision_workflow["id"]),
+                    decided_by="synthetic-user",
+                    decided_at=DECISION_TIME,
+                )
+                replay = repository.decide_profile_import_review_item(
+                    str(claim["id"]),
+                    decision="approved",
+                    decision_workflow_run_id=str(decision_workflow["id"]),
+                    decided_by="synthetic-user",
+                    decided_at=DECISION_TIME,
+                )
+
+                stored_claim = repository.get_claim(str(claim["id"]))
+                stored_evidence = repository.get_evidence(str(evidence["id"]))
+                self.assertEqual(replay, decided)
+                self.assertEqual(decided["decision"], "approved")
+                self.assertEqual(decided["decided_by"], "synthetic-user")
+                self.assertEqual(decided["decided_at"], DECISION_TIME)
+                self.assertEqual(decided["updated_at"], DECISION_TIME)
+                self.assertEqual(
+                    repository.list_profile_import_review_items(decision="approved"),
+                    [decided],
+                )
+                assert stored_claim is not None and stored_evidence is not None
+                self.assertEqual(
+                    (
+                        stored_claim["status"],
+                        stored_claim["approval_status"],
+                        stored_claim["verified_at"],
+                        stored_claim["verified_by"],
+                    ),
+                    ("verified", "approved", DECISION_TIME, "synthetic-user"),
+                )
+                self.assertEqual(stored_claim["updated_at"], DECISION_TIME)
+                self.assertEqual(
+                    (
+                        stored_evidence["confirmation_status"],
+                        stored_evidence["confirmed_at"],
+                        stored_evidence["confirmed_by"],
+                    ),
+                    ("confirmed", DECISION_TIME, "synthetic-user"),
+                )
+                self.assertEqual(stored_evidence["updated_at"], DECISION_TIME)
+                with self.assertRaisesRegex(RepositoryError, "already decided"):
+                    repository.decide_profile_import_review_item(
+                        str(claim["id"]),
+                        decision="approved",
+                        decision_workflow_run_id=str(decision_workflow["id"]),
+                        decided_by="synthetic-user",
+                        decided_at="2026-08-11T14:00:00Z",
+                    )
+
+    def test_profile_import_review_rejection_preserves_unverified_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with SQLiteRepository(Path(directory) / "profile.db") as repository:
+                _, claim, evidence, _ = add_import_review_fixture(
+                    repository,
+                    suffix="rejection",
+                )
+                decision_workflow = repository.add_workflow_run(
+                    run_id="decision-workflow-rejection",
+                    workflow_type="profile_import_review_decision",
+                    status="running",
+                    idempotency_key="decision-rejection",
+                    input_data={"claim_id": claim["id"], "decision": "rejected"},
+                    created_at=DECISION_TIME,
+                )
+
+                decided = repository.decide_profile_import_review_item(
+                    str(claim["id"]),
+                    decision="rejected",
+                    decision_workflow_run_id=str(decision_workflow["id"]),
+                    decided_by="synthetic-user",
+                    decided_at=DECISION_TIME,
+                )
+
+                stored_claim = repository.get_claim(str(claim["id"]))
+                stored_evidence = repository.get_evidence(str(evidence["id"]))
+                self.assertEqual(decided["decision"], "rejected")
+                self.assertEqual(decided["updated_at"], DECISION_TIME)
+                assert stored_claim is not None and stored_evidence is not None
+                self.assertEqual(
+                    (
+                        stored_claim["status"],
+                        stored_claim["approval_status"],
+                        stored_claim["verified_at"],
+                        stored_claim["verified_by"],
+                    ),
+                    ("withdrawn", "rejected", None, None),
+                )
+                self.assertEqual(stored_claim["updated_at"], DECISION_TIME)
+                self.assertEqual(
+                    (
+                        stored_evidence["confirmation_status"],
+                        stored_evidence["confirmed_at"],
+                        stored_evidence["confirmed_by"],
+                    ),
+                    ("rejected", None, None),
+                )
+                self.assertEqual(stored_evidence["updated_at"], DECISION_TIME)
+
+    def test_profile_import_review_transition_rolls_back_without_decision_workflow(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with SQLiteRepository(Path(directory) / "profile.db") as repository:
+                _, claim, evidence, pending = add_import_review_fixture(
+                    repository,
+                    suffix="rollback",
+                )
+
+                with self.assertRaises(sqlite3.IntegrityError):
+                    repository.decide_profile_import_review_item(
+                        str(claim["id"]),
+                        decision="approved",
+                        decision_workflow_run_id="missing-decision-workflow",
+                        decided_by="synthetic-user",
+                        decided_at=DECISION_TIME,
+                    )
+
+                stored_claim = repository.get_claim(str(claim["id"]))
+                stored_evidence = repository.get_evidence(str(evidence["id"]))
+                self.assertEqual(
+                    repository.get_profile_import_review_item(str(claim["id"])),
+                    pending,
+                )
+                assert stored_claim is not None and stored_evidence is not None
+                self.assertEqual(stored_claim["status"], "needs_review")
+                self.assertEqual(stored_claim["approval_status"], "pending")
+                self.assertEqual(stored_evidence["confirmation_status"], "pending")
+
+    def test_profile_import_review_rejects_touched_pending_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with SQLiteRepository(Path(directory) / "profile.db") as repository:
+                for table in ("claims", "evidence"):
+                    with self.subTest(table=table):
+                        _, claim, evidence, pending = add_import_review_fixture(
+                            repository,
+                            suffix=f"touched-{table}",
+                        )
+                        decision_workflow = repository.add_workflow_run(
+                            run_id=f"decision-workflow-touched-{table}",
+                            workflow_type="profile_import_review_decision",
+                            status="running",
+                            input_data={"claim_id": claim["id"]},
+                            created_at=DECISION_TIME,
+                        )
+                        target_id = claim["id"] if table == "claims" else evidence["id"]
+                        with closing(sqlite3.connect(repository.database)) as connection:
+                            connection.execute(
+                                f"UPDATE {table} SET updated_at = ? WHERE id = ?",
+                                ("2026-08-11T12:30:00Z", target_id),
+                            )
+                            connection.commit()
+
+                        with self.assertRaisesRegex(
+                            RepositoryError,
+                            "not pending review",
+                        ):
+                            repository.decide_profile_import_review_item(
+                                str(claim["id"]),
+                                decision="approved",
+                                decision_workflow_run_id=str(decision_workflow["id"]),
+                                decided_by="synthetic-user",
+                                decided_at=DECISION_TIME,
+                            )
+
+                        self.assertEqual(
+                            repository.get_profile_import_review_item(str(claim["id"])),
+                            pending,
+                        )
 
 
 if __name__ == "__main__":

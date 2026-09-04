@@ -6,166 +6,193 @@ architecture rationale in ADRs.
 
 ## Checkpoint
 
-- **Last updated:** 2026-09-04 11:28 CDT
+- **Last updated:** 2026-09-04 12:42 CDT
 - **Branch:** `codex/phase-0-truth-layer`
-- **HEAD:** `7986f68` (`Implement evidence-backed job application workflows`),
-  one commit ahead of `origin/codex/phase-0-truth-layer`
-- **Milestone:** Phase 0 — versioned restricted-text taxonomy
-- **Status:** This narrow milestone is implemented and verified in the working
-  tree. Phase 0 continues; the product is not release-ready and must not be used
-  with real candidate data.
+- **HEAD:** `fd3bdcf` (`Implement grounded apply workflow updates`), two commits
+  ahead of `origin/codex/phase-0-truth-layer`
+- **Milestone:** Phase 0 — audited profile-import review decisions
+- **Status:** This bounded service/persistence milestone is implemented and
+  verified in the working tree. Phase 0 continues; the product is not
+  release-ready and must not be used with real candidate data.
 - **Expected working tree:** Uncommitted changes in `README.md`,
   `docs/DEVELOPMENT.md`, `docs/ROADMAP.md`, this file,
-  `src/grounded_apply/services/__init__.py`,
-  `src/grounded_apply/services/profile.py`,
-  `src/grounded_apply/services/profile_import_validation.py`, and
-  `tests/test_profile_import.py`.
+  `migrations/002_profile_import_review_items.sql`,
+  `src/grounded_apply/cli.py`, repository schema/SQLite modules, profile service
+  modules, and the CLI/profile-import/profile-service/repository/schema tests.
 
-The tree was clean at HEAD `7986f68` at session start. The previous handoff was
-stale: it named HEAD `7b247ee` and uncommitted paths that were not present. The
-required first command passed 186 tests before this work began.
+The tree was clean at HEAD `fd3bdcf` at session start. The previous handoff was
+stale: it named HEAD `7986f68` and uncommitted taxonomy work that was already
+committed. Its required first command passed 196 tests before this milestone.
 
 ## Implemented and verified
 
-- Profile-import content policy 2 derives all restricted-text matchers from one
-  immutable taxonomy version 1. Its nine stable categories are work
-  authorization/immigration, security clearance, veteran status, disability
-  status, criminal/legal attestations, conflicts of interest, demographic
-  self-identification, government identifiers, and authentication credentials.
-- Each category declares context patterns, label patterns, normalized assignment
-  aliases, and any case-sensitive patterns. Import-time validation rejects an
-  incomplete, duplicate, malformed, empty-matching, or inconsistently versioned
-  taxonomy declaration. The exported registry and canonical taxonomy SHA-256
-  are pinned by tests.
-- Request-identity schema 3 binds taxonomy version 1 and its canonical SHA-256,
-  along with content-policy version 2, into the workflow input and request hash.
-  A realistic workflow created under request schema 2/content policy 1 cannot
-  replay under the current identity or create records.
-- Exact-assignment, context, fixed-point percent-decoding, Unicode/control
-  normalization, and bounded cross-component checks now cover all nine
-  categories on recursive values, canonical text, selected evidence, and
-  persisted import metadata. Rejections happen before storage and do not echo
-  the rejected value.
-- Answer-only evidence cannot detach from an exact restricted label on the same
-  line or the nearest nonblank line within the bounded lookbehind, including
-  across blank extraction separators, long same-line spacing, and encoded or
-  control-obfuscated labels. Same-line prefixes over the 512-codepoint bound fail
-  closed rather than losing their leading context. General restricted content
-  on an unrelated unselected line remains outside classification and is not
-  stored.
-- Adversarial tests cover common positive phrasings, normalized assignment
-  aliases, label/question forms, same-line and blank-line extraction shapes,
-  and explicit false-positive controls for customs clearance, accessibility,
-  research, workflow, analytics, cryptographic-signature, and similar legitimate
-  resume language.
-- README, development guidance, and roadmap status now describe the exact
-  version matrix, compatibility break, implemented taxonomy boundary, and
-  remaining semantic-classification limitations.
+- Migration 002 advances the SQLite schema to version 2 and adds one durable
+  review association per import workflow/proposal position. It uniquely binds
+  the claim, evidence, immutable record SHA-256, terminal decision workflow,
+  actor, and decision time. Schema-1 databases upgrade forward without rewriting
+  migration 001; existing-only/read-only commands still refuse to migrate.
+- Import request identity is schema 4 and its result manifest is schema 3. Each
+  ordered result entry includes a record-digest-schema-1 hash over the immutable
+  claim/evidence projection. Review associations and workflow results must agree
+  exactly; claim/evidence UUIDs remain derived from workflow and proposal index.
+- Pending review output includes the import workflow ID, proposal index, and a
+  stale-safe review token. Listing starts from durable pending associations, so a
+  projection altered out of the pending lifecycle fails closed instead of
+  disappearing; output retains import/proposal order. It revalidates the exact
+  current workflow input, checkpoint, ordered result, association, source
+  artifact, unique forward and reverse support link, record digest,
+  locator/checksum/bounds, registered ingress, and current value/content/taxonomy
+  policy before displaying content.
+- `CreateProfileReviewDecision`, `ProfileReviewDecisionResult`, and
+  `ProfileService.decide_review_item` provide an explicit typed service boundary.
+  Approval/rejection requires the review token, opaque actor, opaque idempotency
+  key, and an aware decision time. One transaction writes the decision workflow,
+  review row, claim projection, and evidence projection; a failed final audit
+  check rolls everything back.
+- Approval produces `verified`/`approved` claim state and `confirmed` evidence
+  with the same actor/time. Rejection preserves `withdrawn`/`rejected` history
+  without a verification actor. Exact terminal retries return the original
+  result even if the caller supplies a different `now`; changed actor, decision,
+  key, token, or request identity fails closed.
+- Confidential and highly sensitive proposals cannot be approved. An active,
+  overlapping, same-subject explicitly contradicted record blocks approval.
+  Public blockers return a structured `Contradiction`; non-public blockers use a
+  generic error so their value, canonical text, and provenance are not disclosed.
+  Decision-time checks do not reject a distinct value solely because it differs;
+  existing resolution still returns `Contradiction` when multiple approved value
+  groups compete for one intent.
+- Import replay accepts a valid pending or terminal projection and validates the
+  terminal decision audit. `resolve` revalidates every durable imported
+  association and terminal audit, including when mutable source-type fields have
+  been laundered, before an imported claim can enter a claim packet. Unassociated
+  legacy pending imports remain ineligible without blocking an unrelated manual
+  resolution; unassociated usable imported states fail closed.
+- Decision workflow records contain only version identifiers, IDs, hashes,
+  decision, actor, and time. Tests prove raw source, selected evidence, proposed
+  value/canonical text, filenames/paths, and raw idempotency keys do not enter the
+  audit.
+- Signed-zero confidence is canonicalized before record hashing, preventing
+  SQLite's `-0.0` to `0.0` normalization from invalidating a new review item.
+  Digest-only artifact timestamps must be valid, canonical, and internally equal.
+- The CLI review command remains physically read-only and has no decision flag or
+  command. Its warning accurately limits unverified/unusable language to pending
+  facts, and an import replay reports current `review_required` plus the actual
+  pending count rather than hard-coded pending state.
+- README, development guidance, and roadmap status describe the schema/version
+  break, implemented service boundary, remaining CLI/edit/semantic-conflict gap,
+  and record-hash security boundary.
 
 ## Verification
 
 All verification used synthetic `example.com` data and no network access.
 
 ```text
-./scripts/check
-PASS — CLI help + isolated doctor smoke + 196/196 unittest cases
-
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
-  -m unittest tests.test_profile_import -q
-PASS — 98/98 profile-import tests
-
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
-  -m unittest tests.test_cli -q
-PASS — 43/43 CLI tests
+  -m unittest tests.test_schema tests.test_repository \
+  tests.test_profile_import tests.test_profile_service tests.test_cli -v
+PASS — 186/186 focused persistence/import/service/CLI tests during integration
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
   -m unittest tests.test_profile_service -q
-PASS — 10/10 profile-service tests
+PASS — 30/30 profile-service tests after final adversarial regressions
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
-  -m unittest discover -s tests -v
-PASS — 196/196 tests with warnings treated as errors
+  -m unittest tests.test_cli -q
+PASS — 44/44 CLI tests, including mixed-state warning and proposal-order checks
+
+./scripts/check
+PASS — CLI help + isolated doctor smoke + 223/223 unittest cases
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
+  -m unittest discover -s tests -q
+PASS — 223/223 tests with warnings treated as errors
 
 ./scripts/gapply --help
 ./scripts/gapply profile import --help
 ./scripts/gapply profile review --help
-PASS
+PASS — each command exited successfully
 
-GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-taxonomy-smoke.mu8Ze3/doctor-home \
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-review-decision-final.Anejp9/doctor-home \
   ./scripts/gapply doctor --json
-PASS — read-only uninitialized result; the runtime path was not created
+PASS — reported healthy Python/runtime checks and an uninitialized database
+without creating profile storage
 
-GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-taxonomy-smoke.mu8Ze3/dry-run-home \
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-review-decision-final.Anejp9/smoke-home \
+  ./scripts/gapply profile init --json
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-review-decision-final.Anejp9/smoke-home \
   ./scripts/gapply profile import \
   --source-file tests/fixtures/synthetic_profile/resume.txt \
   --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
-  --idempotency-key synthetic-taxonomy-smoke-1 --dry-run --json
-PASS — manifest-2 preview with derived provenance; runtime path was not created
-
-GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-taxonomy-smoke.mu8Ze3/smoke-home \
-  ./scripts/gapply profile init --json
-GROUNDED_APPLY_HOME=<same> ./scripts/gapply profile import \
+  --idempotency-key synthetic-review-decision-smoke-1 --json
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-review-decision-final.Anejp9/smoke-home \
+  ./scripts/gapply profile import \
   --source-file tests/fixtures/synthetic_profile/resume.txt \
   --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
-  --idempotency-key synthetic-taxonomy-smoke-1 --json
-GROUNDED_APPLY_HOME=<same> ./scripts/gapply profile import \
-  --source-file tests/fixtures/synthetic_profile/resume.txt \
-  --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
-  --idempotency-key synthetic-taxonomy-smoke-1 --json
-GROUNDED_APPLY_HOME=<same> ./scripts/gapply profile review --json
-PASS — replay returned identical workflow/claim/evidence IDs; review returned
-5 pending, unusable claims with exact evidence spans
+  --idempotency-key synthetic-review-decision-smoke-1 --json
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-review-decision-final.Anejp9/smoke-home \
+  ./scripts/gapply profile review --json
+PASS — initialized schema 2; import/replay returned the same workflow and
+ordered claim/evidence IDs; review remained read-only and returned proposal
+indexes 0–4 with five 64-character tokens bound to that workflow. The disposable
+runtime root was removed after verification.
 
 git diff --check
-PASS
+PASS — no whitespace errors
+
+git status --short --branch
+PASS — only the expected milestone paths are modified; migration 002 is the sole
+untracked file and must be included when the milestone is committed
 ```
 
-The disposable smoke runtime root was removed after verification.
-
-Complete-diff review and changed-path credential/PII scans found no secrets or
-real candidate data. Identity-, credential-, and government-ID-like strings are
-conspicuously synthetic tests, deny-pattern definitions, or assertions.
+Complete-diff review and changed-path secret/PII/debug scans found no unrelated
+changes, real candidate data, credentials, private keys, or debug artifacts.
+Identity-, credential-, government-ID-, and private-path-like strings in tests
+are conspicuously synthetic. Ignored generated paths are normal Python bytecode
+caches only.
 
 ## Known limitations and release blockers
 
-- Taxonomy v1 is a deterministic high-confidence lexical boundary, not semantic
-  classification. Novel phrasing, homoglyph and entity encodings, mixed-depth or
-  broader fragmentation, arbitrary channel reorderings, and non-English content
-  remain incompletely classified.
-- Unselected raw source is deliberately not globally classified. Same-line
-  context is bounded to 256 code points and label lookbehind to 512 code points;
-  overlong same-line prefixes fail closed. Raw source remains caller-managed and
-  transiently in memory.
-- Manifest version 1, request-identity versions 1–2, and content-policy version 1
-  have no automatic migration or reclassification. Earlier-policy rows remain
-  pending and unusable, but review cannot taxonomy-revalidate them because it is
-  not yet bound to their workflow/result identity.
-- Review is display-only. There is no approve/edit/reject decision,
-  contradiction resolution, revalidation at decision time, or audit decision
-  record. Review also does not yet require a surviving workflow/result-manifest
-  row or recompute record IDs from that workflow; replay currently owns those
-  cross-record checks.
-- The source digest is a correlation/consistency identifier, not proof of origin,
-  authentication, confidentiality, or encryption. Protected artifact retention,
-  redacted logging, backup, export, and deletion policies remain planned.
-- Secure file capture depends on POSIX `O_NOFOLLOW` and `O_NONBLOCK`; native
-  Windows behavior remains unimplemented. Standard input is the portable
-  fallback.
-- A deliberately pathological but valid 1,000-proposal assignment-heavy preview
-  takes about 13 seconds on the current development host. Inputs are bounded,
-  but a total delimiter/work budget remains a future hardening opportunity.
-- Installed-wheel migration discovery and multiply linked SQLite database
-  rejection remain unverified or unimplemented.
+- `gapply profile review` is display-only. The typed service can decide an item,
+  but no CLI/API decision surface, explicit interactive confirmation, edit flow,
+  or user-facing contradiction-resolution workflow exists.
+- Decision-time conflict handling is deliberately narrow. It blocks a
+  pre-existing explicit same-subject contradicted state but does not preemptively
+  enforce type cardinality from unequal values. Existing resolution can still
+  return `Contradiction` for competing approved value groups; stable entity
+  identity and user-facing per-claim conflict rules remain planned.
+- Migration 002 does not invent review associations or record digests for legacy
+  imports. Manifest 1, request-identity 1–3, result-manifest 1–2, and earlier
+  policy rows remain unusable and fail review/decision closed. Re-import with a
+  fresh opaque key in disposable synthetic state; there is no automatic
+  reclassification.
+- Record SHA-256 values and review tokens detect inconsistent mutation and stale
+  review state. They are unkeyed and do not authenticate the database against an
+  attacker who can rewrite all records and recompute every related hash. A
+  coherent rewrite of all three source-artifact timestamps is likewise outside
+  this consistency boundary; those timestamps do not authorize claim use.
+- Restricted taxonomy 1 remains deterministic lexical defense in depth, not
+  complete semantic, secret, or PII classification. Novel phrasing, homoglyph or
+  entity encodings, broader fragmentation/reordering, and non-English content are
+  incompletely classified.
+- Unselected raw source is transient and deliberately not globally classified.
+  The source digest proves consistency, not origin, authentication,
+  confidentiality, or encryption. Redacted logging, backup, export, deletion,
+  and protected-artifact retention remain planned.
+- Multiply linked SQLite database rejection, installed-wheel migration discovery,
+  and native Windows secure file capture remain unverified or unimplemented.
 - Derived claims remain unusable until a registered evaluator recomputes them.
 
 ## Next exact tasks
 
-1. `tests/test_profile_service.py`: add an idempotent review-decision service
-   that revalidates workflow/result identity, evidence checksum/locator integrity,
-   and contradictions; records actor/time/audit fields; and cannot approve
-   sensitive or malformed proposals.
-2. `tests/test_config.py`: reject multiply linked profile databases without
-   modifying either alias, then preserve that invariant across import/review.
+1. `tests/test_config.py`: reject a multiply linked profile database without
+   modifying either hard-link alias, then preserve that invariant across profile
+   init/import/review. Start with
+   `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error -m unittest tests.test_config tests.test_cli -v`.
+2. `tests/test_cli.py`: design a bounded explicit review-decision CLI contract
+   around the existing typed service, including actor/key/token inputs, preview
+   and confirmation semantics, JSON output, sensitive blockers, and no accidental
+   terminal submission behavior. Do not add edit or contradiction-resolution
+   semantics implicitly.
 3. `tests/test_logging.py`: prove source text, values, credentials, restricted
    answers, and private paths do not enter normal logs, backups, exports, or
    deletion metadata as those lifecycle surfaces are introduced.
@@ -181,14 +208,20 @@ conspicuously synthetic tests, deny-pattern definitions, or assertions.
 
 ## Key decisions
 
-- The taxonomy is executable policy, so its version and canonical digest are
-  part of import request identity. Changing any category rule requires an
-  explicit policy/version decision rather than silent replay under old identity.
-- Imported documents and proposal manifests remain untrusted data. Taxonomy
-  matches cannot authorize persistence, disclosure, or external action.
-- Restricted labels are matched separately from general context so bounded
-  answer-label checks do not turn into global scans of unrelated source text.
-- Legacy provenance and unknown versions fail closed; they are not promoted or
-  repaired automatically.
+- The review association is durable relational state; claim/evidence lifecycle
+  fields are a guarded projection, not the sole audit trail.
+- A decision token binds the immutable record and exact current import
+  workflow/result/association/link identity. Lifecycle fields are excluded from
+  the record digest so an authorized decision can change them without changing
+  the reviewed fact.
+- Review and resolution branch on the durable association as well as mutable
+  `source_type`, preventing provenance laundering from bypassing import checks.
+- Approval re-runs current closed value/content policy and fails closed on any
+  unknown version or malformed provenance. Legacy rows are not repaired or
+  silently promoted.
+- No registered imported claim type currently has a single-value cardinality
+  enforced at decision time. The existing resolver still detects competing
+  approved value groups; a future typed registry must define stable subject,
+  cardinality, and time rules for earlier, type-specific prevention.
 - Phase 0 remains in progress. Passing this milestone does not authorize real
   candidate data or imply release readiness.
