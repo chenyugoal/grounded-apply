@@ -16,7 +16,10 @@ from .profile import (
 )
 from .profile_import_validation import (
     PROFILE_IMPORT_MAX_SOURCE_BYTES,
+    PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
+    PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
     registered_profile_import_claim_types,
+    registered_profile_import_restricted_categories,
 )
 
 __all__ = [
@@ -27,6 +30,8 @@ __all__ = [
     "ImportProposalResult",
     "PROFILE_IMPORT_EXTRACTOR_ID",
     "PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION",
+    "PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256",
+    "PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION",
     "ProfileService",
     "ProfileReviewItem",
     "PROFILE_IMPORT_MAX_SOURCE_BYTES",
@@ -34,4 +39,5 @@ __all__ = [
     "TextSourceSpan",
     "registered_profile_import_extractors",
     "registered_profile_import_claim_types",
+    "registered_profile_import_restricted_categories",
 ]

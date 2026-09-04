@@ -7,11 +7,13 @@ patterns and is never persisted by this workflow.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 from types import MappingProxyType
 from urllib.parse import unquote_plus
 
@@ -19,7 +21,8 @@ from grounded_apply.domain import JsonValue
 
 
 PROFILE_IMPORT_VALUE_SCHEMA_VERSION = 1
-PROFILE_IMPORT_CONTENT_POLICY_VERSION = 1
+PROFILE_IMPORT_CONTENT_POLICY_VERSION = 2
+PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION = 1
 PROFILE_IMPORT_MAX_SOURCE_BYTES = 16 * 1024 * 1024
 PROFILE_IMPORT_MAX_SELECTED_EVIDENCE_CODEPOINTS = 4096
 PROFILE_IMPORT_MAX_TOTAL_EVIDENCE_CODEPOINTS = 65_536
@@ -36,77 +39,9 @@ _DOCUMENT_WINDOW_SIZES = (16, 8, 4, 2, 1)
 _DOCUMENT_MAX_SAMPLED_WINDOWS = 4096
 _YEAR_MONTH_PATTERN = re.compile(r"(?:19|20)\d{2}-(?:0[1-9]|1[0-2])")
 _DOCUMENT_TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
-_SENSITIVE_LABEL_ONLY_PATTERN = re.compile(
-    r"\s*(?:work[\s_-]*authori[sz]ation|employment[\s_-]*eligibility|"
-    r"sponsor(?:ship)?|visa[\s_-]*status|immigration[\s_-]*status|"
-    r"citizenship[\s_-]*status|nationality|social[\s_-]*security(?:[\s_-]*number)?|"
-    r"ssn|passport(?:[\s_-]*(?:number|no\.?|id))?|"
-    r"driver'?s?[\s_-]*licen[cs]e(?:[\s_-]*(?:number|no\.?|id))?|"
-    r"national[\s_-]*id|government[\s_-]*id|tax[\s_-]*id|itin|ein|"
-    r"api[\s_+-]*(?:token|key)|access[\s_-]*key(?:[\s_-]*id)?|"
-    r"secret[\s_-]*access[\s_-]*key|password|passwd|pwd|token|secret|"
-    r"credential(?:s)?|cookie|session[\s_-]*(?:id|token)|private[\s_-]*key)\s*:?[\s]*",
-    re.IGNORECASE,
-)
 _OWNERSHIP_LEVELS = frozenset(
     {"supported", "contributed", "co-led", "led", "owned"}
 )
-_SENSITIVE_ASSIGNMENT_KEYS = (
-    "workauthorization",
-    "workeligibility",
-    "employmenteligibility",
-    "sponsorship",
-    "visa",
-    "visastatus",
-    "immigrationstatus",
-    "ead",
-    "citizenship",
-    "citizenshipstatus",
-    "nationality",
-    "ssn",
-    "socialsecurity",
-    "socialsecuritynumber",
-    "passport",
-    "passportnumber",
-    "passportno",
-    "passportid",
-    "driverslicense",
-    "driverslicensenumber",
-    "driverslicenseno",
-    "driverslicenseid",
-    "nationalid",
-    "governmentid",
-    "governmentissuedid",
-    "taxid",
-    "taxpayerid",
-    "taxpayeridentificationnumber",
-    "itin",
-    "ein",
-    "password",
-    "passwd",
-    "pwd",
-    "token",
-    "secret",
-    "credential",
-    "credentials",
-    "cookie",
-    "sessionid",
-    "apikey",
-    "apitoken",
-    "accesstoken",
-    "refreshtoken",
-    "authtoken",
-    "bearertoken",
-    "sessiontoken",
-    "privatekey",
-    "sshprivatekey",
-    "clientsecret",
-    "secretkey",
-    "secretaccesskey",
-    "awssecretaccesskey",
-    "accesskeyid",
-)
-_SENSITIVE_ASSIGNMENT_KEY_SET = frozenset(_SENSITIVE_ASSIGNMENT_KEYS)
 
 type _ValueValidator = Callable[[object], None]
 
@@ -311,120 +246,656 @@ if any(
     raise RuntimeError("profile import value schemas must share one version")
 
 
-_DISALLOWED_CONTEXT_PATTERNS = (
-    re.compile(r"\b(?:work|employment)[\s_-]+authori[sz](?:ation|ed)\b", re.IGNORECASE),
-    re.compile(r"\bauthori[sz]ed\s+to\s+work\b", re.IGNORECASE),
-    re.compile(
-        r"\bable\s+to\s+work\s+(?:in|within|throughout)\s+(?:the\s+)?"
-        r"(?:u\.?\s*s\.?|united\s+states|canada)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:immigration|visa)\s+status\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:require[sd]?|need(?:ed|s)?|without|seek(?:ing|s)?)\s+"
-        r"(?:employment\s+)?sponsor(?:ship)?\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?:h[\s-]?1b|l[\s-]?1|o[\s-]?1|f[\s-]?1|j[\s-]?1|visa)\s+"
-        r"sponsor(?:ship)?\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:green\s+card|permanent\s+resident)\b", re.IGNORECASE),
-    re.compile(r"\bcitizenship\s+status\b", re.IGNORECASE),
-    re.compile(r"\bnationality\s*(?::|=)\s*\S+", re.IGNORECASE),
-    re.compile(r"\bCanadian\s+citizen\b", re.IGNORECASE),
-    re.compile(r"\bcitizen\s+of\s+[A-Za-z][A-Za-z .'-]{1,40}\b", re.IGNORECASE),
-    re.compile(r"\b(?:u\.?\s*s\.?|united\s+states)\s+citizen\b", re.IGNORECASE),
-    re.compile(r"\b(?:legal\s+(?:right|permission)|eligible)\s+to\s+work\b", re.IGNORECASE),
-    re.compile(r"\blegally\s+(?:permitted|eligible|authori[sz]ed)\s+to\s+work\b", re.IGNORECASE),
-    re.compile(r"\b(?:employment|work)\s+eligib(?:ility|le)\b", re.IGNORECASE),
-    re.compile(r"\bwork\s+permit\b", re.IGNORECASE),
-    re.compile(r"\b(?:currently\s+)?on\s+(?:OPT|CPT)\b", re.IGNORECASE),
-    re.compile(r"\bEAD(?:\s+(?:card|status|holder))?\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:h[\s-]?1b|l[\s-]?1|o[\s-]?1|f[\s-]?1|j[\s-]?1)\s+"
-        r"(?:visa\s+)?(?:holder|status)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?:hold(?:s|ing)?|on)\s+(?:an?\s+)?"
-        r"(?:h[\s-]?1b|l[\s-]?1|o[\s-]?1|f[\s-]?1|j[\s-]?1)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:opt|cpt)\s+(?:eligible|holder|status)\b", re.IGNORECASE),
-    re.compile(
-        r"\bsponsor(?:ship)?\s+(?:will\s+be|is|would\s+be)\s+required\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:no\s+)?sponsor(?:ship)?\s+(?:is\s+)?(?:not\s+)?required\b", re.IGNORECASE),
-    re.compile(r"\bsocial[\s_-]+security(?:[\s_-]+number)?\b", re.IGNORECASE),
-    re.compile(r"\bs[\W_]*s[\W_]*n\b", re.IGNORECASE),
-    re.compile(r"\bpassport[\s_-]+(?:number|no\.?|id)\b", re.IGNORECASE),
-    re.compile(
-        r"\bpassport(?:[\s_-]+(?:number|no\.?|id))?\s*(?:#|:)?\s*"
-        r"(?=[A-Z0-9-]{5,}\b)(?=[A-Z0-9-]*[0-9-])"
-        r"[A-Z0-9][A-Z0-9-]{4,}\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\bdriver'?s[\s_-]+licen[cs]e[\s_-]+(?:number|no\.?|id)\b", re.IGNORECASE),
-    re.compile(
-        r"\bdriver'?s?[\s_-]+licen[cs]e(?:[\s_-]+(?:number|no\.?|id))?"
-        r"\s*(?:#|:)?\s*(?=[A-Z0-9-]{5,}\b)(?=[A-Z0-9-]*[0-9-])"
-        r"[A-Z0-9][A-Z0-9-]{4,}\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\bDL\s*(?:#|:|=)\s*(?=[A-Z0-9-]{5,}\b)"
-        r"(?=[A-Z0-9-]*[0-9-])[A-Z0-9][A-Z0-9-]{4,}\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:national|government[\s_-]*issued|taxpayer)[\s_-]+id\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:national|government|tax)[\s_-]+id\s*(?:#|:|=)\s*\S+",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:itin|taxpayer[\s_-]+identification[\s_-]+number)\b", re.IGNORECASE),
-    re.compile(r"\bEIN\s*(?:#|:)?\s*\d{2}-\d{7}\b", re.IGNORECASE),
-    re.compile(r"(?<!\d)\d{3}[\s-]\d{2}[\s-]\d{4}(?!\d)"),
-    re.compile(
-        r"(?<![A-Za-z0-9])(?:work[\s_-]*authori[sz]ation|sponsor(?:ship)?|visa|"
-        r"immigration[\s_-]*status|ead|citizenship|nationality|ssn|passport|driver'?s?[\s_-]*"
-        r"licen[cs]e|national[\s_-]*id|government[\s_-]*id|tax[\s_-]*id|itin|ein)"
-        r"\s*(?::|=)\s*\S+",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+[\s_-]+){0,3}"
-        r"(?:password|passwd|pwd|token|secret|credential(?:s)?|cookie|session[\s_-]*id|"
-        r"api[\s_-]*key|private[\s_-]*key|"
-        r"secret[\s_-]*access[\s_-]*key|access[\s_-]*key(?:[\s_-]*id)?)"
-        r"\s*(?::|=)\s*\S{4,}",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\bauthorization\s*:\s*(?:basic|bearer)\s+\S{8,}", re.IGNORECASE),
-    re.compile(r"\bcookie\s*:\s*\S{8,}", re.IGNORECASE),
-    re.compile(
-        r"\b[A-Za-z][A-Za-z0-9+.-]*://[^/@\s:]+:[^/@\s]+@",
-        re.IGNORECASE,
-    ),
-    re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----", re.IGNORECASE),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b", re.IGNORECASE),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", re.IGNORECASE),
-    re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b", re.IGNORECASE),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{16,}\b", re.IGNORECASE),
-    re.compile(
-        r"\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\b"
+@dataclass(frozen=True, slots=True)
+class _RestrictedContentCategory:
+    """Declarative, auditable rules for one fail-closed content category."""
+
+    identifier: str
+    context_patterns: tuple[str, ...]
+    label_patterns: tuple[str, ...]
+    assignment_keys: tuple[str, ...]
+    case_sensitive_context_patterns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _RestrictedContentTaxonomy:
+    version: int
+    categories: tuple[_RestrictedContentCategory, ...]
+
+
+_RESTRICTED_CONTENT_TAXONOMY = _RestrictedContentTaxonomy(
+    version=PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
+    categories=(
+        _RestrictedContentCategory(
+            identifier="work_authorization_immigration",
+            context_patterns=(
+                r"\b(?:work|employment)[\s_-]+authori[sz](?:ation|ed)\b",
+                r"\bauthori[sz]ed\s+to\s+work\b",
+                r"\bable\s+to\s+work\s+(?:in|within|throughout)\s+(?:the\s+)?"
+                r"(?:u\.?\s*s\.?|united\s+states|canada)\b",
+                r"\b(?:immigration|visa)\s+status\b",
+                r"\b(?:require[sd]?|need(?:ed|s)?|without|seek(?:ing|s)?)\s+"
+                r"(?:employment\s+)?sponsor(?:ship)?\b",
+                r"\b(?:h[\s-]?1b|l[\s-]?1|o[\s-]?1|f[\s-]?1|j[\s-]?1|visa)\s+"
+                r"sponsor(?:ship)?\b",
+                r"\b(?:green\s+card|permanent\s+resident)\b",
+                r"\bcitizenship\s+status\b",
+                r"\bnationality\s*(?::|=)\s*\S+",
+                r"\bCanadian\s+citizen\b",
+                r"\bcitizen\s+of\s+[A-Za-z][A-Za-z .'-]{1,40}\b",
+                r"\b(?:u\.?\s*s\.?|united\s+states)\s+citizen\b",
+                r"\b(?:legal\s+(?:right|permission)|eligible)\s+to\s+work\b",
+                r"\blegally\s+(?:permitted|eligible|authori[sz]ed)\s+to\s+work\b",
+                r"\b(?:employment|work)\s+eligib(?:ility|le)\b",
+                r"\bwork\s+permit\b",
+                r"\b(?:currently\s+)?on\s+(?:OPT|CPT)\b",
+                r"\bEAD(?:\s+(?:card|status|holder))?\b",
+                r"\b(?:h[\s-]?1b|l[\s-]?1|o[\s-]?1|f[\s-]?1|j[\s-]?1|"
+                r"tn|e[\s-]?3)\s+"
+                r"(?:visa\s+)?(?:holder|status)\b",
+                r"\b(?:hold(?:s|ing)?|on)\s+(?:an?\s+)?"
+                r"(?:h[\s-]?1b|l[\s-]?1|o[\s-]?1|f[\s-]?1|j[\s-]?1|"
+                r"tn|e[\s-]?3)\b",
+                r"\b(?:opt|cpt)\s+(?:eligible|holder|status)\b",
+                r"\bsponsor(?:ship)?\s+(?:will\s+be|is|would\s+be)\s+required\b",
+                r"\b(?:no\s+)?sponsor(?:ship)?\s+(?:is\s+)?(?:not\s+)?required\b",
+            ),
+            label_patterns=(
+                r"work[\s_-]*authori[sz]ation",
+                r"(?:employment|work)[\s_-]*eligibility",
+                r"sponsor(?:ship)?",
+                r"visa[\s_-]*status",
+                r"immigration[\s_-]*status",
+                r"citizenship[\s_-]*status",
+                r"nationality",
+                r"work[\s_-]*permit",
+                r"ead(?:[\s_-]*(?:card|status))?",
+                r"are\s+you\s+(?:legally\s+)?authori[sz]ed\s+to\s+work"
+                r"(?:\s+(?:in|within)\s+[^\r\n?]{1,64})?\??",
+                r"will\s+you\s+(?:now\s+or\s+)?(?:at\s+any\s+time\s+)?"
+                r"in\s+the\s+future\s+require(?:\s+(?:employment|visa))?\s+"
+                r"sponsor(?:ship)?\??",
+                r"do\s+you\s+now\s+or\s+will\s+you\s+in\s+the\s+future\s+"
+                r"require(?:\s+(?:employment|visa))?\s+sponsor(?:ship)?\??",
+            ),
+            assignment_keys=(
+                "workauthorization",
+                "workauthorisation",
+                "employmentauthorization",
+                "employmentauthorisation",
+                "workeligibility",
+                "employmenteligibility",
+                "sponsor",
+                "sponsorship",
+                "visa",
+                "visastatus",
+                "immigrationstatus",
+                "ead",
+                "citizenship",
+                "citizenshipstatus",
+                "nationality",
+            ),
+        ),
+        _RestrictedContentCategory(
+            identifier="security_clearance",
+            context_patterns=(
+                r"\b(?:active|current|inactive|expired|interim)\s+"
+                r"(?:(?:confidential|secret|top[\s_-]*secret|ts\s*/\s*sci|sci)\s+"
+                r"(?:security\s+)?clearance|security\s+clearance)\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|that\b|which\b|requiring\b))",
+                r"\b(?:hold(?:s|ing)?|held|maintain(?:s|ed|ing)?|"
+                r"possess(?:es|ed|ing)?|granted)\s+(?:an?\s+)?"
+                r"(?:(?:active|current)\s+)?"
+                r"(?:(?:confidential|secret|top[\s_-]*secret|ts\s*/\s*sci|sci)\s+"
+                r"(?:security\s+)?clearance|security\s+clearance)\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|that\b|which\b|requiring\b))",
+                r"\b(?:eligible\s+for|able\s+to\s+obtain)\s+(?:an?\s+)?"
+                r"(?:(?:confidential|secret|top[\s_-]*secret|ts\s*/\s*sci|sci)\s+"
+                r"(?:security\s+)?clearance|security\s+clearance)\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|that\b|which\b|requiring\b))",
+                r"\bsecurity\s+clearance\s+(?:status|level)\s*"
+                r"(?:is|:|=)\s*\S+",
+                r"\bsecurity\s+clearance\s*(?::|=)\s*\S+",
+                r"\bpublic[\s_-]+trust[\s_-]+(?:clearance|status)\s*"
+                r"(?::|=)\s*\S+",
+                r"\b(?:active|current|inactive|expired)\s+public[\s_-]+trust"
+                r"(?:[\s_-]+clearance)?\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|that\b|which\b|requiring\b))",
+                r"\bpublic[\s_-]+trust(?:[\s_-]+security)?[\s_-]+clearance\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|that\b|which\b|requiring\b))",
+                r"\b(?:confidential|secret|ts\s*/\s*sci|sci)\s+"
+                r"(?:security\s+)?clearance\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|that\b|which\b|requiring\b))",
+                r"\b(?:ts\s*/\s*sci|top[\s_-]*secret)\s+(?:security\s+)?clearance\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|that\b|which\b|requiring\b))",
+                r"\b(?:(?:hold(?:s|ing)?|held|maintain(?:s|ed|ing)?|"
+                r"possess(?:es|ed|ing)?)\s+(?:an?\s+)?)?"
+                r"(?:(?:active|current|interim)\s+)?"
+                r"(?:(?:confidential|secret|top[\s_-]*secret|ts\s*/\s*sci|sci)\s+"
+                r"(?:security\s+)?clearance|security\s+clearance)\s+"
+                r"(?:(?:valid|effective)\s+)?(?:through|until)\s+\S+",
+                r"\b(?:active|current|interim)\s+"
+                r"(?:(?:confidential|secret|top[\s_-]*secret|ts\s*/\s*sci|sci)\s+"
+                r"(?:security\s+)?clearance|security\s+clearance)\s+"
+                r"(?:granted|issued|adjudicated)\s+(?:in|on)\s+\S+",
+                r"\b(?:eligible\s+for|able\s+to\s+obtain)\s+(?:an?\s+)?"
+                r"(?:security|confidential|secret|top[\s_-]*secret|"
+                r"ts\s*/\s*sci|sci)\s+clearance\s+(?:upon|if)\s+\S+",
+                r"\bts\s*/\s*sci(?:\s+(?:with\s+)?"
+                r"(?:(?:full[\s_-]+scope|counterintelligence|ci)\s+)?polygraph)?\b",
+                r"\b(?:hold(?:s|ing)?|held|maintain(?:s|ed|ing)?|"
+                r"possess(?:es|ed|ing)?)\s+(?:an?\s+)?"
+                r"(?:(?:active|current|interim)\s+)?"
+                r"(?:confidential|secret|top[\s_-]*secret|ts\s*/\s*sci|sci)\s+"
+                r"(?:security\s+)?clearance\s+with\s+"
+                r"(?:(?:full[\s_-]+scope|counterintelligence|ci)\s+)?polygraph\b",
+                r"\b(?:active|current|interim)\s+"
+                r"(?:(?:confidential|secret|top[\s_-]*secret|ts\s*/\s*sci|sci)\s+"
+                r"(?:security\s+)?clearance|security\s+clearance)\s*"
+                r"\([^\r\n)]{1,64}\)",
+                r"\b(?:my|candidate(?:'s)?|applicant(?:'s)?)\s+"
+                r"security\s+clearance\s+(?:is|:|=)\s*\S+",
+            ),
+            label_patterns=(
+                r"security[\s_-]*clearance(?:[\s_-]*(?:status|level))?",
+                r"clearance[\s_-]*(?:status|level)",
+                r"public[\s_-]*trust(?:[\s_-]*(?:status|clearance))?",
+                r"(?:do\s+you|does\s+the\s+(?:candidate|applicant))\s+"
+                r"(?:hold|have|possess)\s+(?:an?\s+)?(?:security\s+)?clearance\??",
+                r"what\s+(?:level|type)\s+of\s+(?:security\s+)?clearance\s+"
+                r"do\s+you\s+(?:currently\s+)?hold\??",
+            ),
+            assignment_keys=(
+                "securityclearance",
+                "securityclearancestatus",
+                "securityclearancelevel",
+                "publictrustclearance",
+                "publictruststatus",
+            ),
+        ),
+        _RestrictedContentCategory(
+            identifier="veteran_status",
+            context_patterns=(
+                r"\bveteran[\s_-]+status\s*(?::|=)\s*\S+",
+                r"\bveteran\s*(?::|=)\s*\S+",
+                r"\b(?:my|candidate(?:'s)?|applicant(?:'s)?)\s+"
+                r"veteran[\s_-]+status\s+is\s+\S+",
+                r"\b(?:protected|disabled|recently[\s_-]+separated|"
+                r"active[\s_-]+duty[\s_-]+wartime[\s_-]+or[\s_-]+campaign[\s_-]+badge|"
+                r"armed[\s_-]+forces[\s_-]+service[\s_-]+medal)\s+veteran\b",
+                r"\b(?:i\s+am|candidate\s+is|applicant\s+is|"
+                r"self[\s_-]*identif(?:y|ies|ied)\s+as)\s+(?:not\s+)?"
+                r"(?:a\s+)?(?:protected\s+|military\s+)?veteran\b",
+                r"\b(?:served|service)\s+in\s+(?:the\s+)?"
+                r"(?:u\.?\s*s\.?\s+)?armed\s+forces\b",
+                r"\b(?:military|armed[\s_-]+forces)[\s_-]+service[\s_-]+status\b",
+                r"\b(?:u\.?\s*s\.?\s+)?(?:army|navy|air[\s_-]+force|"
+                r"marine[\s_-]+corps|coast[\s_-]+guard|space[\s_-]+force|military)\s+"
+                r"veteran\b(?=\s*(?:$|[.,;:!?)]|and\b|but\b|who\b|with\b))",
+            ),
+            label_patterns=(
+                r"(?:protected[\s_-]+)?veteran[\s_-]+status",
+                r"military[\s_-]+service[\s_-]+status",
+                r"veteran",
+                r"(?:are|do)\s+you\s+(?:identify\s+as\s+)?(?:an?\s+)?"
+                r"(?:protected\s+)?veteran\??",
+            ),
+            assignment_keys=(
+                "veteranstatus",
+                "veteran",
+                "protectedveteran",
+                "protectedveteranstatus",
+                "militaryservicestatus",
+            ),
+        ),
+        _RestrictedContentCategory(
+            identifier="disability_status",
+            context_patterns=(
+                r"\bdisability[\s_-]+status\s*(?::|=)\s*\S+",
+                r"\bdisability\s*(?::|=)\s*\S+",
+                r"\b(?:my|candidate(?:'s)?|applicant(?:'s)?)\s+"
+                r"disability[\s_-]+status\s+is\s+\S+",
+                r"\b(?:i\s+)?(?:have|has|report(?:s|ed)?|declare(?:s|d)?|"
+                r"disclose(?:s|d)?)\s+(?:no\s+|an?\s+)?disabilit(?:y|ies)"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|that\b|which\b|requiring\b|so\b))",
+                r"\b(?:i\s+am|candidate\s+is|applicant\s+is|"
+                r"self[\s_-]*identif(?:y|ies|ied)\s+as)\s+(?:not\s+)?"
+                r"(?:an?\s+)?(?:individual|person)\s+with\s+(?:a\s+)?"
+                r"disabilit(?:y|ies)\b",
+                r"\b(?:disabled|non[\s_-]*disabled)\s+"
+                r"(?:candidate|applicant|individual|person)\b",
+                r"\bi\s+am\s+(?:not\s+)?disabled\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|with\b))",
+                r"\breasonable[\s_-]+accommodation\s+"
+                r"(?:requested|required|needed|not[\s_-]+required|status)\b",
+                r"\b(?:require|need|request)\s+(?:a\s+)?reasonable[\s_-]+accommodation\b",
+            ),
+            label_patterns=(
+                r"disability[\s_-]+status",
+                r"disability",
+                r"reasonable[\s_-]+accommodation",
+                r"accommodation[\s_-]+request",
+                r"do\s+you\s+have\s+(?:an?\s+|any\s+)?disabilit(?:y|ies)"
+                r"(?:\s+or\s+have\s+you\s+ever\s+had\s+one)?\??",
+                r"are\s+you\s+(?:an?\s+)?(?:individual|person)\s+with\s+"
+                r"(?:a\s+)?disabilit(?:y|ies)\??",
+            ),
+            assignment_keys=(
+                "disability",
+                "disabilitystatus",
+                "disabledstatus",
+                "reasonableaccommodation",
+                "accommodationrequest",
+            ),
+        ),
+        _RestrictedContentCategory(
+            identifier="criminal_legal_attestation",
+            context_patterns=(
+                r"\bcriminal[\s_-]+(?:history|record|charges?)\s*(?::|=)\s*\S+",
+                r"\b(?:have|has|reports?|discloses?|without|no)\s+(?:an?\s+|any\s+)?"
+                r"criminal[\s_-]+(?:history|record|convictions?|charges?)\b",
+                r"\b(?:i\s+)?(?:have|has)\s+(?:never\s+|not\s+)?been\s+convicted\b"
+                r"(?=\s*(?:$|[.,;:!?)]|of\b|for\b|and\b|but\b))",
+                r"\b(?:i\s+)?(?:was|were)\s+(?:never\s+|not\s+)?convicted\b"
+                r"(?=\s*(?:$|[.,;:!?)]|of\b|for\b|and\b|but\b))",
+                r"\b(?:have|has|with|without|no)\s+(?:an?\s+|any\s+)?"
+                r"(?:felony|misdemeanor)\s+(?:convictions?|record|charges?)\b",
+                r"\b(?:pending|no)\s+criminal\s+charges?\b",
+                r"\blegal[\s_-]+attestation\s*(?::|=)\s*\S+",
+                r"\b(?:provide|provided|accept|accepted|complete|completed|agree|agreed)\s+"
+                r"(?:an?|the|this)\s+legal[\s_-]+attestation\b",
+                r"\bunder\s+penalty\s+of\s+perjury\b",
+                r"\b(?:i\s+)?(?:certify|attest|declare)\s+(?:that\s+)?"
+                r"(?:(?:the|this)\s+)?"
+                r"(?:application|foregoing|information|statements?|answers?)\s+"
+                r"(?:is|are)\s+(?:true|accurate|complete)\b",
+                r"\b(?:my|candidate(?:'s)?|applicant(?:'s)?)\s+"
+                r"electronic[\s_-]+signature\b",
+                r"\b(?:provided|entered|submitted|affixed)\s+"
+                r"(?:my|an?|the|their|his|her)\s+electronic[\s_-]+signature\b",
+                r"\belectronic[\s_-]+signature\s*(?::|=)\s*\S+",
+                r"\belectronically\s+sign(?:ed|ing)\s+(?:this|the)\s+"
+                r"(?:application|attestation|form)\b",
+            ),
+            label_patterns=(
+                r"criminal[\s_-]+(?:history|record|conviction[\s_-]+history)",
+                r"legal[\s_-]+attestation",
+                r"electronic[\s_-]+signature",
+                r"have\s+you(?:\s+ever)?\s+been\s+convicted"
+                r"(?:\s+of\s+(?:an?\s+|any\s+)?(?:crime|felony|misdemeanor))?\??",
+                r"have\s+you(?:\s+ever)?\s+been\s+(?:arrested\s+or\s+)?"
+                r"charged\s+with\s+(?:an?\s+|any\s+)?crime\??",
+                r"(?:type|enter)\s+your\s+(?:full\s+)?legal\s+name\s+as\s+"
+                r"your\s+electronic[\s_-]+signature\.?",
+            ),
+            assignment_keys=(
+                "criminalhistory",
+                "criminalrecord",
+                "convictionhistory",
+                "felonyconviction",
+                "legalattestation",
+                "electronicsignature",
+            ),
+        ),
+        _RestrictedContentCategory(
+            identifier="conflict_of_interest",
+            context_patterns=(
+                r"\bconflicts?\s+of\s+interest\s*(?::|=)\s*\S+",
+                r"\b(?:have|has|declare(?:s|d)?|disclose(?:s|d)?|report(?:s|ed)?|"
+                r"without|no|free\s+from|do(?:es)?\s+not\s+have)\s+"
+                r"(?:an?\s+|any\s+)?"
+                r"conflicts?\s+of\s+interest\b",
+                r"\bconflicts?\s+of\s+interest\s+(?:status|disclosure)\b",
+                r"\b(?:have|has|declare(?:s|d)?|disclose(?:s|d)?|report(?:s|ed)?|"
+                r"without|free\s+from|do(?:es)?\s+not\s+have)\s+"
+                r"(?:an?\s+|any\s+|no\s+)?outside[\s_-]+employment[\s_-]+conflict\b",
+            ),
+            label_patterns=(
+                r"conflicts?[\s_-]+of[\s_-]+interest",
+                r"outside[\s_-]+employment[\s_-]+conflict",
+                r"do\s+you\s+have\s+(?:an?\s+|any\s+)?"
+                r"(?:(?:actual|potential)\s+or\s+(?:actual|potential)\s+)?"
+                r"conflicts?[\s_-]+of[\s_-]+interest\??",
+            ),
+            assignment_keys=(
+                "conflictofinterest",
+                "conflictsofinterest",
+                "conflictofintereststatus",
+                "outsideemploymentconflict",
+            ),
+        ),
+        _RestrictedContentCategory(
+            identifier="demographic_self_identification",
+            context_patterns=(
+                r"\b(?:race(?:\s+or\s+ethnicity)?|ethnicity|gender[\s_-]+identity|"
+                r"sexual[\s_-]+orientation|marital[\s_-]+status|religion|"
+                r"religious[\s_-]+affiliation)\s*(?::|=)\s*\S+",
+                r"\b(?:my|candidate(?:'s)?|applicant(?:'s)?)\s+"
+                r"(?:race|ethnicity|gender[\s_-]+identity|sexual[\s_-]+orientation|"
+                r"marital[\s_-]+status|religion|religious[\s_-]+affiliation)\s+"
+                r"(?:is|are)\s+\S+",
+                r"\b(?:i\s+am|candidate\s+is|applicant\s+is)\s+"
+                r"(?:asian|black|white|hispanic|latino|latina|latinx|"
+                r"native[\s_-]+american|pacific[\s_-]+islander|"
+                r"middle[\s_-]+eastern|male|female|non[\s_-]*binary|transgender)\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|who\b|with\b))",
+                r"\b(?:my|candidate(?:'s)?|applicant(?:'s)?)\s+pronouns?\s+"
+                r"(?:are|is)\s+\S+",
+                r"\bi\s+use\s+\S+(?:\s*/\s*\S+)?\s+pronouns?\b",
+                r"\b(?:i\s+am|candidate\s+is|applicant\s+is)\s+\d{1,3}\s+years?\s+old\b",
+                r"\b(?:my|candidate(?:'s)?|applicant(?:'s)?)\s+age\s+(?:is|:|=)\s*"
+                r"\d{1,3}\b",
+                r"\b(?:date\s+of\s+birth|birth\s+date|dob)\s*(?::|=)\s*\S+",
+                r"\b(?:my|candidate(?:'s)?|applicant(?:'s)?)\s+"
+                r"(?:date\s+of\s+birth|birth\s+date)\s+is\s+\S+",
+                r"\b(?:single|married|divorced|widowed)\s+(?:candidate|applicant)\b",
+                r"\bi\s+am\s+(?:single|married|divorced|widowed)\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|with\b))",
+                r"\bi\s+am\s+(?:buddhist|christian|hindu|jewish|muslim|sikh)\b"
+                r"(?=\s*(?:$|[.,;:!?)]|and\b|but\b|who\b))",
+            ),
+            label_patterns=(
+                r"race(?:\s*(?:/|or)\s*ethnicity)?",
+                r"ethnicity",
+                r"gender[\s_-]+identity",
+                r"gender",
+                r"sex",
+                r"sexual[\s_-]+orientation",
+                r"pronouns?",
+                r"age",
+                r"date[\s_-]+of[\s_-]+birth",
+                r"birth[\s_-]+date",
+                r"dob",
+                r"marital[\s_-]+status",
+                r"religion",
+                r"religious[\s_-]+affiliation",
+                r"what\s+is\s+your\s+(?:age|gender|gender[\s_-]+identity|"
+                r"race(?:\s+(?:/|or)\s+ethnicity)?|ethnicity|religion)\??",
+                r"please\s+(?:select|choose)\s+your\s+(?:gender|race|ethnicity|"
+                r"race\s*(?:/|or)\s*ethnicity|religion)\??",
+                r"are\s+you\s+(?:hispanic|latino|latina|latinx)"
+                r"(?:\s+or\s+(?:hispanic|latino|latina|latinx))?\??",
+            ),
+            assignment_keys=(
+                "race",
+                "ethnicity",
+                "raceethnicity",
+                "gender",
+                "genderidentity",
+                "sex",
+                "sexualorientation",
+                "pronoun",
+                "pronouns",
+                "age",
+                "dateofbirth",
+                "birthdate",
+                "dob",
+                "maritalstatus",
+                "religion",
+                "religiousaffiliation",
+            ),
+        ),
+        _RestrictedContentCategory(
+            identifier="government_identifier",
+            context_patterns=(
+                r"\bsocial[\s_-]+security(?:[\s_-]+number)?\b",
+                r"\bs[\W_]*s[\W_]*n\b",
+                r"\bpassport[\s_-]+(?:number|no\.?|id)\b",
+                r"\bpassport(?:[\s_-]+(?:number|no\.?|id))?\s*(?:#|:)?\s*"
+                r"(?=[A-Z0-9-]{5,}\b)(?=[A-Z0-9-]*[0-9-])"
+                r"[A-Z0-9][A-Z0-9-]{4,}\b",
+                r"\bdriver'?s[\s_-]+licen[cs]e[\s_-]+(?:number|no\.?|id)\b",
+                r"\bdriver'?s?[\s_-]+licen[cs]e(?:[\s_-]+(?:number|no\.?|id))?"
+                r"\s*(?:#|:)?\s*(?=[A-Z0-9-]{5,}\b)(?=[A-Z0-9-]*[0-9-])"
+                r"[A-Z0-9][A-Z0-9-]{4,}\b",
+                r"\bDL\s*(?:#|:|=)\s*(?=[A-Z0-9-]{5,}\b)"
+                r"(?=[A-Z0-9-]*[0-9-])[A-Z0-9][A-Z0-9-]{4,}\b",
+                r"\b(?:national|government[\s_-]*issued|taxpayer)[\s_-]+id\b",
+                r"\b(?:national|government|tax)[\s_-]+id\s*(?:#|:|=)\s*\S+",
+                r"\b(?:itin|taxpayer[\s_-]+identification[\s_-]+number)\b",
+                r"\bEIN\s*(?:#|:)?\s*\d{2}-\d{7}\b",
+                r"(?<!\d)\d{3}[\s-]\d{2}[\s-]\d{4}(?!\d)",
+            ),
+            label_patterns=(
+                r"social[\s_-]*security(?:[\s_-]*number)?",
+                r"ssn",
+                r"passport(?:[\s_-]*(?:number|no\.?|id))?",
+                r"driver'?s?[\s_-]*licen[cs]e(?:[\s_-]*(?:number|no\.?|id))?",
+                r"national[\s_-]*id",
+                r"government[\s_-]*id",
+                r"tax[\s_-]*id",
+                r"itin",
+                r"ein",
+            ),
+            assignment_keys=(
+                "ssn",
+                "socialsecurity",
+                "socialsecuritynumber",
+                "passport",
+                "passportnumber",
+                "passportno",
+                "passportid",
+                "driverlicense",
+                "driverlicence",
+                "driverlicensenumber",
+                "driverlicencenumber",
+                "driverlicenseno",
+                "driverlicenceno",
+                "driverlicenseid",
+                "driverlicenceid",
+                "driverslicense",
+                "driverslicence",
+                "driverslicensenumber",
+                "driverslicencenumber",
+                "driverslicenseno",
+                "driverslicenceno",
+                "driverslicenseid",
+                "driverslicenceid",
+                "nationalid",
+                "governmentid",
+                "governmentissuedid",
+                "taxid",
+                "taxpayerid",
+                "taxpayeridentificationnumber",
+                "itin",
+                "ein",
+            ),
+        ),
+        _RestrictedContentCategory(
+            identifier="authentication_credential",
+            context_patterns=(
+                r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+[\s_-]+){0,3}"
+                r"(?:password|passwd|pwd|token|secret|credential(?:s)?|cookie|"
+                r"session[\s_-]*id|api[\s_-]*key|private[\s_-]*key|"
+                r"secret[\s_-]*access[\s_-]*key|access[\s_-]*key(?:[\s_-]*id)?)"
+                r"\s*(?::|=)\s*\S{4,}",
+                r"\bauthorization\s*:\s*(?:basic|bearer)\s+\S{8,}",
+                r"\bcookie\s*:\s*\S{8,}",
+                r"\b[A-Za-z][A-Za-z0-9+.-]*://[^/@\s:]+:[^/@\s]+@",
+                r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----",
+                r"\bgh[pousr]_[A-Za-z0-9]{20,}\b",
+                r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+                r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b",
+                r"\bxox[baprs]-[A-Za-z0-9-]{16,}\b",
+            ),
+            case_sensitive_context_patterns=(
+                r"\bAKIA[0-9A-Z]{16}\b",
+                r"\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\."
+                r"[A-Za-z0-9_-]{12,}\b",
+            ),
+            label_patterns=(
+                r"api[\s_+-]*(?:token|key)",
+                r"access[\s_-]*key(?:[\s_-]*id)?",
+                r"secret[\s_-]*access[\s_-]*key",
+                r"password",
+                r"passwd",
+                r"pwd",
+                r"token",
+                r"secret",
+                r"credential(?:s)?",
+                r"cookie",
+                r"session[\s_-]*(?:id|token)",
+                r"private[\s_-]*key",
+            ),
+            assignment_keys=(
+                "password",
+                "passwd",
+                "pwd",
+                "token",
+                "secret",
+                "credential",
+                "credentials",
+                "cookie",
+                "sessionid",
+                "apikey",
+                "apitoken",
+                "accesstoken",
+                "refreshtoken",
+                "authtoken",
+                "bearertoken",
+                "sessiontoken",
+                "privatekey",
+                "sshprivatekey",
+                "clientsecret",
+                "secretkey",
+                "secretaccesskey",
+                "awssecretaccesskey",
+                "accesskeyid",
+            ),
+        ),
     ),
 )
-_DISALLOWED_CONTEXT_PATTERN = re.compile(
+
+_REQUIRED_RESTRICTED_CATEGORY_IDS = frozenset(
+    {
+        "work_authorization_immigration",
+        "security_clearance",
+        "veteran_status",
+        "disability_status",
+        "criminal_legal_attestation",
+        "conflict_of_interest",
+        "demographic_self_identification",
+        "government_identifier",
+        "authentication_credential",
+    }
+)
+
+
+def _validate_restricted_content_taxonomy(
+    taxonomy: _RestrictedContentTaxonomy,
+) -> None:
+    if taxonomy.version != PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION:
+        raise RuntimeError("profile import restricted taxonomy version is inconsistent")
+    if not taxonomy.categories:
+        raise RuntimeError("profile import restricted taxonomy must not be empty")
+    identifiers: set[str] = set()
+    assignment_keys: set[str] = set()
+    for category in taxonomy.categories:
+        if (
+            re.fullmatch(r"[a-z][a-z0-9_]*", category.identifier) is None
+            or category.identifier in identifiers
+        ):
+            raise RuntimeError("profile import restricted category IDs must be unique")
+        identifiers.add(category.identifier)
+        if not (
+            category.context_patterns
+            or category.case_sensitive_context_patterns
+            or category.label_patterns
+            or category.assignment_keys
+        ):
+            raise RuntimeError("profile import restricted categories must contain rules")
+        for pattern in (
+            *category.context_patterns,
+            *category.case_sensitive_context_patterns,
+            *category.label_patterns,
+        ):
+            try:
+                compiled = re.compile(pattern)
+            except re.error as error:
+                raise RuntimeError(
+                    "profile import restricted taxonomy contains an invalid pattern"
+                ) from error
+            if compiled.search("") is not None:
+                raise RuntimeError(
+                    "profile import restricted taxonomy patterns must not match empty text"
+                )
+        for key in category.assignment_keys:
+            if (
+                not key
+                or key != key.casefold()
+                or not key.isalnum()
+                or key in assignment_keys
+            ):
+                raise RuntimeError(
+                    "profile import restricted assignment keys must be unique normalized text"
+                )
+            assignment_keys.add(key)
+    if identifiers != _REQUIRED_RESTRICTED_CATEGORY_IDS:
+        raise RuntimeError("profile import restricted taxonomy categories are incomplete")
+
+
+def _restricted_taxonomy_sha256(taxonomy: _RestrictedContentTaxonomy) -> str:
+    payload = {
+        "version": taxonomy.version,
+        "categories": [
+            {
+                "identifier": category.identifier,
+                "context_patterns": sorted(category.context_patterns),
+                "case_sensitive_context_patterns": sorted(
+                    category.case_sensitive_context_patterns
+                ),
+                "label_patterns": sorted(category.label_patterns),
+                "assignment_keys": sorted(category.assignment_keys),
+            }
+            for category in sorted(
+                taxonomy.categories,
+                key=lambda item: item.identifier,
+            )
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+_validate_restricted_content_taxonomy(_RESTRICTED_CONTENT_TAXONOMY)
+PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256 = _restricted_taxonomy_sha256(
+    _RESTRICTED_CONTENT_TAXONOMY
+)
+_RESTRICTED_ASSIGNMENT_KEYS = tuple(
+    key
+    for category in _RESTRICTED_CONTENT_TAXONOMY.categories
+    for key in category.assignment_keys
+)
+_RESTRICTED_ASSIGNMENT_KEY_SET = frozenset(_RESTRICTED_ASSIGNMENT_KEYS)
+_RESTRICTED_CONTEXT_PATTERN = re.compile(
     "|".join(
-        f"(?i:{pattern.pattern})"
-        if pattern.flags & re.IGNORECASE
-        else f"(?:{pattern.pattern})"
-        for pattern in _DISALLOWED_CONTEXT_PATTERNS
+        compiled_pattern
+        for category in _RESTRICTED_CONTENT_TAXONOMY.categories
+        for compiled_pattern in (
+            *(f"(?i:{pattern})" for pattern in category.context_patterns),
+            *(
+                f"(?:{pattern})"
+                for pattern in category.case_sensitive_context_patterns
+            ),
+        )
     )
+)
+_RESTRICTED_LABEL_ONLY_PATTERN = re.compile(
+    r"\s*(?:"
+    + "|".join(
+        f"(?:{pattern})"
+        for category in _RESTRICTED_CONTENT_TAXONOMY.categories
+        for pattern in category.label_patterns
+    )
+    + r")(?:\s*(?:[*†]|\((?:optional|voluntary|required|select one|choose one)\))){0,2}"
+    + r"\s*:?\s*",
+    re.IGNORECASE,
 )
 
 
@@ -432,6 +903,14 @@ def registered_profile_import_claim_types() -> frozenset[str]:
     """Return every claim type with a versioned import value schema."""
 
     return frozenset(_PROFILE_IMPORT_VALUE_SCHEMAS)
+
+
+def registered_profile_import_restricted_categories() -> frozenset[str]:
+    """Return stable category IDs from the active restricted-text taxonomy."""
+
+    return frozenset(
+        category.identifier for category in _RESTRICTED_CONTENT_TAXONOMY.categories
+    )
 
 
 def _iter_text_components(
@@ -497,12 +976,23 @@ def _percent_decoded_variants(value: str) -> tuple[str, ...]:
     return tuple(variants)
 
 
-def _contains_disallowed(value: str) -> bool:
+def _contains_restricted_content(value: str) -> bool:
     return any(
-        _DISALLOWED_CONTEXT_PATTERN.search(normalized) is not None
+        _RESTRICTED_CONTEXT_PATTERN.search(normalized) is not None
         for normalized in (
             _normalized_for_detection(value),
             _normalized_with_control_separators(value),
+        )
+    )
+
+
+def _matches_restricted_label(value: str) -> bool:
+    return any(
+        _RESTRICTED_LABEL_ONLY_PATTERN.fullmatch(normalized) is not None
+        for variant in _percent_decoded_variants(value)
+        for normalized in (
+            _normalized_for_detection(variant),
+            _normalized_with_control_separators(variant),
         )
     )
 
@@ -516,7 +1006,7 @@ def _compact_assignment_fragment(value: str) -> str:
 
 
 def _assignment_left_fragments(value: str) -> Iterator[str]:
-    maximum_key_length = max(map(len, _SENSITIVE_ASSIGNMENT_KEYS))
+    maximum_key_length = max(map(len, _RESTRICTED_ASSIGNMENT_KEYS))
     normalized = _normalized_for_detection(value).casefold()
     suffix_has_nonspace = [False] * (len(normalized) + 1)
     for index in range(len(normalized) - 1, -1, -1):
@@ -540,20 +1030,20 @@ def _assignment_left_fragments(value: str) -> Iterator[str]:
         compact_suffixes.add("")
 
 
-def _contains_exact_sensitive_assignment(value: str) -> bool:
+def _contains_exact_restricted_assignment(value: str) -> bool:
     return any(
-        fragment in _SENSITIVE_ASSIGNMENT_KEY_SET
+        fragment in _RESTRICTED_ASSIGNMENT_KEY_SET
         for fragment in _assignment_left_fragments(value)
     )
 
 
-def _contains_fragmented_assignment(components: Sequence[str]) -> bool:
+def _contains_fragmented_restricted_assignment(components: Sequence[str]) -> bool:
     if len(components) < 2 or not any(
         "=" in component or ":" in component or "#" in component
         for component in components
     ):
         return False
-    maximum_key_length = max(map(len, _SENSITIVE_ASSIGNMENT_KEYS))
+    maximum_key_length = max(map(len, _RESTRICTED_ASSIGNMENT_KEYS))
     compact_components = tuple(_compact_assignment_fragment(item) for item in components)
     suffix_owners: dict[str, set[int]] = {}
     for owner, component in enumerate(compact_components):
@@ -562,7 +1052,7 @@ def _contains_fragmented_assignment(components: Sequence[str]) -> bool:
     possible_splits: dict[str, set[str]] = {}
     for prefix, assignment_fragment in (
         (key[:split], key[split:])
-        for key in _SENSITIVE_ASSIGNMENT_KEYS
+        for key in _RESTRICTED_ASSIGNMENT_KEYS
         for split in range(1, len(key))
         if key[:split] in suffix_owners
     ):
@@ -593,7 +1083,7 @@ def _bounded_fragment_component(value: str) -> str:
     )
 
 
-def _reject_disallowed_components(components: tuple[str, ...]) -> None:
+def _reject_restricted_components(components: tuple[str, ...]) -> None:
     if any(len(item) > _MAX_CONTENT_COMPONENT_CODEPOINTS for item in components):
         raise ValueError("proposal content exceeds the safe component limit")
     variants_by_component = tuple(
@@ -604,7 +1094,9 @@ def _reject_disallowed_components(components: tuple[str, ...]) -> None:
         for variants in variants_by_component
         for variant in variants
     ):
-        if _contains_disallowed(item) or _contains_exact_sensitive_assignment(item):
+        if _contains_restricted_content(
+            item
+        ) or _contains_exact_restricted_assignment(item):
             raise ValueError(
                 "proposal content contains a disallowed sensitive or credential-like value"
             )
@@ -630,7 +1122,7 @@ def _reject_disallowed_components(components: tuple[str, ...]) -> None:
                     if aggregate in seen_aggregates:
                         continue
                     seen_aggregates.add(aggregate)
-                    if _contains_disallowed(aggregate):
+                    if _contains_restricted_content(aggregate):
                         raise ValueError(
                             "proposal content contains fragmented sensitive or credential-like value"
                         )
@@ -642,11 +1134,11 @@ def _reject_disallowed_components(components: tuple[str, ...]) -> None:
                 if aggregate in seen_aggregates:
                     continue
                 seen_aggregates.add(aggregate)
-                if _contains_disallowed(aggregate):
+                if _contains_restricted_content(aggregate):
                     raise ValueError(
                         "proposal content contains fragmented sensitive or credential-like value"
                     )
-    if _contains_fragmented_assignment(semantic_components):
+    if _contains_fragmented_restricted_assignment(semantic_components):
         raise ValueError(
             "proposal content contains fragmented sensitive or credential-like value"
         )
@@ -659,6 +1151,7 @@ def validate_profile_import_proposal(
     canonical_text: str,
     evidence_text: str,
     evidence_context: str,
+    evidence_prefix: str,
     preceding_line: str | None,
 ) -> None:
     """Validate one proposal's typed value and persisted content fields."""
@@ -674,26 +1167,32 @@ def validate_profile_import_proposal(
         raise ValueError("proposal selected evidence contains too many lines")
 
     schema.validate(value)
-    _reject_disallowed_components(
+    _reject_restricted_components(
         (
             *tuple(_iter_text_components(value, include_keys=False)),
             canonical_text,
             evidence_text,
         )
     )
-    _reject_disallowed_components((evidence_context,))
+    _reject_restricted_components((evidence_context,))
+    if evidence_prefix.strip() and _matches_restricted_label(evidence_prefix.strip()):
+        raise ValueError(
+            "proposal content contains a disallowed sensitive or credential-like value"
+        )
     if (
         preceding_line is not None
-        and _SENSITIVE_LABEL_ONLY_PATTERN.fullmatch(preceding_line) is not None
+        and _matches_restricted_label(preceding_line)
     ):
-        _reject_disallowed_components((f"{preceding_line}: {evidence_context}",))
+        raise ValueError(
+            "proposal content contains a disallowed sensitive or credential-like value"
+        )
 
 
 def validate_profile_import_metadata(values: tuple[str | None, ...]) -> None:
     """Reject sensitive or credential-like text in persisted import metadata."""
 
     components = tuple(value for value in values if value is not None)
-    _reject_disallowed_components(components)
+    _reject_restricted_components(components)
 
 
 def _decoded_components(components: Sequence[str]) -> tuple[str, ...]:
@@ -921,7 +1420,7 @@ def validate_profile_import_batch(
     )
     raw_metadata_components = tuple(item for item in metadata if item is not None)
     metadata_components = _decoded_components(raw_metadata_components)
-    if _contains_fragmented_assignment(
+    if _contains_fragmented_restricted_assignment(
         (
             *value_components,
             *canonical_components,

@@ -13,18 +13,18 @@ working-tree checkpoint and next exact task.
 - **Planned** means design intent only.
 - **Blocked** names a concrete dependency or unresolved decision.
 
-As of September 3, 2026, the repository is in **Phase 0**. The design basis,
+As of September 4, 2026, the repository is in **Phase 0**. The design basis,
 resumability contract, executable scaffold, deterministic truth policies, and
 initial SQLite persistence slice are implemented and verified. Safe structured
-text-import proposals, registered schema-v1 claim values, deterministic
-high-confidence defense-in-depth screening of persisted content and metadata,
-whole-source minimization guards, a stable-descriptor file/stdin CLI boundary,
-application-owned digest provenance, a registered manifest ingress,
-replay-bound workflow records, provenance-validating read-only review, and the
-first synthetic profile fixture are implemented. Review decisions, broader
-restricted-content classification, registered derivations, data lifecycle
-tools, and all end-user application workflows in Phases 1–5 remain planned or
-in progress.
+text-import proposals, registered schema-v1 claim values, a versioned
+nine-category restricted-text taxonomy for deterministic high-confidence
+screening of persisted content and metadata, whole-source minimization guards, a
+stable-descriptor file/stdin CLI boundary, application-owned digest provenance,
+a registered manifest ingress, replay-bound workflow records,
+provenance-validating read-only review, and the first synthetic profile fixture
+are implemented. Review decisions, semantic and broader obfuscation
+classification, registered derivations, data lifecycle tools, and all end-user
+application workflows in Phases 1–5 remain planned or in progress.
 
 ## Phase 0 — Repository and truth layer
 
@@ -43,9 +43,9 @@ facts and provenance without placing private data in the repository.
 | `NeedInfo`, `Contradiction`, and claim-packet resolution | Implemented | Missing/conflicting/stale/sensitive cases fail closed |
 | SQLite schema and migration mechanism | Implemented | Atomic fresh/concurrent init, future refusal, checksum validation, and existing-only no-migration writes pass |
 | Repository/service boundaries for validated mutation | In progress | Claim/evidence service round trips and CLI import use services; approval mutation remains |
-| Resume import, extraction proposal, and human review | In progress | Manifest-v2 file/stdin proposals snapshot nested state, bind exact source bytes to a path-free digest artifact and registered ingress, use closed value schemas plus bounded content/minimization guards, create workflow/index-bound records, and revalidate provenance for replay/read-only review; extraction, broader restricted-content classification, and review decisions remain |
+| Resume import, extraction proposal, and human review | In progress | Manifest-v2 file/stdin proposals snapshot nested state, bind exact source bytes to a path-free digest artifact and registered ingress, use closed value schemas plus a versioned nine-category restricted-text taxonomy and bounded minimization guards, create workflow/index-bound records, and revalidate provenance for replay/read-only review; extraction, semantic/novel-obfuscation classification, and review decisions remain |
 | Redacted logging, backup, export, and deletion | Planned | Privacy and round-trip tests pass on synthetic data |
-| Synthetic candidate/job fixtures and adversarial corpus | In progress | One synthetic profile plus adversarial schema, sensitive-content, secret, percent-encoding, fragmentation, whole-source, padding, mutation, and no-write import cases exist; broader candidate/job corpus remains |
+| Synthetic candidate/job fixtures and adversarial corpus | In progress | One synthetic profile plus adversarial schema, all nine taxonomy-category positives, explicit lexical false-positive controls, secret, percent-encoding, fragmentation, whole-source, padding, mutation, and no-write import cases exist; broader candidate/job corpus remains |
 
 Phase 0 exits only when the canonical commands pass from a clean checkout, real
 data is unnecessary, and the truth/privacy invariants have automated coverage.

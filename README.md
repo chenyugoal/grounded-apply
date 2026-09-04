@@ -103,11 +103,16 @@ source or proposals.
 
 Every allowed claim type has a closed value-schema-version-1 shape. Before any
 storage transaction, the service snapshots all nested request state and
-validates the whole batch with deterministic high-confidence checks over
-persisted claim content and import metadata, including fixed-point percent
-decoding, fragmented-content checks, evidence bounds, and normalized/
-alphanumeric whole-source guards. These checks are defense in depth, not
-complete secret or PII classification. Value, content-policy, request,
+validates the whole batch under content policy 2. All restricted-text matchers
+are derived from one immutable taxonomy version 1 covering work authorization
+and immigration, security clearance, veteran and disability status,
+criminal/legal attestations, conflicts of interest, demographic
+self-identification, government identifiers, and authentication credentials.
+The taxonomy uses deterministic high-confidence context, exact-assignment, and
+label rules, plus fixed-point percent decoding and bounded fragmentation checks.
+Its version and canonical SHA-256 are recorded in request-identity schema 3.
+These checks are defense in depth, not complete semantic, secret, or PII
+classification. Manifest, request, value, content-policy, restricted-taxonomy,
 locator, result-manifest, source-identity, and record-ID versions are bound into
 the workflow audit identity. Claim and evidence IDs are deterministically bound
 to the creating workflow and proposal position, and an idempotent retry
@@ -121,9 +126,11 @@ artifact retains the digest
 and byte/code-point sizes, never an input path, original filename, or source
 body. Terminal symlinks and files that change between inspection and descriptor
 read are rejected. To prevent an answer-only span from hiding its label,
-validation also checks a bounded same-line neighborhood and a recognized
-label-only line immediately preceding the selection when it falls within the
-512-code-point lookbehind.
+validation also checks a bounded same-line neighborhood and the nearest nonblank
+recognized label-only line within a 512-code-point lookbehind, including across
+blank extraction separators. Unrelated unselected source lines remain outside
+classification. A selected span with more than 512 unbroken same-line prefix
+code points fails closed because its full bounded label context is unavailable.
 Import and review fail unchanged if the private data directory or database gains
 group/other access, if the database target escapes its data directory, or if a
 portable runtime child escapes `GROUNDED_APPLY_HOME`.
@@ -135,11 +142,16 @@ artifact, registered ingress, one-to-one evidence link, locator digest and
 bounds, and selected-text checksum. Generic claim/evidence mutation APIs reject
 `imported_resume`; only the import workflow can create that provenance.
 
-Manifest version 1 and the former public `CreateImportProposal` shape are
-intentionally unsupported. Regenerate a version-2 manifest and use a fresh
-opaque idempotency key in a synthetic runtime. Legacy pending imported rows are
-not relabeled or trusted automatically; the current review command fails closed
-until a migration or lifecycle command is implemented.
+Manifest version 1, request-identity versions 1–2, content-policy version 1, and
+the former public `CreateImportProposal` shape are intentionally unsupported.
+Current imports use manifest 2, request identity 3, content policy 2, and
+restricted taxonomy 1. Regenerate manifest-v1 input; for a manifest-v2 workflow
+created under the earlier policy, use a fresh opaque idempotency key in
+disposable synthetic state. There is no automatic policy migration or
+reclassification. Legacy path-provenance rows fail review closed. Earlier-policy
+rows remain pending and unusable, but the read-only review path does not yet
+taxonomy-revalidate them because it is not bound to their workflow/result
+identity.
 
 ## Product shape
 

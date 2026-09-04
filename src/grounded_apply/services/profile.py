@@ -41,6 +41,8 @@ from grounded_apply.services.profile_import_validation import (
     PROFILE_IMPORT_MAX_SOURCE_BYTES,
     PROFILE_IMPORT_MAX_TOTAL_EVIDENCE_CODEPOINTS,
     PROFILE_IMPORT_MAX_TOTAL_METADATA_CODEPOINTS,
+    PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
+    PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
     PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
     registered_profile_import_claim_types,
     validate_profile_import_batch,
@@ -57,7 +59,7 @@ _PROFILE_IMPORT_SOURCE_REF_PATTERN = re.compile(r"sha256:(?P<digest>[0-9a-f]{64}
 _LINE_BREAK_PATTERN = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION = 2
-PROFILE_IMPORT_REQUEST_SCHEMA_VERSION = 2
+PROFILE_IMPORT_REQUEST_SCHEMA_VERSION = 3
 PROFILE_IMPORT_SOURCE_IDENTITY_SCHEMA_VERSION = 1
 PROFILE_IMPORT_RESULT_MANIFEST_SCHEMA_VERSION = 2
 PROFILE_IMPORT_SPAN_LOCATOR_SCHEMA_VERSION = 1
@@ -765,6 +767,8 @@ def _import_workflow_input(
         "source_identity_schema_version": PROFILE_IMPORT_SOURCE_IDENTITY_SCHEMA_VERSION,
         "span_locator_schema_version": PROFILE_IMPORT_SPAN_LOCATOR_SCHEMA_VERSION,
         "content_policy_version": PROFILE_IMPORT_CONTENT_POLICY_VERSION,
+        "restricted_taxonomy_sha256": PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
+        "restricted_taxonomy_version": PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
         "value_schema_version": PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
         "extractor_id": request.extractor_id,
         "idempotency_key_sha256": idempotency_key_sha256,
@@ -844,16 +848,26 @@ def _validated_source_spans(request: CreateImportProposal) -> tuple[str, ...]:
         preceding_breaks = tuple(_LINE_BREAK_PATTERN.finditer(preceding_text))
         if preceding_breaks:
             current_line_start = lookbehind_start + preceding_breaks[-1].end()
-            previous_line_end = preceding_breaks[-1].start()
-            previous_line_start = (
-                preceding_breaks[-2].end() if len(preceding_breaks) > 1 else 0
+            preceding_lines = _LINE_BREAK_PATTERN.split(preceding_text)[:-1]
+            preceding_line = next(
+                (
+                    line.strip()
+                    for line in reversed(preceding_lines)
+                    if line.strip()
+                ),
+                None,
             )
-            preceding_line = preceding_text[
-                previous_line_start:previous_line_end
-            ].strip()
-            if not preceding_line:
-                preceding_line = None
         else:
+            if (
+                lookbehind_start > 0
+                and _LINE_BREAK_PATTERN.fullmatch(
+                    request.source_text[lookbehind_start - 1 : lookbehind_start]
+                )
+                is None
+            ):
+                raise ValueError(
+                    f"proposal {index} same-line context exceeds the safe limit"
+                )
             current_line_start = lookbehind_start
             preceding_line = None
         following_text = request.source_text[
@@ -872,6 +886,7 @@ def _validated_source_spans(request: CreateImportProposal) -> tuple[str, ...]:
             canonical_text=proposal.canonical_text,
             evidence_text=exact_text,
             evidence_context=request.source_text[context_start:current_line_end],
+            evidence_prefix=request.source_text[current_line_start:span.start],
             preceding_line=preceding_line,
         )
         total_selected_codepoints += len(exact_text)

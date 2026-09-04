@@ -96,25 +96,31 @@ validates the entire batch. The persisted surfaces it screens include recursive
 value strings (whose object keys are fixed by the closed schemas), canonical
 text, exact selected evidence, application-derived source/artifact/ingress
 identifiers, and caller-supplied subject/scope identifiers. Deterministic
-high-confidence patterns reject
-recognizable work-authorization or immigration answers, government identifiers,
-credential assignments, private keys, and common token formats. Percent-encoded
-content is decoded repeatedly to a fixed point, with at most eight decoding
-rounds; content still changing after that is rejected. Fixed-size ordered
-boundary pairs are checked within each proposal. Recognized assignment keys
-split across two persisted content or metadata components are checked across the
-batch; broader multi-component fragmentation is outside this heuristic.
+high-confidence rules are derived from one immutable restricted-text taxonomy.
+Taxonomy version 1 has stable categories for work authorization/immigration,
+security clearance, veteran status, disability status, criminal/legal
+attestations, conflicts of interest, demographic self-identification,
+government identifiers, and authentication credentials. Each category declares
+context patterns, exact normalized assignment keys, and label-only patterns;
+the application validates the declaration at import and derives every matcher
+from it. Percent-encoded content is decoded repeatedly to a fixed point, with at
+most eight decoding rounds; content still changing after that is rejected.
+Fixed-size ordered boundary pairs are checked within each proposal. Recognized
+assignment keys split across two persisted content or metadata components are
+checked across the batch; broader multi-component fragmentation is outside this
+heuristic.
 Caller-controlled metadata is limited to 1,048,576 persisted code points per
 batch, including the per-record copies made for each claim and evidence row.
-This is defense in depth, not a complete secret or PII classifier.
-Manifest/request schema 2, value schema 1, content policy 1, source-identity 1,
-span-locator 1, result-manifest 2, and record-ID 1 participate in the
-idempotency request hash and are recorded in the workflow audit input. That
-input contains only version identifiers, counts, digests, the registered ingress
-ID, and digest-derived source/artifact references. It includes the already
-hashed idempotency key so the lookup column is redundantly bound to the audited
-input; it contains no raw source, proposed values, selected evidence, file path,
-filename, or raw idempotency key.
+This is deterministic lexical defense in depth, not a complete semantic, secret,
+or PII classifier. Manifest schema 2, request-identity schema 3, value schema 1,
+content policy 2, restricted taxonomy 1 plus its canonical SHA-256,
+source-identity 1, span-locator 1, result-manifest 2, and record-ID 1 participate
+in the idempotency request hash and are recorded in the workflow audit input.
+That input contains only version identifiers, counts, digests, the registered
+ingress ID, and digest-derived source/artifact references. It includes the
+already hashed idempotency key so the lookup column is redundantly bound to the
+audited input; it contains no raw source, proposed values, selected evidence,
+file path, filename, or raw idempotency key.
 
 Canonical text is limited to 2,048 code points. Each selected evidence item is
 limited to 4,096 code points and 16 lines, and all selected evidence in one batch
@@ -147,10 +153,16 @@ claim/evidence pair references that artifact and the registered
 names the application path that accepted the untrusted manifest; it does not
 assert who produced the proposals. To prevent an answer-only selection from
 hiding a sensitive label, the service screens up to 256 unselected code points
-on either side within the selected logical line and an exact recognized
-label-only line immediately before it when that line falls within a
-512-code-point lookbehind. Contradiction-aware approval, redacted logging, and
-data lifecycle commands are still required before real candidate use.
+on either side within the selected logical line, including a same-line label
+prefix, and the nearest nonblank exact recognized label-only line in a
+512-code-point lookbehind. Blank extraction separators therefore cannot detach
+an answer from its label. Label-only matching applies the same bounded
+fixed-point percent decoding and Unicode/control normalization used by the
+taxonomy without classifying unrelated unselected lines. Contradiction-aware
+approval, redacted logging, and data lifecycle commands are still required
+before real candidate use. If more than 512 code points precede the selection on
+the same logical line, validation fails closed rather than silently treating a
+truncated suffix as the complete label context.
 
 `profile import --dry-run` performs service-owned request validation without
 opening a repository or creating runtime state. Its `storage_checked: false`
@@ -186,14 +198,18 @@ digest-only artifact, registered ingress, locator schema/source digest,
 codepoint bounds, and selected-text checksum. It has no mutation or approval
 option. Prompt-like imported content is data, never an instruction.
 
-Manifest version 1, request identity version 1, and the former public
-`CreateImportProposal` constructor are hard compatibility breaks. There is no
-automatic migration or provenance relabel. Regenerate a version-2 manifest and
-use a fresh opaque idempotency key in a disposable synthetic runtime. A legacy
-pending imported row causes review to fail closed without displaying its old
-path-like provenance. Future source-identity or locator version changes likewise
-require a registered version-dispatched validator or an explicit migration;
-stored version tags do not by themselves grant compatibility.
+Manifest version 1, request-identity versions 1–2, content-policy version 1, and
+the former public `CreateImportProposal` constructor are unsupported. Current
+imports use manifest 2, request identity 3, content policy 2, and restricted
+taxonomy 1. Regenerate manifest-v1 input; for a manifest-v2 workflow created
+under the earlier policy, use a fresh opaque idempotency key in disposable
+synthetic state. There is no automatic policy migration or reclassification.
+Legacy path-provenance rows fail review closed without displaying their old
+provenance. Earlier-policy rows remain pending and unusable, but review does not
+yet taxonomy-revalidate them because it is not bound to their workflow/result
+identity. Future version changes likewise require a registered dispatcher or an
+explicit migration; stored version tags do not by themselves grant
+compatibility.
 
 This boundary is currently for synthetic development data only.
 

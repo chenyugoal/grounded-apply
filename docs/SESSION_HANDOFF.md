@@ -6,59 +6,61 @@ architecture rationale in ADRs.
 
 ## Checkpoint
 
-- **Last updated:** 2026-09-03 23:42 CDT
+- **Last updated:** 2026-09-04 11:28 CDT
 - **Branch:** `codex/phase-0-truth-layer`
-- **HEAD:** `7b247ee` (`Implement grounded application workflow improvements`)
-- **Milestone:** Phase 0 — application-owned profile-import provenance
+- **HEAD:** `7986f68` (`Implement evidence-backed job application workflows`),
+  one commit ahead of `origin/codex/phase-0-truth-layer`
+- **Milestone:** Phase 0 — versioned restricted-text taxonomy
 - **Status:** This narrow milestone is implemented and verified in the working
   tree. Phase 0 continues; the product is not release-ready and must not be used
   with real candidate data.
 - **Expected working tree:** Uncommitted changes in `README.md`,
   `docs/DEVELOPMENT.md`, `docs/ROADMAP.md`, this file,
-  `src/grounded_apply/cli.py`, `src/grounded_apply/services/__init__.py`,
+  `src/grounded_apply/services/__init__.py`,
   `src/grounded_apply/services/profile.py`,
-  `tests/fixtures/synthetic_profile/import_proposals.json`, `tests/test_cli.py`,
-  `tests/test_profile_import.py`, and `tests/test_profile_service.py`.
+  `src/grounded_apply/services/profile_import_validation.py`, and
+  `tests/test_profile_import.py`.
 
-The tree was clean and matched `origin/codex/phase-0-truth-layer` at session
-start. The previous handoff was stale: it named HEAD `5ab2fcc` and changes that
-were not present. The required first command passed 159 tests before this work
-began.
+The tree was clean at HEAD `7986f68` at session start. The previous handoff was
+stale: it named HEAD `7b247ee` and uncommitted paths that were not present. The
+required first command passed 186 tests before this work began.
 
 ## Implemented and verified
 
-- Profile-import manifest schema 2 requires a source SHA-256 consistency
-  assertion. The service recomputes the digest from the exact source text and
-  owns the source reference, deterministic artifact ID, registered ingress /
-  extractor ID, and their schema versions. Caller-supplied provenance authority
-  and unknown manifest fields are rejected.
-- Source files are captured through one bounded descriptor. Symlinks and
-  non-regular files are rejected, `O_NOFOLLOW` and `O_NONBLOCK` are required,
-  and device, inode, type, size, modification time, and change time must remain
-  stable through the read. Errors do not disclose private paths. Standard input
-  remains supported.
-- Imports record a strictly validated digest-only source artifact. It stores no
-  source path, original filename, or raw source text. Artifact collisions,
-  corruption, and missing workflow-referenced artifacts fail closed rather than
-  being repaired silently.
-- Workflow audit identity contains only application-owned versions, hashes,
-  counts, and digest references. The raw idempotency key is hashed; raw source
-  text and private paths are excluded. Claim and evidence IDs are bound to the
-  workflow and proposal position, and replay validates their exact derivation.
-- Generic claim/evidence APIs cannot create `imported_resume` records. Only the
-  validated import workflow can persist that source type, preventing callers
-  from bypassing import provenance and pending-review invariants.
-- Idempotent replay validates the complete succeeded checkpoint, result
-  manifest, record identities, claim/evidence semantics, exact source locator,
-  link, and artifact contract. Cross-workflow and cross-position substitution
-  fail closed.
-- Review-list construction revalidates pending/unverified state, evidence/link
-  cardinality, digest artifact, registered ingress, locator bounds, and exact
-  span checksum. Legacy or mixed legacy/schema-2 queues fail closed without
-  echoing paths or corrupt stored timestamp values.
-- Documentation and synthetic adversarial tests were updated for the schema-2
-  hard break, digest semantics, private-path non-disclosure, secure capture,
-  provenance forgery, replay substitution, and corrupt-record failure modes.
+- Profile-import content policy 2 derives all restricted-text matchers from one
+  immutable taxonomy version 1. Its nine stable categories are work
+  authorization/immigration, security clearance, veteran status, disability
+  status, criminal/legal attestations, conflicts of interest, demographic
+  self-identification, government identifiers, and authentication credentials.
+- Each category declares context patterns, label patterns, normalized assignment
+  aliases, and any case-sensitive patterns. Import-time validation rejects an
+  incomplete, duplicate, malformed, empty-matching, or inconsistently versioned
+  taxonomy declaration. The exported registry and canonical taxonomy SHA-256
+  are pinned by tests.
+- Request-identity schema 3 binds taxonomy version 1 and its canonical SHA-256,
+  along with content-policy version 2, into the workflow input and request hash.
+  A realistic workflow created under request schema 2/content policy 1 cannot
+  replay under the current identity or create records.
+- Exact-assignment, context, fixed-point percent-decoding, Unicode/control
+  normalization, and bounded cross-component checks now cover all nine
+  categories on recursive values, canonical text, selected evidence, and
+  persisted import metadata. Rejections happen before storage and do not echo
+  the rejected value.
+- Answer-only evidence cannot detach from an exact restricted label on the same
+  line or the nearest nonblank line within the bounded lookbehind, including
+  across blank extraction separators, long same-line spacing, and encoded or
+  control-obfuscated labels. Same-line prefixes over the 512-codepoint bound fail
+  closed rather than losing their leading context. General restricted content
+  on an unrelated unselected line remains outside classification and is not
+  stored.
+- Adversarial tests cover common positive phrasings, normalized assignment
+  aliases, label/question forms, same-line and blank-line extraction shapes,
+  and explicit false-positive controls for customs clearance, accessibility,
+  research, workflow, analytics, cryptographic-signature, and similar legitimate
+  resume language.
+- README, development guidance, and roadmap status now describe the exact
+  version matrix, compatibility break, implemented taxonomy boundary, and
+  remaining semantic-classification limitations.
 
 ## Verification
 
@@ -66,11 +68,11 @@ All verification used synthetic `example.com` data and no network access.
 
 ```text
 ./scripts/check
-PASS — CLI help + isolated doctor smoke + 186/186 unittest cases
+PASS — CLI help + isolated doctor smoke + 196/196 unittest cases
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
   -m unittest tests.test_profile_import -q
-PASS — 88/88 profile-import tests
+PASS — 98/98 profile-import tests
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
   -m unittest tests.test_cli -q
@@ -82,34 +84,34 @@ PASS — 10/10 profile-service tests
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
   -m unittest discover -s tests -v
-PASS — 186/186 tests with warnings treated as errors
+PASS — 196/196 tests with warnings treated as errors
 
 ./scripts/gapply --help
 ./scripts/gapply profile import --help
 ./scripts/gapply profile review --help
 PASS
 
-GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-release.ctUMI2/doctor-home \
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-taxonomy-smoke.mu8Ze3/doctor-home \
   ./scripts/gapply doctor --json
 PASS — read-only uninitialized result; the runtime path was not created
 
-GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-release.ctUMI2/dry-run-home \
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-taxonomy-smoke.mu8Ze3/dry-run-home \
   ./scripts/gapply profile import \
   --source-file tests/fixtures/synthetic_profile/resume.txt \
   --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
-  --idempotency-key synthetic-release-smoke-1 --dry-run --json
-PASS — schema-2 preview with derived provenance; runtime path was not created
+  --idempotency-key synthetic-taxonomy-smoke-1 --dry-run --json
+PASS — manifest-2 preview with derived provenance; runtime path was not created
 
-GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-release.ctUMI2/smoke-home \
+GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-taxonomy-smoke.mu8Ze3/smoke-home \
   ./scripts/gapply profile init --json
 GROUNDED_APPLY_HOME=<same> ./scripts/gapply profile import \
   --source-file tests/fixtures/synthetic_profile/resume.txt \
   --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
-  --idempotency-key synthetic-release-smoke-1 --json
+  --idempotency-key synthetic-taxonomy-smoke-1 --json
 GROUNDED_APPLY_HOME=<same> ./scripts/gapply profile import \
   --source-file tests/fixtures/synthetic_profile/resume.txt \
   --proposals-file tests/fixtures/synthetic_profile/import_proposals.json \
-  --idempotency-key synthetic-release-smoke-1 --json
+  --idempotency-key synthetic-taxonomy-smoke-1 --json
 GROUNDED_APPLY_HOME=<same> ./scripts/gapply profile review --json
 PASS — replay returned identical workflow/claim/evidence IDs; review returned
 5 pending, unusable claims with exact evidence spans
@@ -118,35 +120,34 @@ git diff --check
 PASS
 ```
 
+The disposable smoke runtime root was removed after verification.
+
 Complete-diff review and changed-path credential/PII scans found no secrets or
 real candidate data. Identity-, credential-, and government-ID-like strings are
-conspicuously synthetic test fixtures, deny-pattern definitions, or assertions.
+conspicuously synthetic tests, deny-pattern definitions, or assertions.
 
 ## Known limitations and release blockers
 
-- The source digest is a consistency and correlation identifier, not proof of
-  origin, authentication, confidentiality, or encryption.
-- Raw source remains caller-managed and exists transiently in memory. The
-  application persists only the digest artifact plus validated proposed claim
-  values and selected evidence excerpts; protected artifact retention, redacted logging,
-  backup, export, and deletion policies remain planned.
-- Manifest schema 1 and its request identity have no migration. Legacy import
-  provenance is deliberately not trusted automatically, and one legacy row can
-  make the current all-or-nothing review queue fail closed. Use fresh schema-2
-  synthetic runtime data and idempotency keys during development.
-- Version fields currently act as rejection gates. A future version needs an
-  explicit dispatcher and migration rather than changing current semantics in
-  place.
-- Sensitive-content classification remains incomplete. Clearance, veteran
-  status, disability, criminal/legal attestations, conflicts, demographics, and
-  other restricted categories can still be hidden under an allowed claim type.
-  Fragmented labels, mixed encoding depths, homoglyphs, entity encodings, and
-  arbitrary channel reorderings are not exhaustively classified.
+- Taxonomy v1 is a deterministic high-confidence lexical boundary, not semantic
+  classification. Novel phrasing, homoglyph and entity encodings, mixed-depth or
+  broader fragmentation, arbitrary channel reorderings, and non-English content
+  remain incompletely classified.
+- Unselected raw source is deliberately not globally classified. Same-line
+  context is bounded to 256 code points and label lookbehind to 512 code points;
+  overlong same-line prefixes fail closed. Raw source remains caller-managed and
+  transiently in memory.
+- Manifest version 1, request-identity versions 1–2, and content-policy version 1
+  have no automatic migration or reclassification. Earlier-policy rows remain
+  pending and unusable, but review cannot taxonomy-revalidate them because it is
+  not yet bound to their workflow/result identity.
 - Review is display-only. There is no approve/edit/reject decision,
   contradiction resolution, revalidation at decision time, or audit decision
   record. Review also does not yet require a surviving workflow/result-manifest
-  row or recompute record IDs from that workflow; the idempotent replay path is
-  currently the surface that performs those cross-record checks.
+  row or recompute record IDs from that workflow; replay currently owns those
+  cross-record checks.
+- The source digest is a correlation/consistency identifier, not proof of origin,
+  authentication, confidentiality, or encryption. Protected artifact retention,
+  redacted logging, backup, export, and deletion policies remain planned.
 - Secure file capture depends on POSIX `O_NOFOLLOW` and `O_NONBLOCK`; native
   Windows behavior remains unimplemented. Standard input is the portable
   fallback.
@@ -159,20 +160,16 @@ conspicuously synthetic test fixtures, deny-pattern definitions, or assertions.
 
 ## Next exact tasks
 
-1. `tests/test_profile_import.py`: replace the remaining ad hoc restricted-text
-   screening with a versioned declarative taxonomy; add clearance, veteran,
-   disability, criminal/legal, conflict, and demographic cases plus explicit
-   false-positive controls.
-2. `tests/test_profile_service.py`: add an idempotent review-decision service
-   that revalidates evidence checksum/locator integrity, detects contradictions,
-   records actor/time/audit fields, and cannot approve sensitive or malformed
-   proposals.
-3. `tests/test_config.py`: reject multiply linked profile databases without
+1. `tests/test_profile_service.py`: add an idempotent review-decision service
+   that revalidates workflow/result identity, evidence checksum/locator integrity,
+   and contradictions; records actor/time/audit fields; and cannot approve
+   sensitive or malformed proposals.
+2. `tests/test_config.py`: reject multiply linked profile databases without
    modifying either alias, then preserve that invariant across import/review.
-4. `tests/test_logging.py`: prove source text, values, credentials, restricted
+3. `tests/test_logging.py`: prove source text, values, credentials, restricted
    answers, and private paths do not enter normal logs, backups, exports, or
    deletion metadata as those lifecycle surfaces are introduced.
-5. `pyproject.toml`: verify an installed wheel in an isolated environment when
+4. `pyproject.toml`: verify an installed wheel in an isolated environment when
    Hatchling is available, including bundled migration discovery and the
    `gapply` entry point.
 
@@ -184,12 +181,13 @@ conspicuously synthetic test fixtures, deny-pattern definitions, or assertions.
 
 ## Key decisions
 
-- The import manifest remains untrusted data. Its digest is checked against the
-  captured source but does not authenticate who supplied either input.
-- Raw source is not persisted. The application owns the digest reference,
-  digest-only artifact, ingress identity, locator schema, and record identity.
-- `imported_resume` is a reserved source type that only the validated import
-  workflow may create.
+- The taxonomy is executable policy, so its version and canonical digest are
+  part of import request identity. Changing any category rule requires an
+  explicit policy/version decision rather than silent replay under old identity.
+- Imported documents and proposal manifests remain untrusted data. Taxonomy
+  matches cannot authorize persistence, disclosure, or external action.
+- Restricted labels are matched separately from general context so bounded
+  answer-label checks do not turn into global scans of unrelated source text.
 - Legacy provenance and unknown versions fail closed; they are not promoted or
   repaired automatically.
 - Phase 0 remains in progress. Passing this milestone does not authorize real

@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import quote
 from unittest.mock import patch
 
+import grounded_apply.services.profile as profile_service_module
 import grounded_apply.services.profile_import_validation as profile_import_validation
 from grounded_apply.domain import (
     ApprovalStatus,
@@ -40,12 +41,15 @@ from grounded_apply.services import (
     PROFILE_IMPORT_EXTRACTOR_ID,
     PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION,
     PROFILE_IMPORT_MAX_SOURCE_BYTES,
+    PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
+    PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
     ProfileService,
     ProfileReviewItem,
     ProposedImportClaim,
     TextSourceSpan,
     registered_profile_import_extractors,
     registered_profile_import_claim_types,
+    registered_profile_import_restricted_categories,
 )
 
 
@@ -278,6 +282,29 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
         self.service.preview_import_proposal(maximum_minutes)
 
+    def test_restricted_taxonomy_has_stable_versioned_categories(self) -> None:
+        self.assertEqual(PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION, 1)
+        self.assertEqual(
+            PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
+            "65bff405611618692610a54a0cff99d77a32af01330cddc78b7d1a5f1ec529f7",
+        )
+        self.assertEqual(
+            registered_profile_import_restricted_categories(),
+            frozenset(
+                {
+                    "authentication_credential",
+                    "conflict_of_interest",
+                    "criminal_legal_attestation",
+                    "demographic_self_identification",
+                    "disability_status",
+                    "government_identifier",
+                    "security_clearance",
+                    "veteran_status",
+                    "work_authorization_immigration",
+                }
+            ),
+        )
+
     def test_scalar_value_schemas_enforce_each_registered_length_limit(self) -> None:
         limits = {
             "achievement": 2048,
@@ -291,8 +318,8 @@ class ProfileImportProposalTests(unittest.TestCase):
             "publication": 2048,
             "skill_use": 256,
         }
-        source_text = "S" * 5000 + "Synthetic evidence." + "T" * 5000
-        start = 5000
+        source_text = "S" * 5000 + "\nSynthetic evidence.\n" + "T" * 5000
+        start = 5001
         span = TextSourceSpan(
             start=start,
             end=start + len("Synthetic evidence."),
@@ -357,10 +384,10 @@ class ProfileImportProposalTests(unittest.TestCase):
                     )
 
     def test_structured_value_schemas_accept_exact_field_boundaries(self) -> None:
-        source_text = "S" * 5000 + "Synthetic evidence." + "T" * 5000
+        source_text = "S" * 5000 + "\nSynthetic evidence.\n" + "T" * 5000
         span = TextSourceSpan(
-            start=5000,
-            end=5000 + len("Synthetic evidence."),
+            start=5001,
+            end=5001 + len("Synthetic evidence."),
             text="Synthetic evidence.",
         )
         boundary_values: tuple[tuple[str, Any], ...] = (
@@ -716,10 +743,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         prefix = "P" * 5000
         selected = "E" * 4096
         suffix = "S" * 5000
-        source_text = prefix + selected + suffix
+        source_text = prefix + "\n" + selected + "\n" + suffix
         span = TextSourceSpan(
-            start=len(prefix),
-            end=len(prefix) + len(selected),
+            start=len(prefix) + 1,
+            end=len(prefix) + 1 + len(selected),
             text=selected,
         )
         one = single_proposal_request(
@@ -737,10 +764,10 @@ class ProfileImportProposalTests(unittest.TestCase):
         )
 
         oversized_selected = selected + "E"
-        oversized_source = prefix + oversized_selected + suffix
+        oversized_source = prefix + "\n" + oversized_selected + "\n" + suffix
         oversized_span = TextSourceSpan(
-            start=len(prefix),
-            end=len(prefix) + len(oversized_selected),
+            start=len(prefix) + 1,
+            end=len(prefix) + 1 + len(oversized_selected),
             text=oversized_selected,
         )
         self.assert_rejected_before_storage(
@@ -1032,6 +1059,358 @@ class ProfileImportProposalTests(unittest.TestCase):
             with self.subTest(content=content):
                 self.assert_disallowed_content_on_every_surface(content)
 
+    def test_restricted_taxonomy_cannot_hide_in_allowed_content(self) -> None:
+        cases = (
+            (
+                "clearance",
+                "Synthetic candidate holds an active Secret security clearance.",
+            ),
+            ("clearance_direct", "I have a Secret clearance."),
+            ("clearance_possessive", "My security clearance is Secret."),
+            (
+                "clearance_expiration",
+                "Active Secret clearance valid through 2028.",
+            ),
+            (
+                "clearance_grant",
+                "Active Top Secret clearance granted in 2024.",
+            ),
+            (
+                "clearance_eligibility",
+                "Eligible for security clearance upon hire.",
+            ),
+            (
+                "clearance_conditional",
+                "Able to obtain a Secret clearance if required.",
+            ),
+            ("clearance_ts_sci", "TS/SCI with polygraph."),
+            (
+                "clearance_polygraph",
+                "Holds active Secret clearance with polygraph.",
+            ),
+            ("clearance_parenthetical", "Active Secret clearance (DoD)."),
+            ("public_trust", "Public Trust clearance."),
+            ("visa_tn", "TN visa holder."),
+            (
+                "veteran",
+                "Synthetic candidate veteran status: protected veteran.",
+            ),
+            (
+                "disability",
+                "Synthetic candidate disability status: yes.",
+            ),
+            ("disability_direct", "I am disabled."),
+            (
+                "criminal",
+                "Synthetic candidate criminal history: no convictions.",
+            ),
+            ("criminal_direct", "I have never been convicted."),
+            (
+                "legal_attestation",
+                "Synthetic candidate certifies these answers under penalty of perjury.",
+            ),
+            (
+                "legal_attestation_direct",
+                "I certify that this application is true and complete.",
+            ),
+            (
+                "conflict_of_interest",
+                "Synthetic candidate conflict of interest: none disclosed.",
+            ),
+            (
+                "conflict_attestation",
+                "Synthetic candidate does not have a conflict of interest.",
+            ),
+            (
+                "outside_employment_conflict",
+                "Synthetic candidate has no outside employment conflict.",
+            ),
+            (
+                "demographic_race",
+                "Synthetic candidate race or ethnicity: prefer not to answer.",
+            ),
+            (
+                "demographic_gender",
+                "Synthetic candidate gender identity: fictional response withheld.",
+            ),
+            ("demographic_age", "My age is 42."),
+            ("demographic_birth_date", "My date of birth is 2000-01-01."),
+            ("demographic_marital", "I am married."),
+            ("demographic_pronouns", "I use she/her pronouns."),
+            ("demographic_religion", "I am Christian."),
+        )
+
+        for category, content in cases:
+            with self.subTest(category=category):
+                self.assert_disallowed_content_on_every_surface(content)
+
+    def test_restricted_taxonomy_assignment_aliases_are_rejected(self) -> None:
+        cases = (
+            ("clearance", "security_clearance=SYNTHETIC_SECRET"),
+            ("public_trust", "public_trust_status=SYNTHETIC_ACTIVE"),
+            ("veteran", "veteran_status=SYNTHETIC_YES"),
+            ("veteran_short", "veteran=SYNTHETIC_NO"),
+            ("disability", "disability_status=SYNTHETIC_NO"),
+            ("criminal", "criminal_history=SYNTHETIC_NO"),
+            ("legal_attestation", "legal_attestation=SYNTHETIC_ACCEPTED"),
+            ("conflict", "conflict_of_interest=SYNTHETIC_NONE"),
+            ("demographic", "race_ethnicity=SYNTHETIC_WITHHELD"),
+            ("sponsor", "sponsor=SYNTHETIC_YES"),
+            ("work_authorisation", "workauthorisation=SYNTHETIC_YES"),
+            (
+                "employment_authorization",
+                "employmentauthorization=SYNTHETIC_YES",
+            ),
+            ("driver_licence", "driver_licence=SYNTHETIC_D00000000"),
+        )
+
+        for index, (category, content) in enumerate(cases):
+            with self.subTest(category=category):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        value=content,
+                        idempotency_key=f"restricted-assignment-{index}",
+                    ),
+                    forbidden_text=content,
+                    message_pattern="disallowed sensitive",
+                )
+
+    def test_restricted_taxonomy_label_blocks_answer_only_span(self) -> None:
+        cases = (
+            ("clearance", "Security clearance", "Active Secret"),
+            ("veteran", "Veteran status", "Yes"),
+            ("disability", "Disability status", "No"),
+            ("criminal", "Criminal history", "No"),
+            ("legal_attestation", "Legal attestation", "I agree"),
+            ("conflict", "Conflict of interest", "None"),
+            ("demographic", "Race/ethnicity", "Prefer not to answer"),
+            ("gender", "Gender", "Male"),
+            ("veteran_question", "Are you a protected veteran?", "No"),
+            ("disability_question", "Do you have a disability?", "No"),
+            (
+                "conflict_question",
+                "Do you have any conflicts of interest?",
+                "No",
+            ),
+            (
+                "clearance_question",
+                "Do you hold a security clearance?",
+                "No",
+            ),
+            (
+                "criminal_question",
+                "Have you ever been convicted of a crime?",
+                "No",
+            ),
+            (
+                "criminal_felony_question",
+                "Have you been convicted of a felony?",
+                "No",
+            ),
+            (
+                "optional_demographic",
+                "Race / Ethnicity (optional)",
+                "Prefer not to answer",
+            ),
+            ("required_gender", "Gender *", "Male"),
+            ("gender_question", "What is your gender?", "Male"),
+            (
+                "work_authorization_question",
+                "Are you legally authorized to work in the United States?",
+                "Yes",
+            ),
+            (
+                "sponsorship_question",
+                "Will you now or in the future require sponsorship?",
+                "No",
+            ),
+            (
+                "clearance_level_question",
+                "What level of security clearance do you currently hold?",
+                "Top Secret",
+            ),
+            (
+                "disability_history_question",
+                "Do you have a disability or have you ever had one?",
+                "No",
+            ),
+            (
+                "potential_conflict_question",
+                "Do you have any actual or potential conflicts of interest?",
+                "No",
+            ),
+            (
+                "arrest_charge_question",
+                "Have you ever been arrested or charged with a crime?",
+                "No",
+            ),
+            ("race_question", "Please select your race", "Withheld"),
+            (
+                "race_select_one",
+                "Race/Ethnicity (Select one)",
+                "Withheld",
+            ),
+            (
+                "ethnicity_question",
+                "Are you Hispanic or Latino?",
+                "Withheld",
+            ),
+            ("age_question", "What is your age?", "Withheld"),
+            (
+                "signature_instruction",
+                "Type your full legal name as your electronic signature",
+                "Synthetic Name",
+            ),
+        )
+
+        for index, (category, label, selected) in enumerate(cases):
+            source_text = (
+                f"Synthetic application header.\n{label}\n{selected}\n"
+                "Synthetic application footer."
+            )
+            start = source_text.index(selected)
+            with self.subTest(category=category):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        value=selected,
+                        canonical_text="Synthetic answer requiring explicit review",
+                        source_text=source_text,
+                        span=TextSourceSpan(
+                            start=start,
+                            end=start + len(selected),
+                            text=selected,
+                        ),
+                        idempotency_key=f"restricted-answer-only-{index}",
+                    ),
+                    forbidden_text=selected,
+                    message_pattern="disallowed sensitive",
+                )
+
+    def test_restricted_taxonomy_normalizes_obfuscated_preceding_labels(self) -> None:
+        cases = (
+            ("Security%20clearance", "Active Secret"),
+            ("Veteran\u200b status", "Yes"),
+            ("Race%252Fethnicity", "Prefer not to answer"),
+        )
+        for index, (label, selected) in enumerate(cases):
+            source_text = (
+                f"Synthetic application header.\n{label}\n{selected}\n"
+                "Synthetic application footer."
+            )
+            start = source_text.index(selected)
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        value=selected,
+                        canonical_text="Synthetic answer requiring explicit review",
+                        source_text=source_text,
+                        span=TextSourceSpan(
+                            start=start,
+                            end=start + len(selected),
+                            text=selected,
+                        ),
+                        idempotency_key=f"obfuscated-restricted-label-{index}",
+                    ),
+                    forbidden_text=selected,
+                    message_pattern="disallowed sensitive",
+                )
+
+    def test_restricted_taxonomy_label_blocks_same_line_answer_only_span(self) -> None:
+        cases = (
+            ("Gender", " ", "Male"),
+            ("Have you ever been convicted of a crime?", " ", "No"),
+            ("Race / Ethnicity (optional)", " ", "Prefer not to answer"),
+            ("Security clearance", " " * 300, "Top Secret"),
+        )
+        for index, (label, separator, selected) in enumerate(cases):
+            source_text = (
+                f"Synthetic application header.\n{label}{separator}{selected}\n"
+                "Synthetic application footer."
+            )
+            start = source_text.index(selected)
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        value=selected,
+                        canonical_text="Synthetic answer requiring explicit review",
+                        source_text=source_text,
+                        span=TextSourceSpan(
+                            start=start,
+                            end=start + len(selected),
+                            text=selected,
+                        ),
+                        idempotency_key=f"same-line-restricted-label-{index}",
+                    ),
+                    forbidden_text=selected,
+                    message_pattern="disallowed sensitive",
+                )
+
+    def test_restricted_taxonomy_label_blocks_answer_after_blank_lines(self) -> None:
+        cases = (
+            ("Gender", "Male"),
+            ("Veteran status", "No"),
+            ("Security clearance", "No"),
+            ("Race / Ethnicity", "Prefer not to answer"),
+        )
+        for index, (label, selected) in enumerate(cases):
+            source_text = (
+                f"Synthetic application header.\n{label}\n\n{selected}\n"
+                "Synthetic application footer."
+            )
+            start = source_text.index(selected)
+            with self.subTest(index=index):
+                self.assert_rejected_before_storage(
+                    single_proposal_request(
+                        value=selected,
+                        canonical_text="Synthetic answer requiring explicit review",
+                        source_text=source_text,
+                        span=TextSourceSpan(
+                            start=start,
+                            end=start + len(selected),
+                            text=selected,
+                        ),
+                        idempotency_key=f"blank-line-restricted-label-{index}",
+                    ),
+                    forbidden_text=selected,
+                    message_pattern="disallowed sensitive",
+                )
+
+    def test_same_line_context_limit_fails_closed_at_the_boundary(self) -> None:
+        selected = "Python"
+        exact_prefix = "x" * 512
+        exact_source = exact_prefix + selected + "\nSynthetic footer."
+        exact_start = len(exact_prefix)
+        preview = self.service.preview_import_proposal(
+            single_proposal_request(
+                value=selected,
+                source_text=exact_source,
+                span=TextSourceSpan(
+                    start=exact_start,
+                    end=exact_start + len(selected),
+                    text=selected,
+                ),
+                idempotency_key="exact-same-line-context-limit",
+            )
+        )
+        self.assertEqual(preview.proposal_count, 1)
+
+        overlong_prefix = "x" * 513
+        overlong_source = overlong_prefix + selected + "\nSynthetic footer."
+        overlong_start = len(overlong_prefix)
+        self.assert_rejected_before_storage(
+            single_proposal_request(
+                value=selected,
+                source_text=overlong_source,
+                span=TextSourceSpan(
+                    start=overlong_start,
+                    end=overlong_start + len(selected),
+                    text=selected,
+                ),
+                idempotency_key="overlong-same-line-context",
+            ),
+            message_pattern="same-line context exceeds",
+        )
+
     def test_government_identifiers_cannot_hide_in_allowed_content(self) -> None:
         for content in (
             "Social Security number (synthetic).",
@@ -1203,6 +1582,126 @@ class ProfileImportProposalTests(unittest.TestCase):
                     )
                 )
 
+    def test_restricted_taxonomy_allows_legitimate_resume_language(self) -> None:
+        cases = (
+            (
+                "clearance_workflow",
+                "Automated a fictional customs security clearance workflow.",
+            ),
+            (
+                "security_backlog",
+                "Cleared a fictional application-security backlog.",
+            ),
+            (
+                "clearance_documentation",
+                "Maintained clearance documentation for fictional customs shipments.",
+            ),
+            (
+                "clearance_process",
+                "Maintained a clearance workflow for fictional customs shipments.",
+            ),
+            (
+                "clearance_status_dashboard",
+                "Built a fictional customs clearance status dashboard.",
+            ),
+            (
+                "clearance_eligibility_logistics",
+                "Made fictional shipments eligible for clearance upon arrival.",
+            ),
+            (
+                "clearance_customs_documents",
+                "Goods were able to obtain clearance if documents matched.",
+            ),
+            (
+                "active_customs_clearance",
+                "Tracked active clearance and fictional customs release.",
+            ),
+            ("customs_clearance_value", "Clearance: approved"),
+            (
+                "public_trust_outcome",
+                "Public trust: improved through transparent fictional reporting.",
+            ),
+            (
+                "veteran_owned_vendor",
+                "Integrated a fictional veteran-owned vendor catalog.",
+            ),
+            (
+                "veteran_status_reporting",
+                "Built a fictional veteran status reporting dashboard.",
+            ),
+            (
+                "disability_accessibility",
+                "Built accessibility tools for fictional users with disabilities.",
+            ),
+            (
+                "disability_focused_research",
+                "I have a disability-focused synthetic research portfolio.",
+            ),
+            (
+                "disability_accessibility_research",
+                "I have a disability accessibility research portfolio.",
+            ),
+            (
+                "disability_status_reporting",
+                "Built a fictional disability status reporting dashboard.",
+            ),
+            (
+                "criminal_justice",
+                "Published synthetic criminal justice research.",
+            ),
+            (
+                "legal_research",
+                "Conducted legal research for a fictional policy team.",
+            ),
+            (
+                "legal_attestation_workflow",
+                "Implemented a fictional legal attestation workflow.",
+            ),
+            (
+                "electronic_signature_workflow",
+                "Implemented an electronic signature workflow for a fictional product.",
+            ),
+            (
+                "electronic_signature_verification",
+                "Built electronic-signature verification for a fictional product.",
+            ),
+            (
+                "merge_conflicts",
+                "Resolved Git merge conflicts in a fictional monorepo.",
+            ),
+            (
+                "demographic_analytics",
+                "Analyzed aggregate user demographics for a fictional product.",
+            ),
+            (
+                "data_race",
+                "Verified the fictional data race is no longer reproducible.",
+            ),
+            (
+                "black_belt",
+                "I am black-belt certified in fictional Lean Six Sigma.",
+            ),
+            (
+                "pronoun_setting",
+                "The fictional service reports whether pronouns are optional.",
+            ),
+            ("cryptographic_signature", "Signature: Ed25519"),
+            (
+                "professional_certification",
+                "Earned the Example Cloud Certified Architect certification.",
+            ),
+        )
+
+        for index, (category, content) in enumerate(cases):
+            with self.subTest(category=category):
+                preview = self.service.preview_import_proposal(
+                    single_proposal_request(
+                        value=content,
+                        idempotency_key=f"safe-restricted-control-{index}",
+                    )
+                )
+                self.assertEqual(preview.proposal_count, 1)
+
     def test_fragmented_assignment_detector_does_not_match_inside_a_label(self) -> None:
         self.service.preview_import_proposal(
             single_proposal_request(
@@ -1359,7 +1858,7 @@ class ProfileImportProposalTests(unittest.TestCase):
     def test_fragmented_assignment_scan_indexes_legal_prefix_complements(
         self,
     ) -> None:
-        keys = profile_import_validation._SENSITIVE_ASSIGNMENT_KEYS
+        keys = profile_import_validation._RESTRICTED_ASSIGNMENT_KEYS
         legal_prefixes = tuple(
             sorted(
                 {
@@ -1400,8 +1899,10 @@ class ProfileImportProposalTests(unittest.TestCase):
             "_assignment_left_fragments",
             side_effect=lambda _: iter((probe,) * fragments_per_component),
         ):
-            found = profile_import_validation._contains_fragmented_assignment(
-                components
+            found = (
+                profile_import_validation._contains_fragmented_restricted_assignment(
+                    components
+                )
             )
 
         self.assertFalse(found)
@@ -1827,8 +2328,8 @@ class ProfileImportProposalTests(unittest.TestCase):
     def test_whitespace_padding_cannot_hide_split_whole_document_evidence(self) -> None:
         source_body, _ = load_fixture()
         padding = " " * 10_000
-        source_text = padding + source_body + padding
-        body_start = len(padding)
+        source_text = padding + "\n" + source_body + "\n" + padding
+        body_start = len(padding) + 1
         boundaries = (
             body_start,
             body_start + len(source_body) // 3,
@@ -1866,8 +2367,8 @@ class ProfileImportProposalTests(unittest.TestCase):
     def test_invisible_and_punctuation_padding_cannot_hide_document_coverage(self) -> None:
         source_body, _ = load_fixture()
         padding = "\u200b.!?" * 5_000
-        source_text = padding + source_body + padding
-        body_start = len(padding)
+        source_text = padding + "\n" + source_body + "\n" + padding
+        body_start = len(padding) + 1
         boundaries = (
             body_start,
             body_start + len(source_body) // 3,
@@ -2232,6 +2733,8 @@ class ProfileImportProposalTests(unittest.TestCase):
                 "proposals_sha256",
                 "record_id_schema_version",
                 "request_schema_version",
+                "restricted_taxonomy_sha256",
+                "restricted_taxonomy_version",
                 "result_manifest_schema_version",
                 "source_artifact_id",
                 "source_byte_size",
@@ -2243,14 +2746,22 @@ class ProfileImportProposalTests(unittest.TestCase):
                 "value_schema_version",
             },
         )
-        self.assertEqual(workflow_input["request_schema_version"], 2)
+        self.assertEqual(workflow_input["request_schema_version"], 3)
         self.assertEqual(workflow_input["manifest_schema_version"], 2)
         self.assertEqual(workflow_input["result_manifest_schema_version"], 2)
         self.assertEqual(workflow_input["record_id_schema_version"], 1)
         self.assertEqual(workflow_input["source_identity_schema_version"], 1)
         self.assertEqual(workflow_input["span_locator_schema_version"], 1)
         self.assertEqual(workflow_input["value_schema_version"], 1)
-        self.assertEqual(workflow_input["content_policy_version"], 1)
+        self.assertEqual(workflow_input["content_policy_version"], 2)
+        self.assertEqual(
+            workflow_input["restricted_taxonomy_version"],
+            PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
+        )
+        self.assertEqual(
+            workflow_input["restricted_taxonomy_sha256"],
+            PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
+        )
         self.assertEqual(workflow_input["extractor_id"], PROFILE_IMPORT_EXTRACTOR_ID)
         self.assertEqual(
             workflow_input["idempotency_key_sha256"], expected_idempotency_digest
@@ -2267,6 +2778,53 @@ class ProfileImportProposalTests(unittest.TestCase):
             workflow["input_hash_sha256"],
             hashlib.sha256(str(workflow["input_json"]).encode("utf-8")).hexdigest(),
         )
+
+    def test_earlier_content_policy_workflow_cannot_replay_under_current_identity(
+        self,
+    ) -> None:
+        request = single_proposal_request(
+            idempotency_key="earlier-policy-replay",
+        )
+        stored_key = hashlib.sha256(
+            request.idempotency_key.encode("utf-8")
+        ).hexdigest()
+        current_input = profile_service_module._import_workflow_input(
+            request,
+            idempotency_key_sha256=stored_key,
+        )
+        earlier_input = {
+            key: value
+            for key, value in current_input.items()
+            if key
+            not in {
+                "restricted_taxonomy_sha256",
+                "restricted_taxonomy_version",
+            }
+        }
+        earlier_input["request_schema_version"] = 2
+        earlier_input["content_policy_version"] = 1
+        self.assertEqual(
+            set(current_input) - set(earlier_input),
+            {"restricted_taxonomy_sha256", "restricted_taxonomy_version"},
+        )
+        earlier = self.repository.add_workflow_run(
+            workflow_type="profile_import_proposal",
+            status="succeeded",
+            idempotency_key=stored_key,
+            input_data=earlier_input,
+            current_step="awaiting_review",
+            completed_steps=("persist_reviewable_claims",),
+            generated_artifacts=(),
+            created_at=NOW_TEXT,
+        )
+
+        with self.assertRaisesRegex(RepositoryError, "different input"):
+            self.service.create_import_proposal(request, now=NOW)
+
+        self.assertEqual(self.repository.list_workflow_runs(), [earlier])
+        self.assertEqual(self.repository.list_artifacts(), [])
+        self.assertEqual(self.repository.list_claims(), [])
+        self.assertEqual(self.repository.list_evidence(), [])
 
     def test_idempotency_digest_is_bound_into_the_workflow_request_identity(self) -> None:
         first_request = import_request()
