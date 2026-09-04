@@ -22,13 +22,16 @@ Run commands from the repository root.
 | Full repository gate | `./scripts/check` | Supported now |
 | CLI help | `./scripts/gapply --help`; `./scripts/gapply profile decide --help` | Supported now |
 | Environment/path diagnostics | `./scripts/gapply doctor --json` | Supported now |
+| Content-free command event stream | `./scripts/gapply --log-events doctor --json` | Supported; opt-in JSONL on stderr, private response on stdout |
 | Structured profile proposal import | `./scripts/gapply profile import --source-file FILE --proposals-file FILE --idempotency-key KEY [--dry-run] [--json]` | Supported for synthetic data |
 | Pending profile review | `./scripts/gapply profile review [--json]` | Supported, read-only |
 | One profile review decision | `./scripts/gapply profile decide --claim-id CLAIM_ID --review-token TOKEN --decision approve\|reject --actor-id ACTOR_ID --idempotency-key KEY [--confirm] [--json]` | Supported for synthetic data; storage-free syntax preview unless confirmed |
 | Full test suite | `PYTHONPATH=src python3 -m unittest discover -s tests -v` | Supported now |
+| Installed-package gate | `python scripts/check_package.py` | Supported with optional build tools; verified on Python 3.13.1 |
 
-The full gate runs its CLI smokes and the test suite without creating bytecode
-in the checkout. The wrapper adds `src` to `PYTHONPATH`, so it exercises the
+The full gate runs its CLI smokes and the test suite with warnings treated as
+errors, without creating bytecode in the checkout. The wrapper adds `src` to
+`PYTHONPATH`, so it exercises the
 working tree without an editable install. For a disposable runtime root:
 
 ```bash
@@ -37,10 +40,31 @@ GROUNDED_APPLY_HOME=/tmp/grounded-apply-dev ./scripts/gapply doctor --json
 
 Do not use real candidate data in repository development.
 
+### Optional installed-package verification
+
+The zero-install gate remains dependency-free. To test distribution packaging,
+create a disposable build environment outside the checkout:
+
+```bash
+python3 -m venv /tmp/grounded-apply-build-tools
+/tmp/grounded-apply-build-tools/bin/python -m pip install -r requirements-build.txt
+/tmp/grounded-apply-build-tools/bin/python scripts/check_package.py
+```
+
+The pinned build tools are development-only. The package check itself downloads
+nothing: it builds a source archive and wheel using the installed tools, verifies
+wheel contents, installs into a new temporary virtualenv with `--no-index` and
+`--no-deps`, removes source-path/user-site imports, and runs installed help,
+version, doctor, idempotent initialization, import, review, decision preview,
+confirmed approval, and exact replay. It verifies migrations resolve inside the
+installation. All runtime data uses synthetic fixtures in temporary paths.
+This passes on the documented local interpreter; it does not establish a
+cross-platform release matrix or MVP readiness.
+
 ### Runtime database and sidecar safety
 
-At the typed `gapply` boundary, every storage-opening command and doctor
-inspection validates the private database before SQLite access. An existing
+At the typed `gapply` boundary and every public SQLite adapter open, storage
+validates the private database before SQLite access. An existing
 database must be a direct regular non-symlink file with exactly one hard link and
 a resolved location inside the private data directory and outside Git worktrees.
 Existing-data commands and doctor additionally require the data directory and
@@ -61,6 +85,11 @@ reject persistent WAL mode even after its transient sidecars have disappeared.
 This prevents a nominally read-only connection from creating, recovering, or
 removing sidecars. Mutating initialization, import, and confirmed decisions may
 allow SQLite to process an otherwise valid private, single-link sidecar.
+The abrupt-subprocess-exit test in `tests/test_crash_recovery.py` creates dirty
+spilled pages and a genuine hot journal, verifies that mutating import restores
+the original data before proceeding once, and verifies read-only and unsafe
+journal refusal without mutation. Power-loss, disk-corruption, and arbitrary
+journal-mode recovery are outside this evidence.
 
 The CLI repeats validation around SQLite opens and schema inspection and samples
 the database device/inode identity before and after access. These checks narrow
@@ -69,10 +98,17 @@ or authenticate state against another same-UID process. A same-user process can
 still win a TOCTOU race after the final sample, so do not present this boundary as
 protection from a malicious process running under the same account.
 
-These checks are composed by the CLI application boundary. Direct callers of
-`SQLiteRepository` or `inspect_schema` do not receive them automatically and
-must invoke the runtime guards themselves. Moving the same guarantees into every
-adapter entry point is outside this milestone.
+Direct `SQLiteRepository` and `inspect_schema` calls own the file/sidecar guards
+and require a private parent outside Git. The CLI additionally validates the
+whole runtime layout and `GROUNDED_APPLY_HOME` containment. Initialization uses an
+exclusive no-follow descriptor to create a missing database and a checked
+no-follow descriptor to repair an existing safe file's mode; SQLite receives an
+already-private file through `mode=rw`. Existing-only/read-only access never
+creates or repairs it. URI targets and implicit temporary databases are refused;
+only non-existing-only repositories accept explicit `:memory:`. Connection setup
+and context-manager initialization failures close the connection. The private
+migration helpers accept an already-owned connection and are not public safe-open
+alternatives. See ADR 0002 for the threat-model limit.
 
 ### Structured profile import and review
 
@@ -443,6 +479,22 @@ Normal logs may include run IDs, typed event metadata, hashes, redacted errors,
 and protected artifact references. They may not include raw resumes, sensitive
 answers, personal model prompts, secrets, cookies, browser storage, or unredacted
 screenshots.
+
+The implemented diagnostic boundary is stricter: `--log-events` must precede the
+command and emits JSONL on stderr with exactly `schema_version`, `event`, `run_id`,
+`at`, `command`, `outcome`, and `recovery`. Run IDs and UTC timestamps are generated
+internally; command/outcome values are exact registered enums. Recovery is null
+except for a fixed retry instruction after an ambiguous confirmed-decision
+outcome. The API accepts no free-text fields, arbitrary metadata, exceptions,
+caller identifiers, hashes, or paths. In this mode human stderr is discarded;
+use the command's `--json` flag to receive errors and warnings on stdout.
+
+Stdout is the private response channel and must never be combined with normal
+events in a support log. Events create no runtime files and make no network
+calls. A broken event sink cannot fail or repeat a command; it may leave partial
+or absent events, which are observations rather than the durable workflow audit.
+This boundary does not sanitize third-party output, shell history, or terminal
+recordings. Backup, export, deletion, and log retention remain planned.
 
 Before sharing a diff or support artifact:
 

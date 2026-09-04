@@ -218,6 +218,7 @@ class SQLiteRepositoryTests(unittest.TestCase):
 
             empty = Path(directory) / "empty.db"
             sqlite3.connect(empty).close()
+            empty.chmod(0o600)
             before = empty.read_bytes()
             repository = SQLiteRepository(empty, read_only=True)
             self.addCleanup(repository.close)
@@ -235,6 +236,7 @@ class SQLiteRepositoryTests(unittest.TestCase):
 
             empty = Path(directory) / "empty.db"
             sqlite3.connect(empty).close()
+            empty.chmod(0o600)
             before = empty.read_bytes()
             repository = SQLiteRepository(empty, existing_only=True)
             try:

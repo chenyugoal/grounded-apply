@@ -26,7 +26,9 @@ stale-safe review tokens, a storage-free CLI decision syntax preview, confirmed
 atomic audited approve/reject decisions with minimized output and idempotent
 recovery, typed-CLI database/sidecar link and orphan guards, read-only
 persistent-WAL refusal, resolution-time imported-record revalidation, and the
-first synthetic profile fixture are implemented. Edit and user-facing semantic
+first synthetic profile fixture, adapter-owned safe SQLite opens, genuine
+hot-journal recovery tests, fixed-schema opt-in diagnostic events, and an isolated
+installed-package gate are implemented. Edit and user-facing semantic
 contradiction workflows, semantic and broader obfuscation classification,
 registered derivations, data lifecycle tools, and all end-user application
 workflows in Phases 1–5 remain planned or in progress.
@@ -43,13 +45,15 @@ facts and provenance without placing private data in the repository.
 | Product design and local-first architecture decision | Implemented | Design document and ADR 0001 exist |
 | Durable resume and handoff protocol | Implemented | `AGENTS.md`, development guide, and live checkpoint agree |
 | Zero-install CLI bootstrap and diagnostics | Implemented | Root and `profile decide` help, stable JSON usage errors, doctor, dry-run, and idempotent private init tests pass |
-| Private runtime path resolution and user-only directories | In progress | The typed CLI covers POSIX/XDG containment, permissions, exclusive no-follow default-config creation, direct single-link database/sidecar files, orphan refusal, and read-only persistent-WAL refusal; native Windows paths, adapter-wide composition, and the residual sampled same-UID TOCTOU boundary remain |
+| Private runtime path resolution and user-only directories | In progress | Typed CLI and public SQLite adapters cover POSIX permissions, direct single-link database/sidecar files, orphan refusal, read-only persistent-WAL refusal, and creation before SQLite access; the CLI adds XDG/portable containment and exclusive no-follow config creation. Native Windows paths remain planned; sampled same-UID TOCTOU is an explicit residual limit |
 | Typed atomic claims, evidence, status, scope, and sensitivity | Implemented | Domain invariants and serialization tests pass |
 | `NeedInfo`, `Contradiction`, and claim-packet resolution | Implemented | Missing/conflicting/stale/sensitive cases fail closed |
 | SQLite schema and migration mechanism | Implemented | Atomic fresh/concurrent init, future refusal, checksum validation, and existing-only no-migration writes pass |
 | Repository/service boundaries for validated mutation | In progress | Claim/evidence service round trips, CLI import, and single-item CLI approve/reject transitions use typed services and atomic repository mutations with exact idempotent replay; edit and broader lifecycle services remain |
 | Resume import, extraction proposal, and human review | In progress | Manifest-v2 file/stdin proposals snapshot nested state, bind exact source bytes to a path-free digest artifact and registered ingress, use closed value schemas plus a versioned nine-category restricted-text taxonomy and bounded minimization guards, create workflow/index-bound record digests and stale-safe review tokens, and support storage-free decision syntax previews plus confirmed, minimized, audited CLI approve/reject with replay and resolution revalidation; extraction, edit/user-facing semantic contradiction handling, and semantic/novel-obfuscation classification remain |
-| Redacted logging, backup, export, and deletion | Planned | Privacy and round-trip tests pass on synthetic data |
+| Content-free diagnostic logging | Implemented | Opt-in fixed-schema JSONL excludes caller content; failure, interruption, ambiguous-commit recovery, and broken-sink tests pass; no file logs or telemetry |
+| Backup, export, deletion, and retention | Planned | Still require privacy, confirmation, and round-trip tests on synthetic data |
+| Installed-package verification | Implemented | Source archive, wheel contents, clean virtualenv entry point, bundled migrations, and synthetic import/review/decision/replay pass on Python 3.13.1; cross-platform matrix remains planned |
 | Synthetic candidate/job fixtures and adversarial corpus | In progress | One synthetic profile plus adversarial schema, all nine taxonomy-category positives, explicit lexical false-positive controls, secret, percent-encoding, fragmentation, whole-source, padding, mutation, and no-write import cases exist; broader candidate/job corpus remains |
 
 Phase 0 exits only when the canonical commands pass from a clean checkout, real

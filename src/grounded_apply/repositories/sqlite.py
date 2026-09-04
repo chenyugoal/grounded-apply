@@ -20,6 +20,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Self
 
+from grounded_apply.config import (
+    UnsafeRuntimePathError,
+    prepare_sqlite_path,
+    require_safe_sqlite_path,
+)
+
 from ._schema import (
     LATEST_SCHEMA_VERSION,
     FutureSchemaError,
@@ -88,22 +94,29 @@ class SQLiteRepository:
         self._migrations_dir = Path(migrations_dir) if migrations_dir is not None else None
         self._read_only = read_only
         self._existing_only = existing_only or read_only
+        if not self._database or self._database.startswith("file:"):
+            raise ValueError("Repositories require a filesystem path or explicit :memory:")
+        if self._existing_only and self._database == ":memory:":
+            raise ValueError("existing repositories require a filesystem database path")
+        self._database_path = (
+            None if self._database == ":memory:" else Path(self._database).absolute()
+        )
+        self._database_identity: tuple[int, int] | None = None
         connection_target = self._database
-        use_uri = False
-        if self._existing_only:
-            if self._database == ":memory:" or self._database.startswith("file:"):
-                raise ValueError("existing repositories require a filesystem database path")
-            database_path = Path(self._database)
-            if not database_path.is_file():
-                raise sqlite3.OperationalError("unable to open existing database")
+        if self._database_path is not None:
+            try:
+                self._database_identity = prepare_sqlite_path(
+                    self._database_path, existing_only=self._existing_only, read_only=read_only,
+                )
+            except FileNotFoundError as error:
+                raise sqlite3.OperationalError("unable to open existing database") from error
             mode = "ro" if read_only else "rw"
-            connection_target = f"{database_path.resolve().as_uri()}?mode={mode}"
-            use_uri = True
+            connection_target = f"{self._database_path.as_uri()}?mode={mode}"
         self._connection = sqlite3.connect(
             connection_target,
             timeout=timeout,
             isolation_level=None,
-            uri=use_uri,
+            uri=self._database_path is not None,
         )
         self._connection.row_factory = sqlite3.Row
         self._closed = False
@@ -111,23 +124,26 @@ class SQLiteRepository:
         self._transaction_depth = 0
         self._savepoint_counter = 0
 
-        timeout_ms = min(round(timeout * 1000), 2_147_483_647)
-        self._connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        foreign_keys = self._connection.execute("PRAGMA foreign_keys").fetchone()
-        if foreign_keys is None or int(foreign_keys[0]) != 1:
+        try:
+            self._validate_storage()
+            timeout_ms = min(round(timeout * 1000), 2_147_483_647)
+            self._connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            foreign_keys = self._connection.execute("PRAGMA foreign_keys").fetchone()
+            if foreign_keys is None or int(foreign_keys[0]) != 1:
+                raise RepositoryError("SQLite foreign-key enforcement could not be enabled")
+            if read_only:
+                self._connection.execute("PRAGMA query_only = ON")
+        except BaseException:
             self._connection.close()
             self._closed = True
-            raise RepositoryError("SQLite foreign-key enforcement could not be enabled")
+            raise
 
-        if read_only:
-            self._connection.execute("PRAGMA query_only = ON")
-        elif (
-            not self._existing_only
-            and self._database != ":memory:"
-            and not self._database.startswith("file:")
-        ):
-            Path(self._database).chmod(0o600)
+    def _validate_storage(self) -> None:
+        if self._database_path is not None:
+            identity = require_safe_sqlite_path(self._database_path, read_only=self._read_only)
+            if identity != self._database_identity:
+                raise UnsafeRuntimePathError("Database identity changed while SQLite was opening")
 
     @property
     def database(self) -> str:
@@ -152,6 +168,7 @@ class SQLiteRepository:
         """
 
         self._ensure_open()
+        self._validate_storage()
         migrations_dir = self._migrations_dir or default_migrations_directory()
         version = (
             validate_schema(self._connection, migrations_dir)
@@ -162,6 +179,7 @@ class SQLiteRepository:
             raise SchemaError(
                 f"Expected schema version {LATEST_SCHEMA_VERSION}, found {version}"
             )
+        self._validate_storage()
         self._initialized = True
         return self
 
@@ -178,7 +196,11 @@ class SQLiteRepository:
         self._initialized = False
 
     def __enter__(self) -> Self:
-        return self.initialize()
+        try:
+            return self.initialize()
+        except BaseException:
+            self.close()
+            raise
 
     def __exit__(
         self,
@@ -1476,16 +1498,26 @@ def inspect_schema(
 ) -> int:
     """Validate an existing database through a read-only connection."""
 
-    path = Path(database).expanduser().resolve()
+    raw_path = os.fspath(database)
+    if not raw_path or raw_path == ":memory:" or raw_path.startswith("file:"):
+        raise ValueError("Schema inspection requires a filesystem database path")
+    path = Path(raw_path).expanduser().absolute()
+    identity = prepare_sqlite_path(path, existing_only=True, read_only=True)
     uri = f"{path.as_uri()}?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
     try:
+        if require_safe_sqlite_path(path, read_only=True) != identity:
+            raise UnsafeRuntimePathError("Database identity changed during schema inspection")
+        connection.execute("PRAGMA query_only = ON")
         directory = (
             Path(migrations_dir)
             if migrations_dir is not None
             else default_migrations_directory()
         )
-        return validate_schema(connection, directory)
+        version = validate_schema(connection, directory)
+        if require_safe_sqlite_path(path, read_only=True) != identity:
+            raise UnsafeRuntimePathError("Database identity changed during schema inspection")
+        return version
     finally:
         connection.close()
 

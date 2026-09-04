@@ -49,6 +49,14 @@ Ruff, and Pyright are planned Phase 0 hardening work; their commands are not yet
 supported project checks. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) before
 changing the toolchain.
 
+Optional diagnostic events use `./scripts/gapply --log-events doctor --json`.
+Stderr then contains only fixed-schema command events; stdout remains private
+and may include paths or candidate data. No files or telemetry are created.
+Events exclude arguments, exception text, source content, tokens, and keys.
+Use command `--json` to retain normal errors and warnings on stdout in this mode.
+The optional installed-package gate, `python scripts/check_package.py`, is
+documented in the development guide and verifies a fresh wheel installation.
+
 On the current POSIX bootstrap, runtime data defaults to XDG-compatible user
 directories outside the repository. Native Windows path support remains
 planned. To isolate development data, point the application at a dedicated,
@@ -164,14 +172,16 @@ the private data directory or database gains group/other access, if the database
 target escapes its data directory, or if a portable runtime child escapes
 `GROUNDED_APPLY_HOME`.
 
-Before the typed CLI opens or inspects storage, the named database and any
-recognized SQLite `-journal`, `-wal`, or `-shm` sidecar must be direct regular
+Before the typed CLI or public SQLite adapters open or inspect storage, the named
+database and any recognized SQLite `-journal`, `-wal`, or `-shm` sidecar must be direct regular
 non-symlink files. Each must have exactly one hard link, sidecars must have no
 group/other access, and orphan sidecars are rejected while left unchanged.
 Read-only review and doctor inspection are stricter: every sidecar must be absent
 and the database header must use rollback-journal rather than persistent WAL
 mode, so a read does not create, recover, or delete SQLite state. Mutating
 commands may let SQLite process an otherwise private, single-link sidecar.
+An abrupt-process-exit integration test verifies hot rollback-journal recovery
+during import, restoration of pre-crash data, and exactly idempotent replay.
 `profile init` separately validates any existing `config.toml` as a private,
 direct, single-link regular file and creates a missing default through an
 exclusive no-follow descriptor, so a dangling config symlink cannot redirect
@@ -181,9 +191,13 @@ These checks are repeated around SQLite open or inspection and compare sampled
 device/inode identity. They reduce replacement races but are not an atomic lock:
 a same-UID process can still change a pathname, link count, or sidecar after the
 last sample. The current local-first boundary therefore does not claim protection
-against a malicious same-user process. These are CLI-composed guards; code that
-calls the SQLite repository or schema inspector directly must compose them
-explicitly, and adapter-wide enforcement is outside this milestone.
+against a malicious same-user process. Direct SQLite repository and schema
+inspection calls now enforce the database/sidecar guards and require a private
+parent directory outside Git. The CLI additionally checks the complete runtime
+layout. Initialization creates a private file before SQLite access, or repairs
+an existing safe file through a checked no-follow descriptor. URI targets and
+implicit temporary databases are refused; explicit in-memory repositories
+remain supported. See [ADR 0002](docs/adr/0002-local-storage-and-diagnostics.md).
 
 `profile review` is physically read-only. Its output contains untrusted candidate
 content for inspection, clearly marks every item unusable, and exposes the
@@ -222,6 +236,9 @@ is interrupted before reporting its terminal result, the CLI warns that the
 decision may already be recorded; repeat the exact same confirmed request and
 idempotency key to recover that result without creating a second decision. That
 warning uses stderr because the requested stdout payload may already be partial.
+With `--log-events`, it is preserved as a fixed recovery instruction in a
+`decision_outcome_unknown` event. Diagnostic sink failures never repeat a command
+and may leave partial or absent logs; the workflow audit remains authoritative.
 Changed retry inputs fail closed. Approved imported claims are revalidated again
 before they may enter a resolved claim packet. The unkeyed record hashes provide
 consistency and stale-review detection, not authentication against a writer able

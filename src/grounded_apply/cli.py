@@ -24,6 +24,7 @@ from grounded_apply.config import (
     require_runtime_outside_repository,
     resolve_runtime_paths,
 )
+from grounded_apply.diagnostics import CommandDiagnostics
 from grounded_apply.json_support import dumps
 
 
@@ -934,6 +935,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gapply",
         description="Local-first, evidence-backed job application workflows.",
+        allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--log-events",
+        action="store_true",
+        help="Emit content-free JSONL diagnostics on stderr; place before the command. "
+        "Use command --json for errors and warnings on stdout.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1050,7 +1058,11 @@ def _command_name_from_argv(argv: Sequence[str]) -> str:
     return "unknown"
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _main(
+    argv: Sequence[str] | None = None,
+    *,
+    diagnostics: CommandDiagnostics | None = None,
+) -> int:
     parser = build_parser()
     raw_argv = tuple(sys.argv[1:] if argv is None else argv)
     parse_stderr = io.StringIO()
@@ -1091,6 +1103,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         if getattr(args, "command_name", None) == "profile.decide":
             if getattr(args, "confirm", False):
+                if diagnostics is not None:
+                    diagnostics.require_decision_recovery()
                 print(
                     f"Interrupted. {_POST_COMMIT_DECISION_MESSAGE} "
                     "No external action was taken.",
@@ -1106,6 +1120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
     except Exception as error:
         if isinstance(error, PostCommitOutputError):
+            if diagnostics is not None:
+                diagnostics.require_decision_recovery()
             print(
                 f"Error: {error} No external action was taken.",
                 file=sys.stderr,
@@ -1138,6 +1154,54 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(f"Error: {error}{suffix}", file=sys.stderr)
         return 2
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the CLI with optional content-free diagnostics on a separate stream.
+
+    Stdout remains a private response channel. With --log-events, stderr holds
+    only fixed-schema events; human errors and warnings are discarded there.
+    JSON callers receive their normal errors and warnings in stdout instead.
+    """
+
+    raw_argv = tuple(sys.argv[1:] if argv is None else argv)
+    if not raw_argv or raw_argv[0] != "--log-events":
+        return _main(raw_argv)
+
+    from grounded_apply.diagnostics import (
+        DiagnosticCommand,
+        DiagnosticOutcome,
+        DiscardDiagnostics,
+    )
+
+    command_argv = raw_argv[1:]
+    events = CommandDiagnostics(
+        sys.stderr, DiagnosticCommand(_command_name_from_argv(command_argv))
+    )
+    events.emit(DiagnosticOutcome.STARTED)
+    outcome = DiagnosticOutcome.FAILED
+    try:
+        with redirect_stderr(DiscardDiagnostics()):
+            result = _main(command_argv, diagnostics=events)
+        outcome = (
+            DiagnosticOutcome.SUCCEEDED if result == 0
+            else DiagnosticOutcome.INTERRUPTED if result == 130
+            else DiagnosticOutcome.FAILED
+        )
+        return result
+    except SystemExit as error:
+        if error.code in (None, 0):
+            outcome = DiagnosticOutcome.SUCCEEDED
+        raise
+    except KeyboardInterrupt:
+        outcome = DiagnosticOutcome.INTERRUPTED
+        return 130
+    except Exception:
+        # Parsing/output can fail outside the normal handler error envelope.
+        # Do not let an unhandled traceback enter the structured log channel.
+        return 2
+    finally:
+        events.emit(outcome)
 
 
 if __name__ == "__main__":

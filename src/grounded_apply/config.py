@@ -495,3 +495,100 @@ def require_initialized_profile_storage(
             resolved_database_path=paths.database.resolve(),
         )
         _require_rollback_journal_mode_for_read_only(paths.database)
+
+
+def require_safe_sqlite_path(
+    database: Path,
+    *,
+    read_only: bool = False,
+    require_existing: bool = True,
+    allow_mode_repair: bool = False,
+) -> tuple[int, int] | None:
+    """Validate an adapter's filesystem target without opening it with SQLite.
+
+    The CLI additionally validates its complete RuntimePaths configuration.
+    This lower boundary covers any direct adapter path: private parent, Git
+    exclusion, direct single-link files, sidecars, and read-only journal state.
+    The returned identity is a sample, not a same-UID filesystem lock.
+    """
+
+    if any(type(flag) is not bool for flag in (read_only, require_existing, allow_mode_repair)):
+        raise TypeError("SQLite path policy flags must be booleans")
+    if read_only and allow_mode_repair:
+        raise ValueError("Read-only SQLite paths cannot repair permissions")
+    try:
+        resolved = database.resolve()
+        if _enclosing_git_worktree(resolved) is not None:
+            raise UnsafeRuntimePathError("Private database path must be outside Git worktrees")
+        checkout = source_checkout_root()
+        if checkout is not None and resolved.is_relative_to(checkout):
+            raise UnsafeRuntimePathError("Private database path must be outside Git worktrees")
+        _require_private_existing_path(database.parent, label="database directory", directory=True)
+        exists = _require_existing_database_link_safety(database)
+        _require_existing_sqlite_sidecars_safe(
+            database, resolved_database_path=resolved, database_exists=exists,
+        )
+        if not exists:
+            if require_existing:
+                raise FileNotFoundError("An existing private database is required")
+            return None
+        if not allow_mode_repair:
+            _require_private_existing_path(database, label="profile database", directory=False)
+        if read_only:
+            _require_sqlite_sidecars_absent_for_read_only(database, resolved_database_path=resolved)
+            _require_rollback_journal_mode_for_read_only(database)
+        metadata = database.lstat()
+        return metadata.st_dev, metadata.st_ino
+    except UnsafeRuntimePathError:
+        raise
+    except FileNotFoundError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise UnsafeRuntimePathError("Private database path could not be validated safely") from error
+
+
+def prepare_sqlite_path(
+    database: Path,
+    *,
+    existing_only: bool,
+    read_only: bool,
+) -> tuple[int, int]:
+    """Prepare a private adapter file before SQLite can create journals.
+
+    Initialization alone may create the database or repair its permissions,
+    using a no-follow descriptor. Existing-only and read-only opens never do.
+    """
+
+    identity = require_safe_sqlite_path(
+        database, read_only=read_only, require_existing=existing_only,
+        allow_mode_repair=not existing_only,
+    )
+    if not existing_only:
+        if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK"):
+            raise UnsafeRuntimePathError("Secure SQLite file opening is unavailable on this platform")
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+        if identity is None:
+            flags |= os.O_CREAT | os.O_EXCL
+        try:
+            descriptor = os.open(database, flags, 0o600)
+        except FileExistsError:
+            # Another initializer won exclusive creation. Validate its file;
+            # never truncate or overwrite it, and let SQLite serialize schema.
+            identity = require_safe_sqlite_path(database)
+        else:
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_nlink != 1
+                    or (identity is not None and (opened.st_dev, opened.st_ino) != identity)
+                ):
+                    raise UnsafeRuntimePathError("Database identity changed during preparation")
+                identity = (opened.st_dev, opened.st_ino)
+                os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
+    after = require_safe_sqlite_path(database, read_only=read_only)
+    if identity is None or after != identity:
+        raise UnsafeRuntimePathError("Database identity changed during preparation")
+    return identity

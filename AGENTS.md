@@ -100,14 +100,15 @@ Truth failures must fail closed.
   examples, docs, issues, commits, and demos use synthetic data only.
 - Treat the entire runtime data directory as sensitive. Respect
   `GROUNDED_APPLY_HOME`; do not create personal-data fallbacks inside the repo.
-- At the typed `gapply` runtime boundary, existing profile databases and SQLite
+- At both the typed `gapply` runtime boundary and public SQLite adapter opens,
+  existing profile databases and SQLite
   `-journal`, `-wal`, and `-shm` sidecars must be direct regular non-symlink
   files with exactly one hard link. Sidecars must remain private, and a sidecar
   without its main database fails closed. Read-only review and diagnostics
   additionally require sidecars to be absent and reject databases configured
   for persistent WAL mode rather than letting a read create, recover, or remove
-  SQLite state. Direct repository/inspection adapter callers must explicitly
-  compose these guards; adapter-wide enforcement is outside this milestone.
+  SQLite state. Direct repository/inspection adapters own these checks; the CLI
+  additionally checks the full runtime layout and portable-root containment.
 - `profile init` must create its default configuration through an exclusive,
   no-follow descriptor and must reject an existing nonregular, symlinked,
   multiply linked, or group/other-accessible configuration without changing it.
@@ -126,6 +127,9 @@ Truth failures must fail closed.
 - Never log full resumes, sensitive answers, prompts containing personal data,
   credentials, tokens, cookies, browser storage, or unredacted screenshots.
   Logs contain identifiers, hashes, redacted errors, and protected references.
+  Current opt-in CLI diagnostics accept only fixed command/outcome enums and
+  internally generated invocation metadata. Keep private stdout separate from
+  the `--log-events` stderr stream; do not add arbitrary messages or metadata.
 - Keep secrets out of configuration files and the database; use the operating
   system keychain or an approved secret provider. `.env.example` contains names
   and safe placeholders only.
@@ -188,6 +192,7 @@ The current zero-install interface is:
 ./scripts/check
 ./scripts/gapply --help
 ./scripts/gapply doctor --json
+./scripts/gapply --log-events doctor --json
 ./scripts/gapply profile import --help
 ./scripts/gapply profile review --help
 ./scripts/gapply profile decide --help
@@ -198,3 +203,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 hardening, not supported commands or runtime dependencies. Adopt and document
 them only when their configuration and checks exist and pass. Update all affected
 documentation in the same change.
+
+The optional installed-package gate is `python scripts/check_package.py` from a
+disposable environment with `requirements-build.txt` installed. It is verified
+on Python 3.13.1 and adds no application runtime dependency. It builds and tests
+outside the checkout; see `docs/DEVELOPMENT.md` for the exact setup commands.

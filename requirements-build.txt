@@ -1,0 +1,10 @@
+# Optional package verification tools; no application runtime dependencies.
+# Verified together on Python 3.13.1. Install into a disposable virtualenv.
+build==1.6.0
+hatchling==1.32.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+pyproject_hooks==1.2.0
+tomlkit==0.15.1
+trove-classifiers==2026.6.1.19

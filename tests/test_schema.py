@@ -18,6 +18,7 @@ from grounded_apply.repositories._schema import (
     read_schema_version,
 )
 from grounded_apply.repositories import inspect_schema
+from grounded_apply.config import UnsafeRuntimePathError
 
 
 class SchemaMigrationTests(unittest.TestCase):
@@ -79,10 +80,13 @@ class SchemaMigrationTests(unittest.TestCase):
             connection.close()
             database.chmod(0o640)
 
-            version = inspect_schema(database)
-
-            self.assertEqual(version, LATEST_SCHEMA_VERSION)
+            before = database.read_bytes()
+            with self.assertRaises(UnsafeRuntimePathError):
+                inspect_schema(database)
+            self.assertEqual(database.read_bytes(), before)
             self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o640)
+            database.chmod(0o600)
+            self.assertEqual(inspect_schema(database), LATEST_SCHEMA_VERSION)
 
     def test_concurrent_initialization_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
