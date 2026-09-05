@@ -1,0 +1,64 @@
+name: Synthetic release checks
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: synthetic-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        python: ["3.12", "3.13"]
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      GROUNDED_APPLY_HOME: ${{ runner.temp }}/grounded-apply-ci-unused
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Base CLI and test suite without optional dependencies
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/gapply-base"
+          PATH="$RUNNER_TEMP/gapply-base/bin:$PATH" ./scripts/check
+      - name: Install pinned verification tools outside the checkout
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/gapply-tools"
+          "$RUNNER_TEMP/gapply-tools/bin/python" -m pip install \
+            -r requirements-build.txt -r requirements-backup.txt
+          "$RUNNER_TEMP/gapply-tools/bin/python" -m pip download --only-binary=:all: \
+            --dest "$RUNNER_TEMP/gapply-backup-wheels" -r requirements-backup.txt
+      - name: Required encryption and provenance round trips
+        shell: bash
+        run: '"$RUNNER_TEMP/gapply-tools/bin/python" -W error scripts/check_backup.py'
+      - name: Base installed package
+        shell: bash
+        run: '"$RUNNER_TEMP/gapply-tools/bin/python" scripts/check_package.py'
+      - name: Offline installed package with optional encryption
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/gapply-tools/bin/python" scripts/check_package.py \
+            --backup-wheelhouse "$RUNNER_TEMP/gapply-backup-wheels"
+      - name: Confirm checks left the checkout clean
+        shell: bash
+        run: |
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"

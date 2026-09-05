@@ -9,7 +9,9 @@ commands that work now from the target toolchain described in the product design
 - a POSIX shell for `scripts/gapply`
 - Git
 
-The current bootstrap has no runtime dependencies. `pyproject.toml` contains
+The base bootstrap has no runtime dependencies. Encrypted profile backup/restore
+uses the optional `backup` extra (`cryptography`); no plaintext fallback exists.
+`pyproject.toml` contains
 packaging metadata and Hatchling as its build backend, but repository development
 does not currently require installing the package.
 
@@ -28,6 +30,10 @@ Run commands from the repository root.
 | One profile review decision | `./scripts/gapply profile decide --claim-id CLAIM_ID --review-token TOKEN --decision approve\|reject --actor-id ACTOR_ID --idempotency-key KEY [--confirm] [--json]` | Supported for synthetic data; storage-free syntax preview unless confirmed |
 | Full test suite | `PYTHONPATH=src python3 -m unittest discover -s tests -v` | Supported now |
 | Installed-package gate | `python scripts/check_package.py` | Supported with optional build tools; verified on Python 3.13.1 |
+| Encrypted profile backup | `gapply backup --encrypt ABSOLUTE_PATH [--dry-run] [--passphrase-stdin] [--json]` | Optional backup extra, synthetic data only |
+| New-home restore | `gapply restore --archive ABSOLUTE_PATH --target-home NEW_ABSOLUTE_PATH [--archive-sha256 HASH --confirm] [--passphrase-stdin] [--json]` | Write-free inspection unless explicitly confirmed |
+| Required encryption gate | `python -W error scripts/check_backup.py` | Optional provider required; skipped tests fail the gate |
+| Installed encryption gate | `python scripts/check_package.py --backup-wheelhouse ABSOLUTE_PATH` | Offline dependency wheels required; installs and exercises the extra |
 
 The full gate runs its CLI smokes and the test suite with warnings treated as
 errors, without creating bytecode in the checkout. The wrapper adds `src` to
@@ -60,6 +66,68 @@ confirmed approval, and exact replay. It verifies migrations resolve inside the
 installation. All runtime data uses synthetic fixtures in temporary paths.
 This passes on the documented local interpreter; it does not establish a
 cross-platform release matrix or MVP readiness.
+
+`.github/workflows/check.yml` configures Python 3.12/3.13 on Ubuntu 24.04 and
+macOS 15. Each job runs the base suite in a fresh dependency-free environment,
+the required encryption gate, and both installed-package gates. Build tools,
+dependency wheels, and all synthetic runtime state stay in runner temporary
+directories. Checkout/setup actions are pinned by commit, permissions are
+read-only, checkout credentials are not persisted, and no artifacts or runtime
+logs are uploaded. This is ordinary `pull_request` CI, not privileged
+`pull_request_target` execution. Hosted results remain unverified until that
+exact workflow revision runs; local Python 3.13.1 results cannot establish them.
+
+### Optional encrypted profile lifecycle verification
+
+Use a disposable environment and wheel directory outside the checkout:
+
+```bash
+/tmp/grounded-apply-build-tools/bin/python -m pip install -r requirements-backup.txt
+/tmp/grounded-apply-build-tools/bin/python -W error scripts/check_backup.py
+/tmp/grounded-apply-build-tools/bin/python -m pip download --only-binary=:all: \
+  --dest /tmp/grounded-apply-backup-wheels -r requirements-backup.txt
+/tmp/grounded-apply-build-tools/bin/python scripts/check_package.py \
+  --backup-wheelhouse /tmp/grounded-apply-backup-wheels
+```
+
+The base `./scripts/check` and discovery suite explicitly skip optional crypto
+tests when the provider is absent; that is not encryption release evidence.
+`scripts/check_backup.py` refuses a missing provider or any skip. The installed
+encryption gate downloads nothing: it installs wheels from the supplied local
+directory into a fresh virtualenv, then checks backup, preview, confirmed restore,
+unchanged retries, and preserved import/decision provenance.
+
+The version-1 archive is a bounded database snapshot encrypted by Fernet using
+Argon2id (64 MiB, 3 iterations, 4 lanes, random 16-byte salt). It is an application
+format, not age. The consistent SQLite backup and encryption stay in memory;
+there is no plaintext backup staging file. The archive cap is 24 MiB, the database
+cap 16 MiB, and capture/validation have five-second work budgets. Unknown schemas,
+SQL objects differing from local migrations, corrupt databases, broken foreign
+keys, and non-digest filesystem artifact references fail closed.
+
+Passphrases are 12–1024 UTF-8 bytes through no-echo terminal input (twice on
+creation) or explicit bounded stdin, with no inline, environment, or file-secret
+option. Python does not guarantee memory erasure or protection against swap/core
+dumps. Archive size and Fernet creation time are visible. Source documents,
+generated files, config, browser state, caches, and logs are outside this scope.
+Encryption does not upgrade claim truth, status, or provenance.
+
+All output/input paths are absolute, outside Git, under existing private direct
+directories. Files must be private, direct, regular, single-link, and user-owned.
+Output is exclusive/no-follow mode 0600 and fsynced; existing files are never
+repaired or overwritten. A matching existing archive is authenticated before
+returning its original identity. Read-only source guards also refuse sidecars
+and persistent WAL, and repeat runtime and database identity checks.
+
+Restore defaults to inspection without filesystem mutation. `--confirm` requires
+the exact archive hash from that inspection and a new private target home under
+an existing private parent. New directories and files are created exclusively;
+the completion receipt is written last. A retry validates the receipt, full
+target layout, database bytes, and safe default config. A changed, pre-existing,
+or incomplete target fails without repair or deletion. Abrupt termination can
+leave private partial output; inspect it separately and use a new destination.
+Fsync is not a claim of power-loss testing. Existing sampled same-UID TOCTOU
+limits still apply; see ADR 0003.
 
 ### Runtime database and sidecar safety
 
@@ -494,7 +562,11 @@ events in a support log. Events create no runtime files and make no network
 calls. A broken event sink cannot fail or repeat a command; it may leave partial
 or absent events, which are observations rather than the durable workflow audit.
 This boundary does not sanitize third-party output, shell history, or terminal
-recordings. Backup, export, deletion, and log retention remain planned.
+recordings. Optional encrypted profile backup/restore is implemented as described
+above; full-vault backup, support export, deletion, and log retention remain
+planned. Interrupted or indeterminate lifecycle results use the fixed
+`backup_outcome_unknown` diagnostic outcome with a content-free same-request
+retry instruction. No paths, passphrases, or archive content enter the events.
 
 Before sharing a diff or support artifact:
 

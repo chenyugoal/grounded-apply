@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 import uuid
 from hashlib import sha256
 from collections.abc import Iterator, Mapping, Sequence
@@ -194,6 +195,49 @@ class SQLiteRepository:
         self._connection.close()
         self._closed = True
         self._initialized = False
+
+    def snapshot_bytes(self, *, max_bytes: int) -> bytes:
+        """Capture a bounded consistent image without a plaintext staging file.
+
+        Only a guarded read-only connection outside any transaction may capture
+        a snapshot. A pinned read transaction keeps the size check and backup
+        on the same database revision. Busy retries have a fixed deadline.
+        """
+
+        self._require_initialized()
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError("Snapshot size limit must be a positive integer")
+        if not self._read_only or self._connection.in_transaction:
+            raise RepositoryError("Snapshots require an idle read-only repository")
+        self._validate_storage()
+        destination = sqlite3.connect(":memory:", isolation_level=None)
+        deadline = time.monotonic() + 5.0
+
+        def progress(status: int, remaining: int, total: int) -> None:
+            del status, remaining
+            if total * page_size > max_bytes or time.monotonic() > deadline:
+                raise RepositoryError("Snapshot exceeded its size or time budget")
+
+        try:
+            destination.execute("PRAGMA temp_store = MEMORY")
+            self._connection.execute("BEGIN")
+            self._connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
+            page_size = int(self._connection.execute("PRAGMA page_size").fetchone()[0])
+            page_count = int(self._connection.execute("PRAGMA page_count").fetchone()[0])
+            if page_size * page_count > max_bytes:
+                raise RepositoryError("Snapshot exceeds its supported size")
+            self._connection.backup(destination, pages=128, progress=progress, sleep=0.01)
+            snapshot = destination.serialize()
+            if len(snapshot) > max_bytes:
+                raise RepositoryError("Snapshot exceeds its supported size")
+            self._validate_storage()
+            return snapshot
+        finally:
+            try:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+            finally:
+                destination.close()
 
     def __enter__(self) -> Self:
         try:

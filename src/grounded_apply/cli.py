@@ -17,6 +17,7 @@ from typing import Any
 
 from grounded_apply import __version__
 from grounded_apply.config import (
+    DEFAULT_CONFIG,
     HOME_ENV_VAR,
     RuntimePaths,
     UnsafeRuntimePathError,
@@ -227,16 +228,7 @@ def _command_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 2
 
 
-_DEFAULT_CONFIG = """# Grounded Apply local configuration.
-# Personal data belongs under the runtime data directory, never in this repository.
-
-[privacy]
-telemetry = false
-
-[automation]
-allow_submission = false
-visible_browser = true
-"""
+_DEFAULT_CONFIG = DEFAULT_CONFIG
 
 
 def _existing_private_config(path: Path) -> os.stat_result | None:
@@ -931,6 +923,106 @@ def _command_profile_decide(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_backup_passphrase(args: argparse.Namespace, *, repeat: bool) -> bytes:
+    import getpass
+    import warnings
+    from grounded_apply.services.backup import BackupError, validate_passphrase
+
+    if args.passphrase_stdin:
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        raw = stream.read(1027)
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        if len(raw) > 1026:
+            raise BackupError("Passphrase input exceeds its size limit")
+        passphrase = raw[:-1] if raw.endswith(b"\n") else raw
+        if passphrase.endswith(b"\r"):
+            passphrase = passphrase[:-1]
+    else:
+        if not sys.stdin.isatty():
+            raise BackupError("Use a no-echo terminal or explicit --passphrase-stdin")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            passphrase = getpass.getpass("Backup passphrase: ").encode("utf-8")
+            if repeat and passphrase != getpass.getpass("Repeat backup passphrase: ").encode("utf-8"):
+                raise BackupError("Backup passphrases do not match")
+    validate_passphrase(passphrase)
+    return passphrase
+
+
+def _command_backup(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+    from grounded_apply.repositories.backup_crypto import FernetBackupCipher
+    from grounded_apply.repositories.backup_files import LocalBackupStorage
+    from grounded_apply.services.backup import BackupError, BackupOutcomeUnknownError, BackupService
+
+    try:
+        # Resolve the provider before requesting a secret or touching storage.
+        cipher = FernetBackupCipher()
+        service = BackupService(LocalBackupStorage(resolve_runtime_paths()), cipher)
+        passphrase = _read_backup_passphrase(args, repeat=not args.dry_run)
+        try:
+            result = service.create(Path(args.encrypt), passphrase, dry_run=args.dry_run)
+        finally:
+            del passphrase
+    except BackupError:
+        raise
+    except Exception:
+        raise BackupOutcomeUnknownError(
+            "Backup may be incomplete or already complete. Retry the same request; "
+            "a partial archive requires a new output path. No existing file was overwritten."
+        ) from None
+    try:
+        _emit(
+            args, command="backup", data=asdict(result),
+            message="Profile backup validated." if result.dry_run else "Encrypted profile backup ready.",
+        )
+    except Exception:
+        raise BackupOutcomeUnknownError(
+            "Backup may already be complete. Retry the same request to verify it."
+        ) from None
+    return 0
+
+
+def _command_restore(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+    from grounded_apply.repositories.backup_crypto import FernetBackupCipher
+    from grounded_apply.repositories.backup_files import LocalBackupStorage
+    from grounded_apply.services.backup import BackupError, BackupOutcomeUnknownError, BackupService
+
+    try:
+        cipher = FernetBackupCipher()
+        service = BackupService(LocalBackupStorage(), cipher)
+        passphrase = _read_backup_passphrase(args, repeat=False)
+        try:
+            result = service.restore(
+                Path(args.archive), Path(args.target_home), passphrase,
+                confirm=args.confirm, expected_archive_sha256=args.archive_sha256,
+            )
+        finally:
+            del passphrase
+    except BackupError:
+        raise
+    except Exception:
+        raise BackupOutcomeUnknownError(
+            "Restore failed; no existing profile was overwritten. "
+            "Retry the same request; an incomplete target requires a new target."
+        ) from None
+    try:
+        _emit(
+            args, command="restore", data={**asdict(result), "requires_confirmation": result.dry_run},
+            message=(
+                f"Archive validated: {result.archive_sha256}. Confirm with --archive-sha256 and --confirm."
+                if result.dry_run else "Profile restored into the new private home."
+            ),
+        )
+    except Exception:
+        raise BackupOutcomeUnknownError(
+            "Restore may already be complete. Retry the same request to verify it."
+        ) from None
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gapply",
@@ -953,6 +1045,32 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = commands.add_parser("doctor", help="Check the local installation safely.")
     _add_json_flag(doctor_parser)
     doctor_parser.set_defaults(handler=_command_doctor, command_name="doctor")
+
+    backup_parser = commands.add_parser(
+        "backup", help="Encrypt a bounded profile database snapshot.", allow_abbrev=False,
+    )
+    backup_parser.add_argument("--encrypt", required=True, metavar="ABSOLUTE_PATH")
+    backup_parser.add_argument("--dry-run", action="store_true", help="Validate without writing.")
+    backup_parser.add_argument(
+        "--passphrase-stdin", action="store_true",
+        help="Read a passphrase from bounded UTF-8 stdin instead of a no-echo terminal prompt.",
+    )
+    _add_json_flag(backup_parser)
+    backup_parser.set_defaults(handler=_command_backup, command_name="backup")
+
+    restore_parser = commands.add_parser(
+        "restore", help="Inspect or restore a profile backup into a new private home.",
+        allow_abbrev=False,
+    )
+    restore_parser.add_argument("--archive", required=True, metavar="ABSOLUTE_PATH")
+    restore_parser.add_argument("--target-home", required=True, metavar="NEW_ABSOLUTE_PATH")
+    restore_parser.add_argument("--archive-sha256", metavar="HASH_FROM_PREVIEW")
+    restore_parser.add_argument(
+        "--confirm", action="store_true", help="Create the new home after archive preview.",
+    )
+    restore_parser.add_argument("--passphrase-stdin", action="store_true")
+    _add_json_flag(restore_parser)
+    restore_parser.set_defaults(handler=_command_restore, command_name="restore")
 
     profile_parser = commands.add_parser("profile", help="Manage candidate profile data.")
     profile_commands = profile_parser.add_subparsers(dest="profile_command", required=True)
@@ -1053,7 +1171,7 @@ def _command_name_from_argv(argv: Sequence[str]) -> str:
         profile_command = argv[1]
         if profile_command in {"init", "import", "review", "decide"}:
             return f"profile.{profile_command}"
-    if argv[0] in {"paths", "doctor"}:
+    if argv[0] in {"paths", "doctor", "backup", "restore"}:
         return argv[0]
     return "unknown"
 
@@ -1089,7 +1207,7 @@ def _main(
                 message="Invalid command arguments.",
                 ok=False,
             )
-        elif command_name == "profile.decide":
+        elif command_name in {"profile.decide", "backup", "restore"}:
             print(
                 "Error: Invalid command arguments. No external action was taken.",
                 file=sys.stderr,
@@ -1101,7 +1219,15 @@ def _main(
     try:
         return handler(args)
     except KeyboardInterrupt:
-        if getattr(args, "command_name", None) == "profile.decide":
+        if getattr(args, "command_name", None) in {"backup", "restore"}:
+            if diagnostics is not None:
+                diagnostics.require_backup_recovery()
+            print(
+                "Interrupted. Backup or restore may be incomplete or already complete. "
+                "Retry the same request; incomplete output requires a new destination. "
+                "No existing data was overwritten.", file=sys.stderr,
+            )
+        elif getattr(args, "command_name", None) == "profile.decide":
             if getattr(args, "confirm", False):
                 if diagnostics is not None:
                     diagnostics.require_decision_recovery()
@@ -1119,6 +1245,10 @@ def _main(
             print("Interrupted.", file=sys.stderr)
         return 130
     except Exception as error:
+        from grounded_apply.services.backup import BackupOutcomeUnknownError
+
+        if isinstance(error, BackupOutcomeUnknownError) and diagnostics is not None:
+            diagnostics.require_backup_recovery()
         if isinstance(error, PostCommitOutputError):
             if diagnostics is not None:
                 diagnostics.require_decision_recovery()

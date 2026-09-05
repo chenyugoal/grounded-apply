@@ -19,6 +19,8 @@ class DiagnosticCommand(StrEnum):
     UNKNOWN = "unknown"
     PATHS = "paths"
     DOCTOR = "doctor"
+    BACKUP = "backup"
+    RESTORE = "restore"
     PROFILE_INIT = "profile.init"
     PROFILE_IMPORT = "profile.import"
     PROFILE_REVIEW = "profile.review"
@@ -31,6 +33,7 @@ class DiagnosticOutcome(StrEnum):
     FAILED = "failed"
     INTERRUPTED = "interrupted"
     DECISION_OUTCOME_UNKNOWN = "decision_outcome_unknown"
+    BACKUP_OUTCOME_UNKNOWN = "backup_outcome_unknown"
 
 
 class CommandDiagnostics:
@@ -43,11 +46,19 @@ class CommandDiagnostics:
         self._command = command
         self._run_id = str(uuid4())
         self._decision_outcome_unknown = False
+        self._backup_outcome_unknown = False
 
     def require_decision_recovery(self) -> None:
         """Preserve the fixed recovery instruction when normal stderr is muted."""
 
         self._decision_outcome_unknown = True
+
+    def require_backup_recovery(self) -> None:
+        """Preserve fixed filesystem recovery advice without logging any path."""
+
+        if self._command not in {DiagnosticCommand.BACKUP, DiagnosticCommand.RESTORE}:
+            raise TypeError("Backup recovery applies only to backup and restore commands")
+        self._backup_outcome_unknown = True
 
     def emit(self, outcome: DiagnosticOutcome) -> None:
         """Emit no caller content; failed diagnostics never change the command."""
@@ -56,6 +67,8 @@ class CommandDiagnostics:
             raise TypeError("Diagnostic outcome must be a registered enum member")
         if outcome != DiagnosticOutcome.STARTED and self._decision_outcome_unknown:
             outcome = DiagnosticOutcome.DECISION_OUTCOME_UNKNOWN
+        if outcome != DiagnosticOutcome.STARTED and self._backup_outcome_unknown:
+            outcome = DiagnosticOutcome.BACKUP_OUTCOME_UNKNOWN
         try:
             record = {
                 "schema_version": 1,
@@ -67,7 +80,10 @@ class CommandDiagnostics:
                 "recovery": (
                     "The decision may already be recorded. Retry the exact same "
                     "confirmed request and idempotency key. No external action was taken."
-                    if outcome == DiagnosticOutcome.DECISION_OUTCOME_UNKNOWN else None
+                    if outcome == DiagnosticOutcome.DECISION_OUTCOME_UNKNOWN else
+                    "Backup or restore may be incomplete or already complete. Retry the same request; "
+                    "incomplete output requires a new destination. No existing data was overwritten."
+                    if outcome == DiagnosticOutcome.BACKUP_OUTCOME_UNKNOWN else None
                 ),
             }
             self._sink.write(json.dumps(record, sort_keys=True) + "\n")

@@ -6,159 +6,183 @@ Durable phase scope belongs in `ROADMAP.md`; architecture decisions belong in
 
 ## Checkpoint
 
-- **Last updated:** 2026-09-04 18:12 CDT
+- **Last updated:** 2026-09-04 19:27 CDT
 - **Branch:** `codex/phase-0-truth-layer`
-- **HEAD:** `8cbd276` (`Implement grounded application workflow`), equal to
-  `origin/codex/phase-0-truth-layer`
-- **Milestone:** Phase 0 — diagnostic events, process-crash recovery evidence,
-  adapter-owned safe SQLite opens, and installed-package verification
-- **Status:** This milestone is implemented and verified in the working tree.
-  Phase 0 remains in progress and the overall release
-  request remains incomplete. Do not use real candidate data.
-- **Starting state:** Clean tree. The previous checkpoint named `71662ef` and
-  described uncommitted work already landed in `8cbd276`. Its exact first command,
-  `./scripts/check`, passed 261/261 tests before changes.
-- **Expected working tree:** Modified `AGENTS.md`, `README.md`,
-  `docs/DEVELOPMENT.md`, `docs/ROADMAP.md`, this file, `scripts/check`,
-  `src/grounded_apply/cli.py`, `src/grounded_apply/config.py`,
-  `src/grounded_apply/repositories/sqlite.py`, `tests/test_repository.py`, and
-  `tests/test_schema.py`. New `docs/adr/0002-local-storage-and-diagnostics.md`,
-  `requirements-build.txt`, `scripts/check_package.py`,
-  `src/grounded_apply/diagnostics.py`, `tests/test_crash_recovery.py`,
-  `tests/test_logging.py`, and `tests/test_storage_safety.py`. No commit or push
-  was made in this session.
+- **HEAD:** `b191c16` (`Document storage safety, diagnostics, and package
+  verification`), equal to `origin/codex/phase-0-truth-layer`
+- **Milestone:** Phase 0 — encrypted profile backup/restore and release CI setup
+- **Status:** Encrypted profile backup/restore is implemented and verified in the
+  working tree. CI is configured and syntax-checked, but hosted matrix results
+  remain unverified. Phase 0 and the personal-use release request are incomplete.
+  Continue using synthetic data only.
+- **Starting state:** Clean tree. The previous handoff named `8cbd276` and
+  described changes already committed in `b191c16`. Its exact first command,
+  `./scripts/check`, passed all 281 baseline tests before changes.
+- **Working tree:** Modified `AGENTS.md`, `README.md`, `docs/DEVELOPMENT.md`,
+  `docs/ROADMAP.md`, this file, `pyproject.toml`, `scripts/check`,
+  `scripts/check_package.py`, `src/grounded_apply/cli.py`,
+  `src/grounded_apply/config.py`, `src/grounded_apply/diagnostics.py`, and
+  `src/grounded_apply/repositories/sqlite.py`. New
+  `.github/workflows/check.yml`, `docs/adr/0003-encrypted-profile-backup.md`,
+  `requirements-backup.txt`, `scripts/check_backup.py`,
+  `src/grounded_apply/services/backup.py`,
+  `src/grounded_apply/repositories/backup_crypto.py`,
+  `src/grounded_apply/repositories/backup_files.py`,
+  `src/grounded_apply/repositories/snapshots.py`, and `tests/test_backup.py`.
+  No commit, push, hosted CI run, or release was made in this session.
 
 ## Implemented in this milestone
 
-- Opt-in `gapply --log-events COMMAND --json` uses fixed-schema JSONL stderr.
-  It accepts only exact registered command/outcome enums and internally generated
-  invocation metadata; no caller text, metadata, path, exception, token, or key
-  fields exist. Stdout remains private. Human stderr is discarded in event mode;
-  JSON stdout retains command errors and warnings.
-- Ambiguous confirmed-decision outcomes preserve a fixed retry instruction in
-  `decision_outcome_unknown`. Failed event writes/flushes cannot fail or repeat
-  commands. Events create no files or telemetry and do not replace workflow audit.
-- An abrupt subprocess exit creates a genuine hot rollback journal with dirty
-  spilled database pages. Tests prove mutating import restores original data
-  before proceeding once, exact retry is stable, and read-only or unsafe-journal
-  cases refuse without recovery or mutation.
-- Public SQLite repository and schema-inspection opens own file/sidecar safety:
-  private parent outside Git, direct single-link regular database/sidecar files,
-  private sidecars, and no orphans. Read-only opens also refuse all sidecars and
-  persistent WAL. The CLI retains full runtime-layout and portable-root checks.
-- Initialization prepares a private file before SQLite can create a journal,
-  using exclusive no-follow creation or checked no-follow permission repair.
-  Existing-only/read-only opens never create or chmod storage. URI and implicit
-  temporary targets are refused; explicit in-memory repositories remain allowed.
-  Open/setup and context-manager initialization failures close connections.
-  Parent-symlink plus `..` paths retain filesystem meaning instead of being
-  silently normalized to a different database.
-- `scripts/check_package.py` builds a source archive and wheel, checks package
-  contents, installs into a fresh virtualenv outside the checkout without network
-  or source import paths, verifies bundled migration discovery and the entry
-  point, then exercises synthetic import/review/approval/replay. Optional build
-  tools are pinned in `requirements-build.txt`; runtime remains dependency-free.
-- The full gate now treats warnings as errors and exercises the event option.
-  README, development guidance, roadmap, and ADR 0002 document the bounded
-  guarantees and distinguish them from real-data release readiness.
+- Optional `backup --encrypt ABSOLUTE_PATH` captures a consistent SQLite image
+  using a guarded read-only connection and a pinned read transaction. Plaintext
+  stays in memory until an explicitly confirmed restore. Snapshot size is bounded
+  to 16 MiB; backup and SQL-validation work have five-second budgets.
+- The `backup` extra uses `cryptography` 50.0.1 Fernet with fixed Argon2id
+  parameters (64 MiB, 3 iterations, 4 lanes, random 16-byte salt). Format 1
+  authenticates its scope and header inside the ciphertext, rejects noncanonical
+  tokens and unknown formats, and has no plaintext or age-format fallback.
+- Passphrases use a no-echo terminal prompt or explicit bounded UTF-8 stdin;
+  no argument, environment, file, configuration, database, or diagnostic field
+  stores them. Source databases are never rewritten. Exact named-destination
+  retries authenticate and return the original ciphertext when the snapshot is
+  unchanged; other existing output fails closed.
+- `restore` inspects without writing by default. `--confirm` requires the exact
+  archive hash from preview and a new absolute target home. Validation checks
+  current schema, exact SQL objects against local migrations, integrity, foreign
+  keys, and absence of nondigest artifact references before materializing data.
+  Restore never approves claims or overwrites an existing profile.
+- Private directories and mode-0600 files are created exclusively. A completion
+  receipt is written last. Exact retries require the whole target to remain
+  unchanged; partial, changed, linked, or unsafe targets fail without repair or
+  deletion. Files and containing directories are fsynced. This is not evidence
+  of power-loss durability or protection from a malicious same-UID process.
+- CLI and fixed-schema diagnostics preserve content-free recovery advice after
+  interruptions or ambiguous lifecycle outcomes. Failures never log candidate
+  text, passphrases, paths, or archive contents.
+- `scripts/check_backup.py` requires the provider and rejects skips. The optional
+  installed-package gate accepts a local dependency wheelhouse, installs the
+  extra offline in a fresh environment, and checks backup, preview, confirmed
+  restore, replay, and preserved import/review/approval provenance.
+- `.github/workflows/check.yml` configures Python 3.12/3.13 on Ubuntu 24.04 and
+  macOS 15. Actions are pinned to verified upstream commits, permissions are
+  read-only, credentials are not persisted, and all runtime/build data stays in
+  runner temporary directories. Hosted execution remains unverified.
 
 ## Verification
 
-All candidate inputs are synthetic. Runtime databases, crash fixtures, build
-outputs, and installed-package environments are outside the repository.
+All runtime data, passphrases, and fault-injection inputs are synthetic. Temporary
+databases, archives, logs, build environments, and dependency wheels stayed
+outside the repository.
 
 ```text
 ./scripts/check (session start)
-PASS — 261/261 baseline tests
+PASS — 281/281 baseline tests
 
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
-  -m unittest tests.test_config tests.test_cli tests.test_logging -v
-PASS — 106/106 at the initial logging/storage checkpoint
-
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error \
-  -m unittest tests.test_storage_safety tests.test_logging tests.test_crash_recovery -v
-PASS — 20/20 final focused tests, including path meaning and connection cleanup
+PYTHONDONTWRITEBYTECODE=1 \
+  /private/tmp/grounded-apply-release-tools-20260904/bin/python -W error \
+  scripts/check_backup.py
+PASS — 28/28 focused tests with the real encryption provider, no skips
 
 ./scripts/check
-PASS — CLI/help/doctor/event smokes and 281/281 tests with warnings as errors
+PASS — CLI/help/doctor/event smokes; 296 passed, 13 optional crypto tests skipped
+(309 tests discovered). Base Python 3.13.1 has no cryptography installation.
+
+PATH=/private/tmp/grounded-apply-release-tools-20260904/bin:$PATH ./scripts/check
+PASS — 309/309 tests, no skips, warnings treated as errors
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 \
   -m unittest discover -s tests -v
-PASS — 281/281 tests
+PASS — 296 passed, 13 optional crypto tests skipped (309 discovered)
 
-/private/tmp/grounded-apply-release-tools-20260904/bin/python scripts/check_package.py
-PASS — source archive, wheel, isolated install, entry point, migrations, and
-synthetic workflow on Python 3.13.1, repeated after final code changes
+PYTHONDONTWRITEBYTECODE=1 \
+  /private/tmp/grounded-apply-release-tools-20260904/bin/python scripts/check_package.py
+PASS — source archive, wheel, fresh base installation, CLI, bundled migrations,
+and synthetic import/review/approval/replay
+
+PYTHONDONTWRITEBYTECODE=1 \
+  /private/tmp/grounded-apply-release-tools-20260904/bin/python scripts/check_package.py \
+  --backup-wheelhouse /private/tmp/grounded-apply-backup-wheels-20260904
+PASS — all base package checks plus offline extra installation and encrypted
+backup/restore/provenance/replay on local Python 3.13.1
+
+sh -n scripts/check scripts/gapply
+PASS
 
 ./scripts/gapply --help
 ./scripts/gapply profile import --help
 ./scripts/gapply profile review --help
 ./scripts/gapply profile decide --help
-PASS — all exited 0
-
-GROUNDED_APPLY_HOME=/private/tmp/grounded-apply-release-final-doctor-20260904 \
+./scripts/gapply backup --help
+./scripts/gapply restore --help
+GROUNDED_APPLY_HOME=/private/tmp/gapply-final-smoke-20260904 \
   ./scripts/gapply doctor --json
-PASS — healthy, uninitialized; verified that the runtime root was not created
+GROUNDED_APPLY_HOME=/private/tmp/gapply-final-smoke-20260904 \
+  ./scripts/gapply --log-events doctor --json
+PASS — all exited 0; doctor reported uninitialized and created no runtime
 
-sh -n scripts/check scripts/gapply
-PASS
+ruby -ryaml: YAML.load_file('.github/workflows/check.yml'), validate event keys,
+and bash -n on every embedded run script
+PASS — YAML structure and embedded shell syntax; not a hosted Actions execution
 
 git diff --check
-git status --short --branch
-PASS — no whitespace errors; exactly the 18 expected changed/new files
+PASS — no whitespace errors
+
+Changed/new Python AST parsing, whitespace, and private-key/token marker scan
+PASS — exactly 21 expected changed/new files; no runtime artifacts or credential
+markers; complete code/test/doc/workflow review found no unrelated changes
 ```
 
-Complete-diff review plus changed-content credential, personal absolute-path,
-email, and debug-hook scans found no secrets, personal data, debug hooks, or
-unrelated files. Build outputs and runtime fixtures stayed outside the checkout.
-
-Initial build-tool installation failed because the sandbox could not resolve the
-package index. The authorized network-enabled retry installed only build tools
-into a disposable `/private/tmp` virtualenv and succeeded. Package verification
-itself downloads nothing. Earlier focused tests exposed three old fixtures that
-allowed broad database modes; they now prove strict refusal or use private
-fixture modes, preserving original schema/no-mutation assertions.
+Initial focused tests found three fixture-authoring errors (two repository
+method names and a checksum violating the fixture's own SQL constraint); these
+were corrected before the passing runs. Final review also fixed a stdin boundary
+case where a maximum-size passphrase plus CRLF could hide unread trailing input;
+the bounded read now includes an overflow byte and the regression passes.
+The sandbox's first dependency install
+could not resolve the package index. The authorized network-enabled retry
+installed only the optional crypto dependencies into the disposable build
+environment; the pinned wheel download also stayed in `/private/tmp`.
 
 ## Known limitations and release blockers
 
-- Encrypted backup/export, restore, deletion, and protected-artifact retention
-  remain planned. This is the next Phase 0 slice; a raw database copy is not a
-  completed encrypted backup workflow.
+- Backup scope is one current-schema profile database. Source documents,
+  filesystem artifacts, generated material, browser state, config, caches, and
+  logs are excluded. Non-digest artifact rows are refused. Full-vault backup,
+  redacted support export, deletion, and retention remain unfinished.
+- The passphrase must be retained separately. Python cannot guarantee secret
+  zeroization or prevent swap/core-dump capture. Archive length and Fernet
+  creation time are visible. Runtime database encryption remains an OS concern.
 - Resume extraction, claim editing, stable entity identity, and user-facing
-  semantic contradiction resolution remain incomplete. Restricted taxonomy 1
-  is lexical defense in depth, not comprehensive semantic, secret, or PII
-  classification; broad obfuscation and non-English coverage remain incomplete.
+  semantic contradiction handling remain incomplete. Restricted taxonomy 1 is
+  lexical defense in depth, not comprehensive semantic/secret/PII classification.
 - Derived claims remain unusable until a registered evaluator recomputes them.
-- The broader synthetic golden corpus and application MVP remain planned:
+- The broader synthetic golden corpus and Phase 1 application MVP remain planned:
   job snapshots/requirements, fit matrices, traceable resume/PDF generation,
   questionnaire answers, and application/submission history.
-- Filesystem guards are repeated samples, not a same-UID adversarial lock. They
-  do not authenticate database contents. Native Windows paths remain unsupported
-  and the package gate has run only on local Python 3.13.1.
-- Real process-crash rollback is covered; power loss, disk corruption, arbitrary
-  journal modes, and an explicit repair command are not. Read-only access refuses
-  recovery-capable states.
-- Diagnostic events cover the CLI's explicit boundary, not arbitrary third-party
-  logging, shell history, terminal capture, or caller-controlled sinks. Keep
-  private stdout separate. No persistent log retention is implemented.
+- CI configuration does not establish Linux or alternate-interpreter support.
+  Local evidence is Python 3.13.1 on macOS. Native Windows paths remain unsupported.
+- Filesystem guards remain repeated samples, not authentication or an atomic
+  same-UID lock. Crash interruption may leave private incomplete restore output;
+  retry refuses it. Deletion/repair and power-loss testing remain separate work.
 
 ## Next exact tasks
 
-1. `GROUNDED_APPLY_DESIGN.md:1120`: design the bounded encrypted-backup/restore
-   contract before introducing its service or CLI. Start with
-   `rg -n "backup|export|delet|retention|encrypt" GROUNDED_APPLY_DESIGN.md docs src`.
-   Specify consistent snapshot capture, an authenticated versioned archive,
-   transient secret input, private exclusive output, restore compatibility and
-   confirmation, and failure/idempotency behavior. Record the encryption/provider
-   choice in an ADR; do not invent cryptography or silently ship plaintext backup.
-2. `tests/test_profile_service.py`: define one stale-safe claim correction or
-   semantic-contradiction workflow, preserving approved history and provenance.
-   Keep it separate from backup and broader entity modeling.
-3. `scripts/check_package.py`: establish a clean-checkout CI interpreter/OS matrix
-   after the local package gate; do not claim unexecuted platforms as verified.
-4. `docs/ROADMAP.md`: finish remaining Phase 0 exit evidence before advancing to
-   the first bounded Phase 1 job-snapshot task. The personal-use release target
-   is the MVP acceptance list in design section 28.
+1. `GROUNDED_APPLY_DESIGN.md:1120`: specify the next bounded deletion/retention
+   contract in an ADR. Start with
+   `rg -n "delet|retention|backup" GROUNDED_APPLY_DESIGN.md docs src`.
+   Bind an explicit portable-home target to a stale-safe inventory preview and
+   confirmation; define refusal for links, unknown files, changed state, and
+   partial failures, plus a content-free auditable result outside deleted data.
+   Do not promise secure erasure or introduce recursive deletion before its
+   service-owned policy and synthetic adversarial tests exist.
+2. `tests/test_profile_service.py`: implement one stale-safe claim correction or
+   semantic-contradiction workflow while preserving approved history and import
+   replay identities. Keep it separate from deletion and broad entity modeling.
+3. `.github/workflows/check.yml`: after integrating this revision, execute the
+   hosted matrix and record exact run/commit evidence. Investigate failed targets
+   before calling them supported; static YAML validation is insufficient.
+4. `docs/ROADMAP.md`: finish remaining Phase 0 evidence before the first bounded
+   Phase 1 job-snapshot task. The personal-use release target remains design
+   section 28; packaging and encrypted backup alone do not satisfy it.
 
 ## First command
 
@@ -168,7 +192,9 @@ fixture modes, preserving original schema/no-mutation assertions.
 
 ## Key decisions
 
-- ADR 0002 is the durable storage/diagnostic threat-model decision.
-- No schema, import policy, review-decision authority, or external action changed.
-- A verified wheel is distribution evidence for the current Phase 0 feature set;
-  it does not satisfy the personal-use MVP or authorize real candidate data.
+- ADR 0003 records the bounded archive/provider/restore contract; ADR 0002's
+  storage and diagnostic threat-model limits continue to apply.
+- Base runtime dependencies remain empty; cryptography is optional and tested
+  separately. A base-suite skip never counts as encryption evidence.
+- No schema migration, import policy, claim authority, model call, external
+  application action, or submission behavior changed.

@@ -11,6 +11,16 @@ from pathlib import Path
 
 APP_DIR_NAME = "grounded-apply"
 HOME_ENV_VAR = "GROUNDED_APPLY_HOME"
+DEFAULT_CONFIG = """# Grounded Apply local configuration.
+# Personal data belongs under the runtime data directory, never in this repository.
+
+[privacy]
+telemetry = false
+
+[automation]
+allow_submission = false
+visible_browser = true
+"""
 _SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 
 

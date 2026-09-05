@@ -21,6 +21,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+backup = ["cryptography>=50.0.1,<51"]
+
 [project.scripts]
 gapply = "grounded_apply.cli:main"
 

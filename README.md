@@ -23,6 +23,11 @@ decision through the typed `profile decide` CLI and application service. It does
 not extract claims from a resume, edit proposals, or provide a user-facing
 contradiction-resolution workflow.
 
+Optional encrypted profile backup and confirmed restore into a new private home
+are available for synthetic data. They preserve database provenance and approval
+states. Full filesystem backup, support export, deletion, and retention remain
+unfinished.
+
 The single live checkpoint is [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md).
 It records what is actually implemented, the last verification results, known
 issues, and the next exact task. The longer-term scope in
@@ -32,8 +37,9 @@ implemented and verified.
 
 ## Try the Phase 0 scaffold
 
-Prerequisite: Python 3.12 or newer. The current bootstrap deliberately has no
-runtime package dependencies and does not require installation.
+Prerequisite: Python 3.12 or newer. The base CLI has no runtime package
+dependencies and does not require installation. Encrypted backup/restore requires
+the optional `backup` extra.
 
 ```bash
 ./scripts/check
@@ -56,6 +62,49 @@ Events exclude arguments, exception text, source content, tokens, and keys.
 Use command `--json` to retain normal errors and warnings on stdout in this mode.
 The optional installed-package gate, `python scripts/check_package.py`, is
 documented in the development guide and verifies a fresh wheel installation.
+The configured GitHub Actions matrix runs the synthetic checks and installed
+package gates on Linux/macOS with Python 3.12/3.13. Hosted matrix results remain
+unverified; see the handoff for actual local evidence.
+
+### Encrypted profile backup and restore
+
+In an installed environment, install `grounded-apply[backup]` from your built
+wheel. For source development, install `requirements-backup.txt` in a disposable
+virtualenv outside the repository, then run
+`python -W error scripts/check_backup.py` with that interpreter. This gate requires
+the provider and cannot pass by skipping encryption tests.
+
+Use absolute paths under an existing private (`0700`) directory outside Git.
+The following examples prompt for a passphrase without echoing it:
+
+```bash
+gapply backup --encrypt /secure/private-directory/profile.gapply --dry-run --json
+gapply backup --encrypt /secure/private-directory/profile.gapply --json
+gapply restore --archive /secure/private-directory/profile.gapply \
+  --target-home /secure/private-directory/restored-profile --json
+gapply restore --archive /secure/private-directory/profile.gapply \
+  --target-home /secure/private-directory/restored-profile \
+  --archive-sha256 HASH_FROM_PREVIEW --confirm --json
+```
+
+Retain a strong passphrase separately; the application does not store or recover
+it. Automation can supply bounded UTF-8 stdin with `--passphrase-stdin`. There is
+no inline-secret, environment-variable, or passphrase-file option. The optional
+provider uses Fernet with Argon2id; `.gapply` archives are not age files.
+
+The archive contains one consistent profile database, up to 16 MiB. It excludes
+original documents, generated files, browser state, config, caches, and logs;
+non-digest artifact references fail closed. Restore validates authentication,
+current schema, database integrity, and references before writing. It creates a
+new private home and never replaces a profile. Point `GROUNDED_APPLY_HOME` at that
+new home to use it.
+
+The same backup path, passphrase, and snapshot return the original ciphertext;
+changed input never overwrites it. An exact restore retry succeeds only while
+its completion receipt and complete target remain unchanged. A crash can leave
+a private partial archive or target; it is refused on retry, so inspect it
+separately and choose a new destination. These commands do not delete anything.
+See [ADR 0003](docs/adr/0003-encrypted-profile-backup.md) for format and limits.
 
 On the current POSIX bootstrap, runtime data defaults to XDG-compatible user
 directories outside the repository. Native Windows path support remains

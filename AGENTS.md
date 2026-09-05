@@ -196,6 +196,8 @@ The current zero-install interface is:
 ./scripts/gapply profile import --help
 ./scripts/gapply profile review --help
 ./scripts/gapply profile decide --help
+./scripts/gapply backup --help
+./scripts/gapply restore --help
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
@@ -206,5 +208,10 @@ documentation in the same change.
 
 The optional installed-package gate is `python scripts/check_package.py` from a
 disposable environment with `requirements-build.txt` installed. It is verified
-on Python 3.13.1 and adds no application runtime dependency. It builds and tests
-outside the checkout; see `docs/DEVELOPMENT.md` for the exact setup commands.
+on Python 3.13.1 and adds no base application runtime dependency. It builds and
+tests outside the checkout; see `docs/DEVELOPMENT.md` for the exact setup commands.
+Encrypted profile backup/restore uses the optional `backup` extra. Its required
+gate is `python -W error scripts/check_backup.py`; a base-suite crypto skip does
+not verify encryption. Use `scripts/check_package.py --backup-wheelhouse PATH`
+to verify the extra in an offline fresh installation. Full filesystem backup,
+support export, deletion, and retention remain unfinished.

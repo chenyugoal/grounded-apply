@@ -9,6 +9,7 @@ disabled. All generated files are disposable and outside the checkout.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -24,10 +25,12 @@ from typing import Any
 REPOSITORY = Path(__file__).resolve().parents[1]
 
 
-def run(command: list[str], *, cwd: Path, environ: dict[str, str]) -> str:
+def run(
+    command: list[str], *, cwd: Path, environ: dict[str, str], input_data: str | None = None,
+) -> str:
     result = subprocess.run(
         command, cwd=cwd, env=environ, text=True, capture_output=True,
-        timeout=120, check=False,
+        timeout=120, check=False, input=input_data,
     )
     if result.returncode:
         # Every payload in this script is synthetic; never run this on a user's
@@ -39,7 +42,7 @@ def run(command: list[str], *, cwd: Path, environ: dict[str, str]) -> str:
     return result.stdout
 
 
-def check() -> None:
+def check(*, backup_wheelhouse: Path | None = None) -> None:
     metadata = tomllib.loads((REPOSITORY / "pyproject.toml").read_text())
     version = metadata["project"]["version"]
     with tempfile.TemporaryDirectory(prefix="grounded-apply-package-") as directory:
@@ -69,6 +72,10 @@ def check() -> None:
                 "grounded_apply/migrations/001_initial.sql",
                 "grounded_apply/migrations/002_profile_import_review_items.sql",
                 "grounded_apply/diagnostics.py",
+                "grounded_apply/services/backup.py",
+                "grounded_apply/repositories/backup_crypto.py",
+                "grounded_apply/repositories/backup_files.py",
+                "grounded_apply/repositories/snapshots.py",
             }
             if not required <= names:
                 raise RuntimeError("Wheel is missing required package data")
@@ -87,6 +94,12 @@ def check() -> None:
              "--no-deps", "--no-cache-dir", str(wheels[0])],
             cwd=workspace, environ=environment,
         )
+        if backup_wheelhouse is not None:
+            run(
+                [str(executable), "-m", "pip", "--isolated", "install", "--no-index",
+                 "--no-cache-dir", "--find-links", str(backup_wheelhouse), "grounded-apply[backup]"],
+                cwd=workspace, environ=environment,
+            )
         location = json.loads(run(
             [str(executable), "-I", "-c",
              "import json,grounded_apply; from grounded_apply.repositories._schema "
@@ -98,12 +111,16 @@ def check() -> None:
             raise RuntimeError("Installed check imported source checkout content")
         if run([str(command), "--version"], cwd=workspace, environ=environment).strip() != f"gapply {version}":
             raise RuntimeError("Installed CLI version disagrees with package metadata")
-        for args in ([], ["profile", "import"], ["profile", "review"], ["profile", "decide"]):
+        for args in (
+            [], ["profile", "import"], ["profile", "review"], ["profile", "decide"],
+            ["backup"], ["restore"],
+        ):
             run([str(command), *args, "--help"], cwd=workspace, environ=environment)
 
-        def cli(*args: str) -> dict[str, Any]:
+        def cli(*args: str, input_data: str | None = None) -> dict[str, Any]:
             result = json.loads(run(
                 [str(command), *args, "--json"], cwd=workspace, environ=environment,
+                input_data=input_data,
             ))
             if result["ok"] is not True:
                 raise RuntimeError("Installed CLI returned a failed envelope")
@@ -149,8 +166,42 @@ def check() -> None:
         if len(cli("profile", "review")["items"]) != len(review["items"]) - 1:
             raise RuntimeError("Approved item remained in pending review")
         cli("--log-events", "doctor")
+        if backup_wheelhouse is not None:
+            print("Checking installed optional encryption, restore preview, and replay...", flush=True)
+            passphrase = "synthetic-package-only-passphrase\n"
+            archive = workspace / "synthetic-profile.gapply"
+            backup_args = ("backup", "--encrypt", str(archive), "--passphrase-stdin")
+            backup = cli(*backup_args, input_data=passphrase)
+            replay = cli(*backup_args, input_data=passphrase)
+            if replay["replayed"] is not True or backup["archive_sha256"] != replay["archive_sha256"]:
+                raise RuntimeError("Installed backup replay did not preserve its archive")
+            target = workspace / "restored"
+            restore_args = (
+                "restore", "--archive", str(archive), "--target-home", str(target),
+                "--passphrase-stdin",
+            )
+            preview = cli(*restore_args, input_data=passphrase)
+            if target.exists() or preview["requires_confirmation"] is not True:
+                raise RuntimeError("Installed restore preview wrote runtime data")
+            confirm_args = (*restore_args, "--archive-sha256", preview["archive_sha256"], "--confirm")
+            restored = cli(*confirm_args, input_data=passphrase)
+            if restored["dry_run"] is not False:
+                raise RuntimeError("Installed confirmed restore did not complete")
+            if cli(*confirm_args, input_data=passphrase)["replayed"] is not True:
+                raise RuntimeError("Installed restore replay was not stable")
+            environment["GROUNDED_APPLY_HOME"] = str(target)
+            if cli(*import_args) != imported or cli(*decision_args, "--confirm") != decision:
+                raise RuntimeError("Restored profile lost import or decision provenance")
+            if len(cli("profile", "review")["items"]) != len(review["items"]) - 1:
+                raise RuntimeError("Restored review queue changed")
     print("PASS — source archive, wheel contents, isolated install, CLI, migrations, and synthetic workflow")
 
 
 if __name__ == "__main__":
-    check()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--backup-wheelhouse", type=Path,
+        help="Local dependency wheels for an offline installed backup/restore gate.",
+    )
+    options = parser.parse_args()
+    check(backup_wheelhouse=options.backup_wheelhouse)

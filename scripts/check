@@ -13,6 +13,8 @@ fi
 
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply profile decide --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply backup --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply restore --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 GROUNDED_APPLY_HOME="$CHECK_RUNTIME_ROOT" \
     ./scripts/gapply doctor --json >/dev/null
 PYTHONDONTWRITEBYTECODE=1 GROUNDED_APPLY_HOME="$CHECK_RUNTIME_ROOT" \

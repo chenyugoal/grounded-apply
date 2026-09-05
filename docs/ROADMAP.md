@@ -28,7 +28,8 @@ recovery, typed-CLI database/sidecar link and orphan guards, read-only
 persistent-WAL refusal, resolution-time imported-record revalidation, and the
 first synthetic profile fixture, adapter-owned safe SQLite opens, genuine
 hot-journal recovery tests, fixed-schema opt-in diagnostic events, and an isolated
-installed-package gate are implemented. Edit and user-facing semantic
+installed-package gate, and optional authenticated profile backup/restore with
+an isolated installed-extra round trip are implemented. Edit and user-facing semantic
 contradiction workflows, semantic and broader obfuscation classification,
 registered derivations, data lifecycle tools, and all end-user application
 workflows in Phases 1–5 remain planned or in progress.
@@ -52,8 +53,9 @@ facts and provenance without placing private data in the repository.
 | Repository/service boundaries for validated mutation | In progress | Claim/evidence service round trips, CLI import, and single-item CLI approve/reject transitions use typed services and atomic repository mutations with exact idempotent replay; edit and broader lifecycle services remain |
 | Resume import, extraction proposal, and human review | In progress | Manifest-v2 file/stdin proposals snapshot nested state, bind exact source bytes to a path-free digest artifact and registered ingress, use closed value schemas plus a versioned nine-category restricted-text taxonomy and bounded minimization guards, create workflow/index-bound record digests and stale-safe review tokens, and support storage-free decision syntax previews plus confirmed, minimized, audited CLI approve/reject with replay and resolution revalidation; extraction, edit/user-facing semantic contradiction handling, and semantic/novel-obfuscation classification remain |
 | Content-free diagnostic logging | Implemented | Opt-in fixed-schema JSONL excludes caller content; failure, interruption, ambiguous-commit recovery, and broken-sink tests pass; no file logs or telemetry |
-| Backup, export, deletion, and retention | Planned | Still require privacy, confirmation, and round-trip tests on synthetic data |
-| Installed-package verification | Implemented | Source archive, wheel contents, clean virtualenv entry point, bundled migrations, and synthetic import/review/decision/replay pass on Python 3.13.1; cross-platform matrix remains planned |
+| Backup, export, deletion, and retention | In progress | Optional bounded encrypted profile backup and confirmed new-home restore pass synthetic authentication, tamper, private-path, stale-preview, partial-output refusal, and provenance/replay round trips. Full filesystem backup, support export, deletion, and retention remain planned |
+| Installed-package verification | Implemented | Base and optional encrypted-backup source/wheel installations, entry point, bundled migrations, and synthetic provenance/replay pass on local Python 3.13.1 |
+| CI interpreter/OS matrix | In progress | Python 3.12/3.13 on Ubuntu 24.04 and macOS 15 configured with pinned actions and isolated synthetic gates; hosted runs have not yet verified those targets |
 | Synthetic candidate/job fixtures and adversarial corpus | In progress | One synthetic profile plus adversarial schema, all nine taxonomy-category positives, explicit lexical false-positive controls, secret, percent-encoding, fragmentation, whole-source, padding, mutation, and no-write import cases exist; broader candidate/job corpus remains |
 
 Phase 0 exits only when the canonical commands pass from a clean checkout, real
