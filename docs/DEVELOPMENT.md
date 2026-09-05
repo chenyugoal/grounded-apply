@@ -1,6 +1,6 @@
 # Development guide
 
-This guide describes the current Phase 0 workflow. It intentionally separates
+This guide describes the foundation and local application pilot. It separates
 commands that work now from the target toolchain described in the product design.
 
 ## Prerequisites
@@ -11,6 +11,8 @@ commands that work now from the target toolchain described in the product design
 
 The base bootstrap has no runtime dependencies. Encrypted profile backup/restore
 uses the optional `backup` extra (`cryptography`); no plaintext fallback exists.
+The `materials` extra supplies pypdf. PDF generation also requires local
+`pdflatex` with `lmodern`, `geometry`, and `enumitem`. No model SDK is used.
 `pyproject.toml` contains
 packaging metadata and Hatchling as its build backend, but repository development
 does not currently require installing the package.
@@ -25,15 +27,35 @@ Run commands from the repository root.
 | CLI help | `./scripts/gapply --help`; `./scripts/gapply profile decide --help` | Supported now |
 | Environment/path diagnostics | `./scripts/gapply doctor --json` | Supported now |
 | Content-free command event stream | `./scripts/gapply --log-events doctor --json` | Supported; opt-in JSONL on stderr, private response on stdout |
-| Structured profile proposal import | `./scripts/gapply profile import --source-file FILE --proposals-file FILE --idempotency-key KEY [--dry-run] [--json]` | Supported for synthetic data |
+| Structured profile proposal import | `./scripts/gapply profile import --source-file FILE --proposals-file FILE --idempotency-key KEY [--dry-run] [--json]` | Supported |
 | Pending profile review | `./scripts/gapply profile review [--json]` | Supported, read-only |
-| One profile review decision | `./scripts/gapply profile decide --claim-id CLAIM_ID --review-token TOKEN --decision approve\|reject --actor-id ACTOR_ID --idempotency-key KEY [--confirm] [--json]` | Supported for synthetic data; storage-free syntax preview unless confirmed |
+| One profile review decision | `./scripts/gapply profile decide --claim-id CLAIM_ID --review-token TOKEN --decision approve\|reject --actor-id ACTOR_ID --idempotency-key KEY [--confirm] [--json]` | Supported; storage-free syntax preview unless confirmed |
 | Full test suite | `PYTHONPATH=src python3 -m unittest discover -s tests -v` | Supported now |
 | Installed-package gate | `python scripts/check_package.py` | Supported with optional build tools; verified on Python 3.13.1 |
-| Encrypted profile backup | `gapply backup --encrypt ABSOLUTE_PATH [--dry-run] [--passphrase-stdin] [--json]` | Optional backup extra, synthetic data only |
+| Encrypted profile backup | `gapply backup --encrypt ABSOLUTE_PATH [--dry-run] [--passphrase-stdin] [--json]` | Optional backup extra |
 | New-home restore | `gapply restore --archive ABSOLUTE_PATH --target-home NEW_ABSOLUTE_PATH [--archive-sha256 HASH --confirm] [--passphrase-stdin] [--json]` | Write-free inspection unless explicitly confirmed |
 | Required encryption gate | `python -W error scripts/check_backup.py` | Optional provider required; skipped tests fail the gate |
 | Installed encryption gate | `python scripts/check_package.py --backup-wheelhouse ABSOLUTE_PATH` | Offline dependency wheels required; installs and exercises the extra |
+| Portable-home deletion | `./scripts/gapply delete --target-home ABSOLUTE_HOME --receipt EXTERNAL_ABSOLUTE_PATH [--preview-token TOKEN --confirm] [--json]` | Read-only inventory preview unless confirmed; synthetic verification |
+| Exact resume extraction | `./scripts/gapply profile extract --source-file FILE [--json]` | No storage |
+| Selected onboarding | `./scripts/gapply profile onboard --source-file FILE --source-sha256 HASH --select 0,1,4 --idempotency-key KEY [--dry-run] [--json]` | Pending proposals only; source hash binds selection |
+| Current verified projection | `./scripts/gapply profile show [--json]` | Read-only; includes effective retirements |
+| Claim withdrawal/replacement | `./scripts/gapply profile retire --claim-id ID [--replacement-claim-id ID] --actor-id ACTOR --idempotency-key KEY [--preview-token TOKEN --confirm] [--json]` | Audited preview/confirmation |
+| Job capture | `./scripts/gapply jobs add --url URL --source-file FILE --idempotency-key KEY [--dry-run] [--json]` | User-supplied UTF-8 snapshot, no fetch |
+| Job review/matrix | `./scripts/gapply jobs list`; `./scripts/gapply jobs show --job-id ID`; `./scripts/gapply jobs assess --job-id ID` | Read-only; each supports `--json` |
+| Resume build | `./scripts/gapply materials build --job-id ID --claim-ids ID1,ID2 --idempotency-key KEY [--questions-file FILE] [--dry-run] [--json]` | Approved packets, local LaTeX/PDF and exact extracted-text validation |
+| Material inspection | `./scripts/gapply materials show --material-id ID [--json]` | Revalidates current facts and PDF |
+| Saved material versions | `./scripts/gapply materials list [--job-id ID] [--json]` | Validated summaries; retired evidence yields needs_review |
+| Material approval | `./scripts/gapply materials approve --material-id ID --bundle-sha256 HASH --actor-id ACTOR --idempotency-key KEY [--confirm] [--json]` | Requires human review of exact bundle |
+| Material copies | `./scripts/gapply materials export --material-id ID --output-dir ABSOLUTE_DIR [--dry-run] [--json]` | New external private directory; exact replay, no overwrite |
+| Questionnaire draft | `./scripts/gapply answers --job-id ID --questions-file FILE [--json]` | No storage; sensitive/unknown questions return NeedInfo |
+| Application creation | `./scripts/gapply applications add --job-id ID --actor-id ACTOR --idempotency-key KEY [--dry-run] [--json]` | Initial discovered event |
+| Application history | `./scripts/gapply applications list`; `./scripts/gapply applications show --application-id ID` | Read-only; each supports `--json` |
+| Application transition | `./scripts/gapply applications transition --application-id ID --to STATE --actor-id ACTOR --idempotency-key KEY [--material-id ID] [--confirm-submitted] [--preview-token TOKEN --confirm] [--json]` | Append-only; applied records human submission, performs no external action |
+| Support export | `./scripts/gapply export --redacted ABSOLUTE_FILE [--dry-run] [--json]` | Fixed version/count fields; excludes personal content, paths, identifiers and logs |
+| Real PDF gate | `python -W error scripts/check_materials.py` | TeX + materials extra required; skips fail |
+| Complete synthetic pilot | `python -W error scripts/check_pilot.py [--demo-output NEW_EXTERNAL_DIR]` | Both extras + TeX required; includes recovery and deletion |
+| Installed pilot gate | `python scripts/check_package.py --pilot-wheelhouse ABSOLUTE_PATH` | Fresh offline install of both extras + full pilot; TeX required |
 
 The full gate runs its CLI smokes and the test suite with warnings treated as
 errors, without creating bytecode in the checkout. The wrapper adds `src` to
@@ -77,6 +99,60 @@ logs are uploaded. This is ordinary `pull_request` CI, not privileged
 `pull_request_target` execution. Hosted results remain unverified until that
 exact workflow revision runs; local Python 3.13.1 results cannot establish them.
 
+### Local pilot verification
+
+See `QUICKSTART.md` for the user workflow. In a disposable environment with the
+build and backup requirements already installed, add the material parser and
+download wheels for a fresh offline installation:
+
+```bash
+/tmp/grounded-apply-build-tools/bin/python -m pip install -r requirements-materials.txt
+/tmp/grounded-apply-build-tools/bin/python -m pip download --only-binary=:all: \
+  --dest /tmp/grounded-apply-backup-wheels -r requirements-materials.txt
+/tmp/grounded-apply-build-tools/bin/python -W error scripts/check_materials.py
+/tmp/grounded-apply-build-tools/bin/python -W error scripts/check_pilot.py
+/tmp/grounded-apply-build-tools/bin/python scripts/check_package.py \
+  --pilot-wheelhouse /tmp/grounded-apply-backup-wheels
+```
+
+`pdflatex` and its named TeX packages must already be available on PATH. These
+gates make no network or model calls. The complete pilot creates fresh fictional
+inputs and private runtime state, exercises preview/confirmation/idempotency,
+checks isolated diagnostics, preserves the exact submission through encrypted
+backup/restore, retires a claim, and deletes both synthetic homes with receipts.
+`--demo-output NEW_EXTERNAL_DIR` retains a fictional bundle for PDF visual review.
+The installed gate imports package code only from a fresh virtualenv and runs the
+same CLI flow. Its harness supplies literal synthetic inputs, never a user's
+runtime. Optional-provider skips in the base suite are not pilot release evidence.
+
+Schema 003 stores append-only effective claim retirements; schema 004 stores jobs,
+requirements, material bytes/mappings/approvals, application events, and submission
+snapshots. Original import records remain intact for exact provenance replay.
+Current use must go through `ProfileService.validated_profile`/`packet_for_claim`;
+raw repository rows are historical storage, not authority. Independent career
+bullets do not conflict just because they share a type. Singular facts and
+explicit contradictions still fail closed. Derived claims remain unusable without
+a registered evaluator.
+
+Material factual units contain approved packet IDs, evidence IDs, text, packet
+digests, and requirement associations explicitly marked as inference. The fixed
+template preserves selected order within sections and source bullet markers;
+it does not infer employment associations. The renderer escapes TeX input,
+disables shell escape, uses private temporary build files and discards compiler
+logs. Validation recomputes template text, PDF extraction, exact normalized text,
+page/overflow limits, hashes, and current evidence. Unsupported text fails closed.
+Normalization changes only whitespace and Unicode presentation forms. This is
+not a claim of compatibility with every ATS or support for arbitrary languages.
+
+Material approval covers one exact bundle digest, including any answer specs.
+Required unresolved answers block readiness. The application state records past
+events; `currently_ready` separately revalidates a ready-for-review material.
+Recording applied requires explicit confirmation of a human submission. Snapshots
+retain the exact tracked bundle but cannot observe edits made at an external site.
+No sensitive-answer memory, network fetching, browser automation, or final submit
+action is implemented. Current snapshots keep immutable historical bytes after
+retirement, while current material inspection/export/readiness fails closed.
+
 ### Optional encrypted profile lifecycle verification
 
 Use a disposable environment and wheel directory outside the checkout:
@@ -108,8 +184,10 @@ keys, and non-digest filesystem artifact references fail closed.
 Passphrases are 12–1024 UTF-8 bytes through no-echo terminal input (twice on
 creation) or explicit bounded stdin, with no inline, environment, or file-secret
 option. Python does not guarantee memory erasure or protection against swap/core
-dumps. Archive size and Fernet creation time are visible. Source documents,
-generated files, config, browser state, caches, and logs are outside this scope.
+dumps. Archive size and Fernet creation time are visible. The schema-4 database
+includes generated PDF/LaTeX/text, job snapshots, answer bundles, and immutable
+application history. Source documents, exported copies, config, browser state,
+caches, and logs are outside this scope.
 Encryption does not upgrade claim truth, status, or provenance.
 
 All output/input paths are absolute, outside Git, under existing private direct
@@ -128,6 +206,28 @@ or incomplete target fails without repair or deletion. Abrupt termination can
 leave private partial output; inspect it separately and use a new destination.
 Fsync is not a claim of power-loss testing. Existing sampled same-UID TOCTOU
 limits still apply; see ADR 0003.
+
+### Explicit deletion and retention
+
+Deletion accepts only an explicit portable home and new external receipt path;
+the environment does not supply a destructive target. Preview binds file hashes,
+directory/file identity, and both destinations to a token. Confirmation repeats
+that inventory and requires `--preview-token TOKEN --confirm`. Only known runtime
+directories, the current profile database/config, and an optional restore receipt
+are recognized. Unknown files, links, unsafe permissions, journals/WAL, and
+changed state fail closed. Output/cache/artifact directories must be empty.
+
+The adapter uses directory descriptors and individual unlink/rmdir operations;
+there is no recursive deletion. A private external JSONL receipt is fsynced before
+removal, with completion appended last. It holds only hashes, counts, an opaque
+operation ID, timestamp, and phase. Exact complete retries require an absent
+target; partial receipts or targets are never silently resumed. Interrupted or
+indeterminate deletion emits the fixed `deletion_outcome_unknown` event and
+content-free receipt-inspection advice. External sources/backups and the receipt
+remain. Manual retention, logical deletion, and sampled same-UID TOCTOU limits
+apply; secure erasure and power-loss durability are not promised. See ADR 0004.
+
+Focused gate: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error -m unittest tests.test_deletion tests.test_logging -v`.
 
 ### Runtime database and sidecar safety
 
@@ -210,8 +310,11 @@ limits every screened content or metadata component to 8,192 code points; the
 value, canonical-text, evidence, source-reference, and extraction-method limits
 below are stricter.
 
-Manifest schema version 2 uses a closed value-schema-version-1 registry. There
-is no generic JSON fallback for an unregistered claim type. In this table,
+Manifest schema version 2 uses a closed, versioned value registry. Vocabulary 1
+retains the career types below. Vocabulary 2 adds the five explicit contact/name
+types; the dispatcher validates against the smallest vocabulary used by each
+workflow. Vocabulary-1 replay identities remain unchanged. There is no generic
+JSON fallback for an unregistered claim type. In this table,
 `TEXT(N)` means non-blank, already-trimmed text with at most `N` Unicode code
 points and no CR/LF or Unicode control, format, surrogate, line-separator, or
 paragraph-separator code points:
@@ -232,6 +335,11 @@ paragraph-separator code points:
 | `project_outcome` | Exact object `{"activity": TEXT(512), "before_minutes": INT, "after_minutes": INT}`; minutes are non-boolean integers from 0 through 525,600 |
 | `publication` | `TEXT(2048)` |
 | `skill_use` | `TEXT(256)` |
+| `candidate_name` (v2) | `TEXT(256)`; explicitly supplied display name, not a legal identity inference |
+| `contact_email` (v2) | `TEXT(320)` |
+| `contact_phone` (v2) | `TEXT(64)` |
+| `contact_location` (v2) | `TEXT(256)` |
+| `contact_url` (v2) | `TEXT(1024)` |
 
 Before its first storage call, the service snapshots all nested request state and
 validates the entire batch. The persisted surfaces it screens include recursive
@@ -254,7 +362,7 @@ heuristic.
 Caller-controlled metadata is limited to 1,048,576 persisted code points per
 batch, including the per-record copies made for each claim and evidence row.
 This is deterministic lexical defense in depth, not a complete semantic, secret,
-or PII classifier. Manifest schema 2, request-identity schema 4, value schema 1,
+or PII classifier. Manifest schema 2, request-identity schema 4, value schema 1 or 2,
 content policy 2, restricted taxonomy 1 plus its canonical SHA-256,
 source-identity 1, span-locator 1, result-manifest 3, record-ID 1, and record-digest
 1 participate in the idempotency request hash and are recorded in the workflow
@@ -398,7 +506,7 @@ Manifest version 1, request-identity versions 1–3, result-manifest versions 1�
 content-policy version 1, and the former public `CreateImportProposal`
 constructor are unsupported. Current imports use manifest 2, request identity 4,
 result manifest 3, record digest 1, content policy 2, restricted taxonomy 1, and
-database schema 2. Migration 002 creates the association/decision table but does
+database schema 4. Migration 002 creates the association/decision table but does
 not fabricate record digests or associations for earlier imports. Regenerate
 manifest-v1 input; for an earlier manifest-v2 workflow, use a fresh opaque
 idempotency key in disposable synthetic state. There is no automatic policy
@@ -563,8 +671,9 @@ calls. A broken event sink cannot fail or repeat a command; it may leave partial
 or absent events, which are observations rather than the durable workflow audit.
 This boundary does not sanitize third-party output, shell history, or terminal
 recordings. Optional encrypted profile backup/restore is implemented as described
-above; full-vault backup, support export, deletion, and log retention remain
-planned. Interrupted or indeterminate lifecycle results use the fixed
+above; whole-portable-home deletion and fixed-schema support export are also
+implemented. Full filesystem backup, per-record deletion, and automatic retention
+remain planned. Interrupted or indeterminate backup/restore results use the fixed
 `backup_outcome_unknown` diagnostic outcome with a content-free same-request
 retry instruction. No paths, passphrases, or archive content enter the events.
 

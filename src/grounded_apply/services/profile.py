@@ -44,7 +44,7 @@ from grounded_apply.services.profile_import_validation import (
     PROFILE_IMPORT_MAX_TOTAL_METADATA_CODEPOINTS,
     PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
     PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
-    PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
+    profile_value_schema_version,
     registered_profile_import_claim_types,
     validate_profile_import_batch,
     validate_profile_import_metadata,
@@ -1020,6 +1020,7 @@ class _ProfileImportWorkflowIdentity:
     result_sha256: str
     created_at: str
     records: tuple[_ProfileImportRecordIdentity, ...]
+    value_schema_version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1050,7 +1051,7 @@ def _profile_review_workflow_input(
         "content_policy_version": PROFILE_IMPORT_CONTENT_POLICY_VERSION,
         "restricted_taxonomy_version": PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
         "restricted_taxonomy_sha256": PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
-        "value_schema_version": PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
+        "value_schema_version": state.workflow.value_schema_version,
         "import_workflow_run_id": state.workflow.workflow_id,
         "import_workflow_input_sha256": state.workflow.input_sha256,
         "import_workflow_result_sha256": state.workflow.result_sha256,
@@ -1129,7 +1130,7 @@ def _import_workflow_input(
         "content_policy_version": PROFILE_IMPORT_CONTENT_POLICY_VERSION,
         "restricted_taxonomy_sha256": PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
         "restricted_taxonomy_version": PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
-        "value_schema_version": PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
+        "value_schema_version": profile_value_schema_version(tuple(p.claim_type for p in request.proposals)),
         "extractor_id": request.extractor_id,
         "idempotency_key_sha256": idempotency_key_sha256,
         "proposal_count": len(request.proposals),
@@ -1572,7 +1573,8 @@ class ProfileService:
                 or workflow_input.get("restricted_taxonomy_version")
                 != PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION
                 or workflow_input.get("value_schema_version")
-                != PROFILE_IMPORT_VALUE_SCHEMA_VERSION
+                not in {1, 2}
+                or type(workflow_input.get("value_schema_version")) is not int
                 or not isinstance(source_sha256, str)
                 or _SHA256_PATTERN.fullmatch(source_sha256) is None
                 or source_ref != _profile_import_source_ref(source_sha256)
@@ -1744,6 +1746,7 @@ class ProfileService:
                 result_sha256=_text_sha256(_json_identity(result_manifest)),
                 created_at=created_at,
                 records=tuple(records),
+                value_schema_version=workflow_input["value_schema_version"],
             )
         except (TypeError, ValueError, IndexError) as error:
             raise RepositoryError(
@@ -1874,6 +1877,7 @@ class ProfileService:
                 evidence_context=source_text,
                 evidence_prefix="",
                 preceding_line=None,
+                value_schema_version=workflow.value_schema_version,
             )
             current_record_sha256 = _profile_import_record_sha256(
                 claim_type=claim.claim_type,
@@ -2385,7 +2389,7 @@ class ProfileService:
                 or workflow_input.get("restricted_taxonomy_sha256")
                 != PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256
                 or workflow_input.get("value_schema_version")
-                != PROFILE_IMPORT_VALUE_SCHEMA_VERSION
+                != state.workflow.value_schema_version
                 or workflow_input.get("import_workflow_run_id")
                 != state.workflow.workflow_id
                 or workflow_input.get("import_workflow_input_sha256")
@@ -2572,7 +2576,47 @@ class ProfileService:
         policy: ClaimUsePolicy,
         require_question: str | None = None,
         requested_sensitivity: Sensitivity = Sensitivity.PERSONAL,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
     ) -> ResolutionOutcome:
+        claims, evidence = self.validated_profile()
+        if subject_type is not None:
+            claims = tuple(c for c in claims if c.subject_type == subject_type and c.subject_id == subject_id)
+        return resolve_claims(
+            claims, intent=intent, policy=policy, evidence=evidence,
+            question=require_question, requested_sensitivity=requested_sensitivity,
+        )
+
+    def packet_for_claim(self, claim_id: str, *, policy: ClaimUsePolicy) -> ResolutionOutcome:
+        """Resolve a selected factual unit while preserving subject conflicts.
+
+        Independent skills and career bullets are multiple facts, not mutually
+        exclusive values. Single-valued fields retain whole-subject resolution.
+        Explicitly contradicted same-subject records always block selection.
+        """
+        from grounded_apply.domain import Resolved
+        claims, evidence = self.validated_profile()
+        selected = next((c for c in claims if c.id == claim_id), None)
+        if selected is None:
+            return resolve_claims((), intent="selected_claim", policy=policy)
+        own = resolve_claims((selected,), intent=selected.claim_type, policy=policy, evidence=evidence)
+        if not isinstance(own, Resolved):
+            return own
+        singular = {"candidate_name", "contact_email", "contact_phone", "contact_location",
+                    "employment_title", "employment_dates"}
+        peers = tuple(c for c in claims if c.claim_type == selected.claim_type
+                      and (c.subject_type, c.subject_id) == (selected.subject_type, selected.subject_id)
+                      and (c.id == selected.id or selected.claim_type in singular or c.status == ClaimStatus.CONTRADICTED))
+        return resolve_claims(peers, intent=selected.claim_type, policy=policy, evidence=evidence)
+
+    def validated_profile(
+        self, *, apply_retirements: bool = True,
+    ) -> tuple[tuple[Claim, ...], tuple[Evidence, ...]]:
+        """Return provenance-checked effective claims and supporting evidence.
+
+        Original import and approval records stay intact. Retirement affects use
+        authority here and in resolve; it never rewrites historical imports.
+        """
         claims = self.list_claims()
         validated_claims: list[Claim] = []
         evidence: list[Evidence] = []
@@ -2616,14 +2660,11 @@ class ProfileService:
                 continue
             validated_claims.append(claim)
             evidence.extend(self._evidence_for_claim(claim.id))
-        return resolve_claims(
-            validated_claims,
-            intent=intent,
-            policy=policy,
-            evidence=evidence,
-            question=require_question,
-            requested_sensitivity=requested_sensitivity,
-        )
+        result = tuple(validated_claims)
+        if apply_retirements:
+            from grounded_apply.services.profile_lifecycle import project_retirements
+            result = project_retirements(self._repository, result, tuple(evidence))
+        return result, tuple(evidence)
 
     def _import_result_from_workflow(
         self,

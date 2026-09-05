@@ -329,8 +329,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual((first_stderr, second_stderr), ("", ""))
             self.assertTrue(first["data"]["config_created"])
             self.assertFalse(second["data"]["config_created"])
-            self.assertEqual(first["data"]["schema_version"], 2)
-            self.assertEqual(second["data"]["schema_version"], 2)
+            from grounded_apply.repositories import LATEST_SCHEMA_VERSION
+            self.assertEqual(first["data"]["schema_version"], LATEST_SCHEMA_VERSION)
+            self.assertEqual(second["data"]["schema_version"], LATEST_SCHEMA_VERSION)
             self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
 

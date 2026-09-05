@@ -151,7 +151,7 @@ class SchemaMigrationTests(unittest.TestCase):
 
             version = initialize_schema(connection, migrations)
 
-            self.assertEqual(version, 2)
+            self.assertEqual(version, LATEST_SCHEMA_VERSION)
             self.assertIsNotNone(
                 connection.execute(
                     "SELECT 1 FROM sqlite_schema "
@@ -163,7 +163,8 @@ class SchemaMigrationTests(unittest.TestCase):
             ).fetchall()
             self.assertEqual(
                 applied,
-                [(1, "001_initial.sql"), (2, "002_profile_import_review_items.sql")],
+                [(1, "001_initial.sql"), (2, "002_profile_import_review_items.sql"),
+                 (3, "003_claim_retirements.sql"), (4, "004_application_pilot.sql")],
             )
 
 

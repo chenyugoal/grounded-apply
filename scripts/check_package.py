@@ -42,7 +42,7 @@ def run(
     return result.stdout
 
 
-def check(*, backup_wheelhouse: Path | None = None) -> None:
+def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | None = None) -> None:
     metadata = tomllib.loads((REPOSITORY / "pyproject.toml").read_text())
     version = metadata["project"]["version"]
     with tempfile.TemporaryDirectory(prefix="grounded-apply-package-") as directory:
@@ -71,6 +71,8 @@ def check(*, backup_wheelhouse: Path | None = None) -> None:
                 "grounded_apply/py.typed",
                 "grounded_apply/migrations/001_initial.sql",
                 "grounded_apply/migrations/002_profile_import_review_items.sql",
+                "grounded_apply/migrations/003_claim_retirements.sql",
+                "grounded_apply/migrations/004_application_pilot.sql",
                 "grounded_apply/diagnostics.py",
                 "grounded_apply/services/backup.py",
                 "grounded_apply/repositories/backup_crypto.py",
@@ -94,10 +96,12 @@ def check(*, backup_wheelhouse: Path | None = None) -> None:
              "--no-deps", "--no-cache-dir", str(wheels[0])],
             cwd=workspace, environ=environment,
         )
-        if backup_wheelhouse is not None:
+        dependencies = pilot_wheelhouse or backup_wheelhouse
+        if dependencies is not None:
             run(
                 [str(executable), "-m", "pip", "--isolated", "install", "--no-index",
-                 "--no-cache-dir", "--find-links", str(backup_wheelhouse), "grounded-apply[backup]"],
+                 "--no-cache-dir", "--find-links", str(dependencies),
+                 "grounded-apply[backup,materials]" if pilot_wheelhouse else "grounded-apply[backup]"],
                 cwd=workspace, environ=environment,
             )
         location = json.loads(run(
@@ -166,7 +170,7 @@ def check(*, backup_wheelhouse: Path | None = None) -> None:
         if len(cli("profile", "review")["items"]) != len(review["items"]) - 1:
             raise RuntimeError("Approved item remained in pending review")
         cli("--log-events", "doctor")
-        if backup_wheelhouse is not None:
+        if dependencies is not None:
             print("Checking installed optional encryption, restore preview, and replay...", flush=True)
             passphrase = "synthetic-package-only-passphrase\n"
             archive = workspace / "synthetic-profile.gapply"
@@ -194,6 +198,11 @@ def check(*, backup_wheelhouse: Path | None = None) -> None:
                 raise RuntimeError("Restored profile lost import or decision provenance")
             if len(cli("profile", "review")["items"]) != len(review["items"]) - 1:
                 raise RuntimeError("Restored review queue changed")
+        if pilot_wheelhouse is not None:
+            from check_pilot import check_pilot
+            pilot = workspace / "pilot"
+            pilot.mkdir(mode=0o700)
+            check_pilot([str(command)], pilot)
     print("PASS — source archive, wheel contents, isolated install, CLI, migrations, and synthetic workflow")
 
 
@@ -203,5 +212,7 @@ if __name__ == "__main__":
         "--backup-wheelhouse", type=Path,
         help="Local dependency wheels for an offline installed backup/restore gate.",
     )
+    parser.add_argument("--pilot-wheelhouse", type=Path,
+        help="Offline wheels for backup and materials extras; runs the full installed pilot (requires pdflatex).")
     options = parser.parse_args()
-    check(backup_wheelhouse=options.backup_wheelhouse)
+    check(backup_wheelhouse=options.backup_wheelhouse, pilot_wheelhouse=options.pilot_wheelhouse)

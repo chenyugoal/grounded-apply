@@ -79,7 +79,7 @@ def _require_atomic_text(
     return value
 
 
-def _scalar_text_schema(max_codepoints: int) -> _ValueSchema:
+def _scalar_text_schema(max_codepoints: int, *, version: int = 1) -> _ValueSchema:
     def validate(value: object) -> None:
         _require_atomic_text(
             value,
@@ -88,7 +88,7 @@ def _scalar_text_schema(max_codepoints: int) -> _ValueSchema:
         )
 
     return _ValueSchema(
-        version=PROFILE_IMPORT_VALUE_SCHEMA_VERSION,
+        version=version,
         shape="bounded non-blank text",
         validator=validate,
     )
@@ -236,14 +236,31 @@ _PROFILE_IMPORT_VALUE_SCHEMAS: Mapping[str, _ValueSchema] = MappingProxyType(
         ),
         "publication": _scalar_text_schema(2048),
         "skill_use": _scalar_text_schema(256),
+        "candidate_name": _scalar_text_schema(256, version=2),
+        "contact_email": _scalar_text_schema(320, version=2),
+        "contact_phone": _scalar_text_schema(64, version=2),
+        "contact_location": _scalar_text_schema(256, version=2),
+        "contact_url": _scalar_text_schema(1024, version=2),
     }
 )
 
 if any(
-    schema.version != PROFILE_IMPORT_VALUE_SCHEMA_VERSION
+    schema.version not in {1, 2}
     for schema in _PROFILE_IMPORT_VALUE_SCHEMAS.values()
 ):
-    raise RuntimeError("profile import value schemas must share one version")
+    raise RuntimeError("profile import value schemas require a registered version")
+
+
+def profile_value_schema_version(claim_types: Sequence[str]) -> int:
+    """Select the smallest registered vocabulary containing these fact types.
+
+    Version 1 retains its original definitions and identities. Version 2 adds
+    explicitly supplied contact/name fields; it does not infer identity.
+    """
+    try:
+        return max((_PROFILE_IMPORT_VALUE_SCHEMAS[t].version for t in claim_types), default=1)
+    except KeyError:
+        raise ValueError("Unregistered profile claim type") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1153,11 +1170,12 @@ def validate_profile_import_proposal(
     evidence_context: str,
     evidence_prefix: str,
     preceding_line: str | None,
+    value_schema_version: int = 2,
 ) -> None:
     """Validate one proposal's typed value and persisted content fields."""
 
     schema = _PROFILE_IMPORT_VALUE_SCHEMAS.get(claim_type)
-    if schema is None:
+    if type(value_schema_version) is not int or value_schema_version not in {1, 2} or schema is None or schema.version > value_schema_version:
         raise ValueError("claim type is not allowed for profile import")
     if len(canonical_text) > _MAX_CANONICAL_TEXT_CODEPOINTS:
         raise ValueError("proposal canonical text exceeds the atomic claim limit")

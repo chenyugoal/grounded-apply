@@ -58,6 +58,11 @@ NOW_TEXT = "2026-08-11T12:00:00Z"
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "synthetic_profile"
 
 SAFE_IMPORT_VALUES: dict[str, Any] = {
+    "candidate_name": "Avery Quill",
+    "contact_email": "avery.quill@example.com",
+    "contact_phone": "+1 202-555-0142",
+    "contact_location": "Fictional City, ZZ",
+    "contact_url": "https://portfolio.example.com/avery",
     "achievement": "Improved a fictional build check",
     "certification": "Example Systems Certificate",
     "education": "Example University",

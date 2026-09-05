@@ -7,6 +7,7 @@ import io
 import json
 import os
 import platform
+import re
 import stat
 import sys
 import unicodedata
@@ -1023,6 +1024,283 @@ def _command_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_export(args: argparse.Namespace) -> int:
+    from grounded_apply.repositories.backup_files import _safe_path, read_private_file, write_private_file
+    from grounded_apply.services.support import SupportService
+    from grounded_apply.services.workflow import canonical, hash_bytes
+    paths = resolve_runtime_paths()
+    destination = Path(args.redacted)
+    _safe_path(destination)
+    if paths.portable_root is not None and destination.resolve().is_relative_to(paths.portable_root):
+        raise CliInputError("Support exports must be outside the managed portable home")
+    with _open_initialized_profile_repository(paths, read_only=True) as repository:
+        report = SupportService(repository).report()
+    content = (canonical(report) + "\n").encode("utf-8")
+    existing = read_private_file(destination, limit=8192)
+    if existing is not None and existing != content:
+        raise CliInputError("Support export destination already contains different data")
+    if existing is None and not args.dry_run:
+        write_private_file(destination, content)
+    _emit(args, command="export", data={"sha256": hash_bytes(content), "dry_run": args.dry_run,
+        "replayed": existing is not None, "redacted": True},
+        message="Support export preview validated." if args.dry_run else "Fixed-schema support report exported without personal values, identifiers, paths, or logs.")
+    return 0
+
+
+def _question_input(location: str | None) -> object:
+    if location is None:
+        return ()
+    value = _load_proposal_object(_read_utf8_input(location, label="questions input", max_bytes=256 * 1024))
+    if set(value) != {"questions"}:
+        raise CliInputError("Question input requires exactly a questions array")
+    return value["questions"]
+
+
+def _selected_ids(value: str) -> tuple[str, ...]:
+    if len(value) > 22000:
+        raise CliInputError("Too many selected claim IDs")
+    ids = tuple(value.split(","))
+    if not ids or len(ids) > 80 or len(set(ids)) != len(ids):
+        raise CliInputError("Select distinct comma-separated claim IDs")
+    for claim_id in ids:
+        _validated_idempotency_key(claim_id)
+    return ids
+
+
+def _command_materials(args: argparse.Namespace) -> int:
+    from grounded_apply.repositories.latex_renderer import LatexResumeRenderer
+    from grounded_apply.repositories.material_files import export_material
+    from grounded_apply.services.materials import MaterialBlocked, MaterialService
+    action = args.materials_command
+    paths = resolve_runtime_paths()
+    mutating = (action == "build" and not args.dry_run) or (action == "approve" and args.confirm)
+    try:
+        with _open_initialized_profile_repository(paths, read_only=not mutating) as repository:
+            service = MaterialService(repository, LatexResumeRenderer())
+            if action == "list":
+                data = {"materials": service.list(args.job_id)}
+                message = "\n".join(f"{m['material_id']} [{m['status']}] job={m['job_id']}" for m in data["materials"]) or "No saved materials."
+            elif action == "build":
+                data = service.build(args.job_id, _selected_ids(args.claim_ids),
+                    idempotency_key=args.idempotency_key, dry_run=args.dry_run,
+                    questions=_question_input(args.questions_file))
+                message = "Material plan ready for review." if args.dry_run else f"Draft material: {data['material_id']}\nBundle SHA-256: {data['bundle_sha256']}\nExport and review before materials approve."
+            elif action == "approve":
+                data = service.approve(args.material_id, bundle_sha256=args.bundle_sha256,
+                    actor_id=args.actor_id, idempotency_key=args.idempotency_key, confirm=args.confirm)
+                message = "Material approved for use." if args.confirm else "Approval preview validated; repeat with --confirm after reviewing the material."
+            else:
+                with repository.read_transaction():
+                    material = service.get(args.material_id)
+                    if action == "export":
+                        data = export_material(material, Path(args.output_dir), portable_root=paths.portable_root, dry_run=args.dry_run)
+                        message = "Export destination validated." if args.dry_run else "Private resume and answer copies exported. These copies are outside managed backup/deletion."
+                    else:
+                        data = {"material_id": material["id"], "bundle_sha256": material["bundle_sha256"],
+                            "structure": material["structure"], "manifest": material["manifest"],
+                            "validation": material["validation"], "ready": service.is_approved(args.material_id)}
+                        message = f"Bundle SHA-256: {material['bundle_sha256']}\n" + _terminal_safe(material["extracted_text"])
+    except MaterialBlocked as blocked:
+        _emit(args, command="materials." + action, data={"kind": "need_info", "outcomes": blocked.outcomes, "ready": False},
+            message="Material needs information or claim review. " + _terminal_safe(json.dumps(blocked.outcomes, ensure_ascii=False)))
+        return 3
+    try:
+        _emit(args, command="materials." + action, data=data, message=message)
+    except Exception:
+        if mutating:
+            raise PostCommitOutputError(_POST_COMMIT_DECISION_MESSAGE) from None
+        raise ValueError("Material output failed") from None
+    return 0
+
+
+def _command_answers(args: argparse.Namespace) -> int:
+    from grounded_apply.services.questionnaires import QuestionnaireService
+    with _open_initialized_profile_repository(resolve_runtime_paths(), read_only=True) as repository:
+        answers = QuestionnaireService(repository).prepare(args.job_id, _question_input(args.questions_file))
+    _emit(args, command="answers", data={"answers": answers, "stored": False, "external_action_taken": False},
+        message="\n\n".join(_terminal_safe(a["question"]) + "\n" + (
+            _terminal_safe(a["answer"]) if a["answer"] is not None else "NeedInfo: answer this question yourself or select supporting career evidence."
+        ) for a in answers))
+    return 0
+
+
+def _command_applications(args: argparse.Namespace) -> int:
+    from grounded_apply.repositories.latex_renderer import LatexResumeRenderer
+    from grounded_apply.services.applications import ApplicationService
+    from grounded_apply.services.materials import MaterialBlocked, MaterialService
+    action = args.applications_command
+    mutating = (action == "add" and not args.dry_run) or (action == "transition" and args.confirm)
+    try:
+        with _open_initialized_profile_repository(resolve_runtime_paths(), read_only=not mutating) as repository:
+            service = ApplicationService(repository, MaterialService(repository, LatexResumeRenderer()))
+            if action == "add":
+                data = service.add(args.job_id, actor_id=args.actor_id, idempotency_key=args.idempotency_key, dry_run=args.dry_run)
+            elif action == "transition":
+                data = service.transition(args.application_id, args.to, actor_id=args.actor_id,
+                    idempotency_key=args.idempotency_key, material_id=args.material_id,
+                    confirm_submitted=args.confirm_submitted, confirm=args.confirm, preview_token=args.preview_token)
+            else:
+                with repository.read_transaction():
+                    data = {"applications": service.list()} if action == "list" else service.get(args.application_id)
+    except MaterialBlocked as blocked:
+        _emit(args, command="applications." + action, data={"kind": "need_info", "outcomes": blocked.outcomes, "ready": False},
+            message="Application materials need claim review before this transition.")
+        return 3
+    try:
+        _emit(args, command="applications." + action, data=data,
+            message=_terminal_safe(json.dumps(data, ensure_ascii=False, indent=2)))
+    except Exception:
+        if mutating:
+            raise PostCommitOutputError(_POST_COMMIT_DECISION_MESSAGE) from None
+        raise ValueError("Application output failed") from None
+    return 0
+
+
+def _command_jobs(args: argparse.Namespace) -> int:
+    from grounded_apply.domain import to_jsonable
+    from grounded_apply.services.jobs import JobService, extract_requirements, validate_job_input
+    from grounded_apply.services.matching import MatchingService
+    if args.jobs_command == "add":
+        source = _read_utf8_input(args.source_file, label="job text", max_bytes=1024 * 1024)
+        validate_job_input(args.url, source)
+        _validated_idempotency_key(args.idempotency_key)
+        if args.dry_run:
+            requirements, suspicious = extract_requirements("preview", source)
+            _emit(args, command="jobs.add", data={"dry_run": True, "storage_checked": False,
+                "requirement_count": len(requirements), "suspicious_lines": suspicious}, message="Job capture preview validated.")
+            return 0
+    with _open_initialized_profile_repository(resolve_runtime_paths(), read_only=args.jobs_command != "add") as repository:
+        service = JobService(repository)
+        if args.jobs_command == "add":
+            result = service.add(args.url, source, idempotency_key=args.idempotency_key)
+            message = f"Job saved: {result['job_id']}. Run jobs show or jobs assess."
+        else:
+            with repository.read_transaction():
+                if args.jobs_command == "list":
+                    result = {"jobs": [{"job_id": j.id, "source_url": j.source_url, "captured_at": j.captured_at} for j in service.list()]}
+                    message = "\n".join(f"{j['job_id']} {_terminal_safe(j['source_url'])}" for j in result["jobs"]) or "No saved jobs."
+                elif args.jobs_command == "show":
+                    job = service.get(args.job_id)
+                    result = to_jsonable(job)
+                    message = f"{_terminal_safe(job.source_url)}\n" + "\n".join(
+                        f"{r.id} [{r.category}] {_terminal_safe(r.quote)}" for r in job.requirements)
+                else:
+                    result = MatchingService(repository).assess(args.job_id)
+                    message = result["limitation"] + "\n" + "\n".join(
+                        f"{_terminal_safe(r['requirement']['quote'])}\n" + (
+                            "\n".join(f"  {e['claim_id']}: {_terminal_safe(e['quote'])}" for e in r["candidate_evidence"])
+                            or "  NeedInfo: " + r["question"])
+                        for r in result["rows"])
+    _emit(args, command="jobs." + args.jobs_command, data=result, message=message)
+    return 0
+
+
+def _command_profile_extract(args: argparse.Namespace) -> int:
+    from grounded_apply.domain import to_jsonable
+    from grounded_apply.services.resume_extraction import extract_resume
+    source = _read_utf8_input(args.source_file, label="resume input", max_bytes=16 * 1024 * 1024)
+    result = extract_resume(source)
+    data = to_jsonable(result)
+    _emit(args, command="profile.extract", data=data,
+          message=f"Source SHA-256: {result.source_sha256}\n" + "\n".join(
+              f"{i}: {p.claim_type}: {_terminal_safe(p.canonical_text)}" for i, p in enumerate(result.proposals)
+          ) + f"\n{result.skipped_lines} lines left unselected. Select proposal indexes with profile onboard; every fact still needs review.")
+    return 0
+
+
+def _command_profile_onboard(args: argparse.Namespace) -> int:
+    from grounded_apply.services import ProfileService
+    from grounded_apply.services.resume_extraction import extract_resume
+    paths = resolve_runtime_paths()
+    require_runtime_outside_repository(paths)
+    source = _read_utf8_input(args.source_file, label="resume input", max_bytes=16 * 1024 * 1024)
+    extraction = extract_resume(source)
+    if args.source_sha256 != extraction.source_sha256:
+        raise CliInputError("Resume changed since extraction; extract and select again")
+    if not re.fullmatch(r"\d+(?:,\d+)*", args.select) or len(args.select) > 6000:
+        raise CliInputError("Select comma-separated displayed proposal indexes")
+    request = extraction.selected_request(tuple(int(i) for i in args.select.split(",")), source,
+                                          _validated_idempotency_key(args.idempotency_key))
+    ProfileService.preview_import_proposal(request)
+    if args.dry_run:
+        data = {"proposal_count": len(request.proposals), "dry_run": True, "storage_checked": False, "review_required": True}
+    else:
+        with _open_initialized_profile_repository(paths, read_only=False) as repository:
+            result = ProfileService(repository).create_import_proposal(request)
+        data = {"claim_ids": [c.id for c in result.claims], "workflow_run_id": result.workflow_run_id,
+                "dry_run": False, "review_required": result.review_required}
+    _emit(args, command="profile.onboard", data=data,
+          message="Selected proposals validated." if args.dry_run else "Selected facts imported for review. Run gapply profile review.")
+    return 0
+
+
+def _command_profile_show(args: argparse.Namespace) -> int:
+    from grounded_apply.domain import to_jsonable
+    from grounded_apply.services import ProfileService
+    with _open_initialized_profile_repository(resolve_runtime_paths(), read_only=True) as repository:
+        with repository.read_transaction():
+            claims, evidence = ProfileService(repository).validated_profile()
+    _emit(
+        args, command="profile.show",
+        data={"claims": to_jsonable(claims), "evidence": to_jsonable(evidence), "read_only": True, "content_trust": "untrusted"},
+        message="\n".join(f"{c.id} [{c.status.value}/{c.approval_status.value}] {_terminal_safe(c.canonical_text)}" for c in claims) or "No profile claims yet.",
+    )
+    return 0
+
+
+def _command_profile_retire(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+    from grounded_apply.services.profile_lifecycle import ProfileLifecycleService
+    try:
+        with _open_initialized_profile_repository(resolve_runtime_paths(), read_only=not args.confirm) as repository:
+            result = ProfileLifecycleService(repository).retire(
+                args.claim_id, replacement_claim_id=args.replacement_claim_id,
+                actor_id=args.actor_id, idempotency_key=args.idempotency_key,
+                confirm=args.confirm, preview_token=args.preview_token,
+            )
+    except ValueError:
+        raise
+    except Exception:
+        if args.confirm:
+            raise PostCommitOutputError(_POST_COMMIT_DECISION_MESSAGE) from None
+        raise ValueError("Retirement preview failed; no decision was recorded") from None
+    try:
+        _emit(args, command="profile.retire", data={**asdict(result), "requires_confirmation": result.dry_run},
+              message=f"Retirement preview: {result.preview_token}. Confirm with --preview-token and --confirm."
+              if result.dry_run else "Claim retired from future use; original evidence and approval history preserved.")
+    except Exception:
+        if args.confirm:
+            raise PostCommitOutputError(_POST_COMMIT_DECISION_MESSAGE) from None
+        raise ValueError("Retirement preview output failed; no decision was recorded") from None
+    return 0
+
+
+def _command_delete(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+    from grounded_apply.repositories.deletion_files import LocalDeletionStorage
+    from grounded_apply.services.deletion import RECOVERY, DeletionOutcomeUnknownError, DeletionService
+
+    result = DeletionService(LocalDeletionStorage()).delete(
+        Path(args.target_home), Path(args.receipt),
+        confirm=args.confirm, preview_token=args.preview_token,
+    )
+    try:
+        _emit(
+            args, command="delete", data={**asdict(result), "requires_confirmation": result.dry_run},
+            message=(
+                f"Preview: {result.files} files and {result.directories} directories. "
+                f"Token: {result.preview_token}. Confirm with --preview-token and --confirm. "
+                "External backups, source files, exported copies, and the receipt are retained. This is not secure erasure."
+                if result.dry_run else "Portable runtime deleted. External receipt retained."
+            ),
+        )
+    except Exception:
+        if not result.dry_run:
+            raise DeletionOutcomeUnknownError(RECOVERY) from None
+        raise ValueError("Deletion preview output failed; no deletion was performed") from None
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gapply",
@@ -1072,8 +1350,109 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json_flag(restore_parser)
     restore_parser.set_defaults(handler=_command_restore, command_name="restore")
 
+    delete_parser = commands.add_parser(
+        "delete", help="Preview or confirm deletion of an explicit portable home.", allow_abbrev=False,
+    )
+    delete_parser.add_argument("--target-home", required=True, metavar="ABSOLUTE_PATH")
+    delete_parser.add_argument("--receipt", required=True, metavar="EXTERNAL_ABSOLUTE_PATH")
+    delete_parser.add_argument("--preview-token")
+    delete_parser.add_argument("--confirm", action="store_true")
+    _add_json_flag(delete_parser)
+    delete_parser.set_defaults(handler=_command_delete, command_name="delete")
+
+    export_parser = commands.add_parser("export", help="Write a fixed-schema redacted support report.", allow_abbrev=False)
+    export_parser.add_argument("--redacted", required=True, metavar="ABSOLUTE_PATH")
+    export_parser.add_argument("--dry-run", action="store_true")
+    _add_json_flag(export_parser)
+    export_parser.set_defaults(handler=_command_export, command_name="export")
+
+    materials_parser = commands.add_parser("materials", help="Build, inspect, approve, and export traceable resumes.", allow_abbrev=False)
+    material_commands = materials_parser.add_subparsers(dest="materials_command", required=True)
+    for name in ("build", "list", "show", "approve", "export"):
+        item = material_commands.add_parser(name, allow_abbrev=False)
+        if name == "build":
+            for option in ("job-id", "claim-ids", "idempotency-key"):
+                item.add_argument("--" + option, required=True)
+            item.add_argument("--questions-file")
+            item.add_argument("--dry-run", action="store_true")
+        elif name == "list":
+            item.add_argument("--job-id")
+        else:
+            item.add_argument("--material-id", required=True)
+        if name == "approve":
+            for option in ("bundle-sha256", "actor-id", "idempotency-key"):
+                item.add_argument("--" + option, required=True)
+            item.add_argument("--confirm", action="store_true")
+        if name == "export":
+            item.add_argument("--output-dir", required=True)
+            item.add_argument("--dry-run", action="store_true")
+        _add_json_flag(item)
+        item.set_defaults(handler=_command_materials, command_name="materials." + name)
+    answers_parser = commands.add_parser("answers", help="Draft career answers or return NeedInfo; no storage.", allow_abbrev=False)
+    answers_parser.add_argument("--job-id", required=True)
+    answers_parser.add_argument("--questions-file", required=True)
+    _add_json_flag(answers_parser)
+    answers_parser.set_defaults(handler=_command_answers, command_name="answers")
+    applications_parser = commands.add_parser("applications", help="Track manual applications with immutable history.", allow_abbrev=False)
+    application_commands = applications_parser.add_subparsers(dest="applications_command", required=True)
+    for name in ("add", "list", "show", "transition"):
+        item = application_commands.add_parser(name, allow_abbrev=False)
+        if name == "add":
+            item.add_argument("--job-id", required=True)
+            item.add_argument("--dry-run", action="store_true")
+        elif name != "list":
+            item.add_argument("--application-id", required=True)
+        if name in {"add", "transition"}:
+            item.add_argument("--actor-id", required=True)
+            item.add_argument("--idempotency-key", required=True)
+        if name == "transition":
+            from grounded_apply.domain.application_states import ApplicationState
+            item.add_argument("--to", required=True, choices=[s.value for s in ApplicationState])
+            item.add_argument("--material-id")
+            item.add_argument("--confirm-submitted", action="store_true")
+            item.add_argument("--preview-token")
+            item.add_argument("--confirm", action="store_true")
+        _add_json_flag(item)
+        item.set_defaults(handler=_command_applications, command_name="applications." + name)
+
+    jobs_parser = commands.add_parser("jobs", help="Save job text and inspect evidence for its requirements.", allow_abbrev=False)
+    job_commands = jobs_parser.add_subparsers(dest="jobs_command", required=True)
+    for name in ("add", "list", "show", "assess"):
+        item = job_commands.add_parser(name, allow_abbrev=False)
+        if name == "add":
+            for option in ("url", "source-file", "idempotency-key"):
+                item.add_argument("--" + option, required=True)
+            item.add_argument("--dry-run", action="store_true")
+        elif name != "list":
+            item.add_argument("--job-id", required=True)
+        _add_json_flag(item)
+        item.set_defaults(handler=_command_jobs, command_name="jobs." + name)
+
     profile_parser = commands.add_parser("profile", help="Manage candidate profile data.")
     profile_commands = profile_parser.add_subparsers(dest="profile_command", required=True)
+    profile_extract = profile_commands.add_parser("extract", help="Propose exact resume text spans without storing them.", allow_abbrev=False)
+    profile_extract.add_argument("--source-file", required=True)
+    _add_json_flag(profile_extract)
+    profile_extract.set_defaults(handler=_command_profile_extract, command_name="profile.extract")
+    profile_onboard = profile_commands.add_parser("onboard", help="Import selected extracted facts for review.", allow_abbrev=False)
+    for option in ("source-file", "source-sha256", "select", "idempotency-key"):
+        profile_onboard.add_argument("--" + option, required=True)
+    profile_onboard.add_argument("--dry-run", action="store_true")
+    _add_json_flag(profile_onboard)
+    profile_onboard.set_defaults(handler=_command_profile_onboard, command_name="profile.onboard")
+
+    profile_show = profile_commands.add_parser("show", help="Show the provenance-checked effective profile.", allow_abbrev=False)
+    _add_json_flag(profile_show)
+    profile_show.set_defaults(handler=_command_profile_show, command_name="profile.show")
+    profile_retire = profile_commands.add_parser("retire", help="Preview or confirm withdrawal/replacement of an approved claim.", allow_abbrev=False)
+    for option in ("claim-id", "actor-id", "idempotency-key"):
+        profile_retire.add_argument("--" + option, required=True)
+    profile_retire.add_argument("--replacement-claim-id")
+    profile_retire.add_argument("--preview-token")
+    profile_retire.add_argument("--confirm", action="store_true")
+    _add_json_flag(profile_retire)
+    profile_retire.set_defaults(handler=_command_profile_retire, command_name="profile.retire")
+
     profile_init = profile_commands.add_parser(
         "init", help="Initialize private profile storage idempotently."
     )
@@ -1167,11 +1546,17 @@ def build_parser() -> argparse.ArgumentParser:
 def _command_name_from_argv(argv: Sequence[str]) -> str:
     if not argv:
         return "unknown"
+    for root, names in (("materials", {"build", "list", "show", "approve", "export"}),
+                        ("applications", {"add", "list", "show", "transition"})):
+        if argv[0] == root and len(argv) > 1 and argv[1] in names:
+            return root + "." + argv[1]
+    if argv[0] == "jobs" and len(argv) > 1 and argv[1] in {"add", "list", "show", "assess"}:
+        return "jobs." + argv[1]
     if argv[0] == "profile" and len(argv) > 1:
         profile_command = argv[1]
-        if profile_command in {"init", "import", "review", "decide"}:
+        if profile_command in {"init", "import", "review", "decide", "show", "retire", "extract", "onboard"}:
             return f"profile.{profile_command}"
-    if argv[0] in {"paths", "doctor", "backup", "restore"}:
+    if argv[0] in {"paths", "doctor", "backup", "restore", "delete", "answers", "export"}:
         return argv[0]
     return "unknown"
 
@@ -1207,7 +1592,7 @@ def _main(
                 message="Invalid command arguments.",
                 ok=False,
             )
-        elif command_name in {"profile.decide", "backup", "restore"}:
+        elif command_name in {"profile.decide", "profile.retire", "backup", "restore", "delete"} or command_name.startswith(("materials.", "applications.", "jobs.")):
             print(
                 "Error: Invalid command arguments. No external action was taken.",
                 file=sys.stderr,
@@ -1219,7 +1604,15 @@ def _main(
     try:
         return handler(args)
     except KeyboardInterrupt:
-        if getattr(args, "command_name", None) in {"backup", "restore"}:
+        if getattr(args, "command_name", None) == "delete":
+            from grounded_apply.services.deletion import RECOVERY
+            if getattr(args, "confirm", False):
+                if diagnostics is not None:
+                    diagnostics.require_deletion_recovery()
+                print(f"Interrupted. {RECOVERY}", file=sys.stderr)
+            else:
+                print("Interrupted. No deletion was performed.", file=sys.stderr)
+        elif getattr(args, "command_name", None) in {"backup", "restore"}:
             if diagnostics is not None:
                 diagnostics.require_backup_recovery()
             print(
@@ -1227,7 +1620,7 @@ def _main(
                 "Retry the same request; incomplete output requires a new destination. "
                 "No existing data was overwritten.", file=sys.stderr,
             )
-        elif getattr(args, "command_name", None) == "profile.decide":
+        elif getattr(args, "command_name", None) in {"profile.decide", "profile.retire", "materials.approve", "applications.transition"}:
             if getattr(args, "confirm", False):
                 if diagnostics is not None:
                     diagnostics.require_decision_recovery()
@@ -1246,7 +1639,10 @@ def _main(
         return 130
     except Exception as error:
         from grounded_apply.services.backup import BackupOutcomeUnknownError
+        from grounded_apply.services.deletion import DeletionOutcomeUnknownError
 
+        if isinstance(error, DeletionOutcomeUnknownError) and diagnostics is not None:
+            diagnostics.require_deletion_recovery()
         if isinstance(error, BackupOutcomeUnknownError) and diagnostics is not None:
             diagnostics.require_backup_recovery()
         if isinstance(error, PostCommitOutputError):

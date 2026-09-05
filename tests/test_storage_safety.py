@@ -185,7 +185,8 @@ class AdapterStorageSafetyTests(unittest.TestCase):
         spelling = link / ".." / "profile.db"
         with SQLiteRepository(spelling, read_only=True) as repository:
             self.assertEqual(len(repository.list_artifacts()), 1)
-        self.assertEqual(inspect_schema(spelling), 2)
+        from grounded_apply.repositories import LATEST_SCHEMA_VERSION
+        self.assertEqual(inspect_schema(spelling), LATEST_SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

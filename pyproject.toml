@@ -23,6 +23,7 @@ dependencies = []
 
 [project.optional-dependencies]
 backup = ["cryptography>=50.0.1,<51"]
+materials = ["pypdf>=6.10.0,<7"]
 
 [project.scripts]
 gapply = "grounded_apply.cli:main"

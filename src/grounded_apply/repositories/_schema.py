@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 4
 
 _MIGRATION_NAME = re.compile(
     r"^(?P<version>[0-9]{3})_(?P<description>[a-z][a-z0-9_]*)\.sql$"

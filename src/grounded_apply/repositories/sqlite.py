@@ -1449,6 +1449,151 @@ class SQLiteRepository:
         assert record is not None
         return record
 
+    def insert_job_snapshot(self, *, job_id: str, source_url: str, source_text: str,
+                            source_sha256: str, extractor_version: str, captured_at: str,
+                            workflow_run_id: str) -> None:
+        self._insert("job_snapshots", {"id": job_id, "source_url": source_url,
+            "source_text": source_text, "source_sha256": source_sha256,
+            "extractor_version": extractor_version, "captured_at": captured_at,
+            "workflow_run_id": workflow_run_id})
+
+    def insert_job_requirement(self, *, requirement_id: str, job_id: str, position: int,
+                               start_offset: int, end_offset: int, quoted_text: str,
+                               category: str, classification_basis: str) -> None:
+        self._insert("job_requirements", {"id": requirement_id, "job_id": job_id,
+            "position": position, "start_offset": start_offset, "end_offset": end_offset,
+            "quoted_text": quoted_text, "category": category, "classification_basis": classification_basis})
+
+    def get_job_snapshot(self, job_id: str) -> Record | None:
+        return self._get_by_id("job_snapshots", job_id)
+
+    def list_job_snapshots(self) -> list[Record]:
+        self._require_initialized()
+        return [_row_record(r) for r in self._connection.execute("SELECT * FROM job_snapshots ORDER BY captured_at, id")]
+
+    def list_job_requirements(self, job_id: str) -> list[Record]:
+        self._require_initialized()
+        return [_row_record(r) for r in self._connection.execute(
+            "SELECT * FROM job_requirements WHERE job_id = ? ORDER BY position", (job_id,))]
+
+    def insert_material_version(self, *, material_id: str, job_id: str, structure: object,
+                                manifest: object, validation: object, pdf: bytes, latex: str,
+                                extracted_text: str, bundle_sha256: str, created_at: str,
+                                workflow_run_id: str, claim_ids: Sequence[str]) -> None:
+        with self.transaction():
+            self._insert("material_versions", {"id": material_id, "job_id": job_id,
+                "structure_json": _json_text(structure), "manifest_json": _json_text(manifest),
+                "validation_json": _json_text(validation), "pdf_bytes": pdf, "latex_text": latex,
+                "extracted_text": extracted_text, "bundle_sha256": bundle_sha256,
+                "created_at": created_at, "workflow_run_id": workflow_run_id})
+            for claim_id in claim_ids:
+                self._connection.execute("INSERT INTO material_claims VALUES (?, ?)", (material_id, claim_id))
+
+    def get_material_version(self, material_id: str) -> Record | None:
+        return self._get_by_id("material_versions", material_id)
+
+    def list_material_ids(self, job_id: str | None = None) -> tuple[str, ...]:
+        self._require_initialized()
+        return tuple(r[0] for r in self._connection.execute(
+            "SELECT id FROM material_versions WHERE (? IS NULL OR job_id = ?) ORDER BY created_at, id",
+            (job_id, job_id)))
+
+    def list_material_claim_ids(self, material_id: str) -> tuple[str, ...]:
+        self._require_initialized()
+        return tuple(r[0] for r in self._connection.execute(
+            "SELECT claim_id FROM material_claims WHERE material_id = ? ORDER BY claim_id", (material_id,)))
+
+    def get_material_approval(self, material_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM material_approvals WHERE material_id = ?", (material_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def insert_material_approval(self, *, material_id: str, bundle_sha256: str,
+                                 actor_id: str, approved_at: str, workflow_run_id: str) -> None:
+        self._require_initialized()
+        self._connection.execute("INSERT INTO material_approvals VALUES (?, ?, ?, ?, ?)",
+            (material_id, bundle_sha256, actor_id, approved_at, workflow_run_id))
+
+    def insert_application(self, *, application_id: str, job_id: str, created_at: str, workflow_run_id: str) -> None:
+        self._insert("applications", {"id": application_id, "job_id": job_id, "created_at": created_at, "workflow_run_id": workflow_run_id})
+
+    def get_application(self, application_id: str) -> Record | None:
+        return self._get_by_id("applications", application_id)
+
+    def list_applications(self) -> list[Record]:
+        self._require_initialized()
+        return [_row_record(r) for r in self._connection.execute("SELECT * FROM applications ORDER BY created_at, id")]
+
+    def insert_application_event(self, *, event_id: str, application_id: str, position: int, state: str,
+                                  actor_id: str, at: str, previous_sha256: str | None, event_sha256: str,
+                                  payload: object, workflow_run_id: str) -> None:
+        self._insert("application_events", {"id": event_id, "application_id": application_id,
+            "position": position, "state": state, "actor_id": actor_id, "at": at,
+            "previous_sha256": previous_sha256, "event_sha256": event_sha256,
+            "payload_json": _json_text(payload), "workflow_run_id": workflow_run_id})
+
+    def list_application_events(self, application_id: str) -> list[Record]:
+        self._require_initialized()
+        return [_row_record(r) for r in self._connection.execute(
+            "SELECT * FROM application_events WHERE application_id = ? ORDER BY position", (application_id,))]
+
+    def insert_submission_snapshot(self, *, application_id: str, event_id: str, material_id: str,
+                                   snapshot: object, snapshot_sha256: str, submitted_at: str) -> None:
+        self._require_initialized()
+        self._connection.execute("INSERT INTO submission_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+            (application_id, event_id, material_id, _json_text(snapshot), snapshot_sha256, submitted_at))
+
+    def get_submission_snapshot(self, application_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM submission_snapshots WHERE application_id = ?", (application_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def support_counts(self) -> dict[str, int]:
+        """Only fixed table counts; no values, IDs, paths, or source text."""
+        self._require_initialized()
+        tables = ("claims", "evidence", "claim_retirements", "job_snapshots", "material_versions", "applications", "application_events")
+        return {table: int(self._connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]) for table in tables}
+
+    @contextmanager
+    def read_transaction(self) -> Iterator[Self]:
+        """Pin a consistent read snapshot without acquiring a write transaction."""
+        self._require_initialized()
+        if self._connection.in_transaction:
+            yield self
+            return
+        self._connection.execute("BEGIN")
+        try:
+            yield self
+        finally:
+            self._connection.execute("ROLLBACK")
+
+    def get_claim_retirement(self, claim_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute(
+            "SELECT * FROM claim_retirements WHERE claim_id = ?", (claim_id,),
+        ).fetchone()
+        return None if row is None else _row_record(row)
+
+    def list_claim_retirements(self) -> list[Record]:
+        self._require_initialized()
+        return [_row_record(row) for row in self._connection.execute(
+            "SELECT * FROM claim_retirements ORDER BY retired_at, claim_id"
+        )]
+
+    def add_claim_retirement(
+        self, *, claim_id: str, replacement_claim_id: str | None,
+        workflow_run_id: str, actor_id: str, preview_token: str,
+        claim_sha256: str, replacement_sha256: str | None,
+        idempotency_sha256: str, retired_at: str,
+    ) -> None:
+        self._require_initialized()
+        with self.transaction():
+            self._connection.execute(
+                "INSERT INTO claim_retirements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (claim_id, replacement_claim_id, workflow_run_id, actor_id, preview_token,
+                 claim_sha256, replacement_sha256, idempotency_sha256, retired_at),
+            )
+
     def _ensure_open(self) -> None:
         if self._closed:
             raise RepositoryClosedError("SQLite repository is closed")

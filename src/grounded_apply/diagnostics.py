@@ -21,10 +21,30 @@ class DiagnosticCommand(StrEnum):
     DOCTOR = "doctor"
     BACKUP = "backup"
     RESTORE = "restore"
+    DELETE = "delete"
+    JOBS_ADD = "jobs.add"
+    JOBS_LIST = "jobs.list"
+    JOBS_SHOW = "jobs.show"
+    JOBS_ASSESS = "jobs.assess"
+    MATERIALS_BUILD = "materials.build"
+    MATERIALS_LIST = "materials.list"
+    MATERIALS_SHOW = "materials.show"
+    MATERIALS_APPROVE = "materials.approve"
+    MATERIALS_EXPORT = "materials.export"
+    ANSWERS = "answers"
+    EXPORT = "export"
+    APPLICATIONS_ADD = "applications.add"
+    APPLICATIONS_LIST = "applications.list"
+    APPLICATIONS_SHOW = "applications.show"
+    APPLICATIONS_TRANSITION = "applications.transition"
     PROFILE_INIT = "profile.init"
     PROFILE_IMPORT = "profile.import"
     PROFILE_REVIEW = "profile.review"
     PROFILE_DECIDE = "profile.decide"
+    PROFILE_SHOW = "profile.show"
+    PROFILE_RETIRE = "profile.retire"
+    PROFILE_EXTRACT = "profile.extract"
+    PROFILE_ONBOARD = "profile.onboard"
 
 
 class DiagnosticOutcome(StrEnum):
@@ -34,6 +54,7 @@ class DiagnosticOutcome(StrEnum):
     INTERRUPTED = "interrupted"
     DECISION_OUTCOME_UNKNOWN = "decision_outcome_unknown"
     BACKUP_OUTCOME_UNKNOWN = "backup_outcome_unknown"
+    DELETION_OUTCOME_UNKNOWN = "deletion_outcome_unknown"
 
 
 class CommandDiagnostics:
@@ -47,6 +68,12 @@ class CommandDiagnostics:
         self._run_id = str(uuid4())
         self._decision_outcome_unknown = False
         self._backup_outcome_unknown = False
+        self._deletion_outcome_unknown = False
+
+    def require_deletion_recovery(self) -> None:
+        if self._command != DiagnosticCommand.DELETE:
+            raise TypeError("Deletion recovery applies only to deletion")
+        self._deletion_outcome_unknown = True
 
     def require_decision_recovery(self) -> None:
         """Preserve the fixed recovery instruction when normal stderr is muted."""
@@ -69,6 +96,8 @@ class CommandDiagnostics:
             outcome = DiagnosticOutcome.DECISION_OUTCOME_UNKNOWN
         if outcome != DiagnosticOutcome.STARTED and self._backup_outcome_unknown:
             outcome = DiagnosticOutcome.BACKUP_OUTCOME_UNKNOWN
+        if outcome != DiagnosticOutcome.STARTED and self._deletion_outcome_unknown:
+            outcome = DiagnosticOutcome.DELETION_OUTCOME_UNKNOWN
         try:
             record = {
                 "schema_version": 1,
@@ -83,7 +112,10 @@ class CommandDiagnostics:
                     if outcome == DiagnosticOutcome.DECISION_OUTCOME_UNKNOWN else
                     "Backup or restore may be incomplete or already complete. Retry the same request; "
                     "incomplete output requires a new destination. No existing data was overwritten."
-                    if outcome == DiagnosticOutcome.BACKUP_OUTCOME_UNKNOWN else None
+                    if outcome == DiagnosticOutcome.BACKUP_OUTCOME_UNKNOWN else
+                    "Deletion may be incomplete or complete. Inspect the external receipt and target; "
+                    "do not reuse a partial operation."
+                    if outcome == DiagnosticOutcome.DELETION_OUTCOME_UNKNOWN else None
                 ),
             }
             self._sink.write(json.dumps(record, sort_keys=True) + "\n")

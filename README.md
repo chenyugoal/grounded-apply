@@ -11,22 +11,26 @@ application record. Its central rule is simple:
 
 ## Current status
 
-Grounded Apply is in **Phase 0: repository and truth layer**. It is an early
-development scaffold, not an end-to-end job application tool. Do not use it with
-real candidate data until the relevant privacy, persistence, export, and deletion
-controls are implemented and verified.
+Grounded Apply now has a **local application pilot**: extract selected facts from
+a UTF-8 resume, approve them once, save job text and its URL, inspect a requirement
+evidence matrix, produce a traceable PDF and career answers, approve the material,
+and track manually submitted applications. See [the quickstart](docs/QUICKSTART.md)
+for the complete workflow and [ADR 0006](docs/adr/0006-local-application-pilot.md)
+for its bounded scope. The live checkpoint contains the exact release evidence.
 
-The current scaffold can validate and persist strictly structured text-import
-proposals, display their pending claims and exact selected evidence through a
-read-only CLI review command, and preview or record one explicit approve/reject
-decision through the typed `profile decide` CLI and application service. It does
-not extract claims from a resume, edit proposals, or provide a user-facing
-contradiction-resolution workflow.
+It is a command-line tool that Codex can operate with you. Resume tailoring means
+selecting and ordering approved text; it does not write new factual prose.
+Matching retrieves evidence and gaps without claiming fit or predicting hiring.
+No model calls, live job fetching, discovery, browser fill, or external submission
+are implemented. Input is plain text; PDF output uses a local TeX installation.
 
-Optional encrypted profile backup and confirmed restore into a new private home
-are available for synthetic data. They preserve database provenance and approval
-states. Full filesystem backup, support export, deletion, and retention remain
-unfinished.
+The pilot includes encrypted whole-database backup, confirmed restore into a new
+private home, fixed-schema support export, audited claim withdrawal/replacement,
+and explicit whole-portable-home deletion. External copies and source documents
+remain caller-owned. Full filesystem backup, per-record deletion, automatic
+retention, richer input formats, and hosted OS/interpreter verification remain
+unfinished. Real data belongs only in a private runtime outside the repository;
+development and tests always use fictional data.
 
 The single live checkpoint is [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md).
 It records what is actually implemented, the last verification results, known
@@ -35,11 +39,24 @@ issues, and the next exact task. The longer-term scope in
 [`docs/ROADMAP.md`](docs/ROADMAP.md) is planned unless the checkpoint says it is
 implemented and verified.
 
-## Try the Phase 0 scaffold
+## Start the local pilot
 
 Prerequisite: Python 3.12 or newer. The base CLI has no runtime package
 dependencies and does not require installation. Encrypted backup/restore requires
-the optional `backup` extra.
+the optional `backup` extra; PDF generation/verification requires the `materials`
+extra plus `pdflatex`, `lmodern`, `geometry`, and `enumitem`. The quickstart explains
+the isolated environment. The currently verified platform is macOS/Python 3.13.1.
+
+```bash
+source .venv/bin/activate
+./scripts/gapply --help
+./scripts/gapply profile extract --help
+./scripts/gapply jobs assess --help
+./scripts/gapply materials build --help
+./scripts/gapply applications transition --help
+```
+
+For development verification:
 
 ```bash
 ./scripts/check
@@ -65,6 +82,22 @@ documented in the development guide and verifies a fresh wheel installation.
 The configured GitHub Actions matrix runs the synthetic checks and installed
 package gates on Linux/macOS with Python 3.12/3.13. Hosted matrix results remain
 unverified; see the handoff for actual local evidence.
+
+### Portable data deletion
+
+`./scripts/gapply delete --target-home ABSOLUTE_HOME --receipt EXTERNAL_ABSOLUTE_PATH`
+previews deletion of a dedicated portable runtime. To perform it, repeat the
+same command with `--preview-token TOKEN_FROM_PREVIEW --confirm`. `--json` is
+supported. No environment default selects the deletion target. The receipt must
+be a new file under a private directory outside the target.
+
+The command refuses changed previews, unknown files, links, unsafe permissions,
+SQLite sidecars, files over the supported 16 MiB inventory limit, and nonempty
+artifact/cache/output directories. An external
+receipt records start and completion without personal content. An incomplete
+operation is refused on retry and requires inspection. External backups and
+source files remain; this is logical deletion, not secure erasure. Retention is
+manual until explicitly confirmed deletion. See ADR 0004 for the bounded scope.
 
 ### Encrypted profile backup and restore
 
@@ -92,8 +125,9 @@ it. Automation can supply bounded UTF-8 stdin with `--passphrase-stdin`. There i
 no inline-secret, environment-variable, or passphrase-file option. The optional
 provider uses Fernet with Argon2id; `.gapply` archives are not age files.
 
-The archive contains one consistent profile database, up to 16 MiB. It excludes
-original documents, generated files, browser state, config, caches, and logs;
+The archive contains one consistent database, up to 16 MiB, including approved
+facts, job snapshots, generated PDF/LaTeX/text, answers, and application history.
+It excludes original documents, exported copies, browser state, config, caches, and logs;
 non-digest artifact references fail closed. Restore validates authentication,
 current schema, database integrity, and references before writing. It creates a
 new private home and never replaces a profile. Point `GROUNDED_APPLY_HOME` at that
@@ -122,8 +156,11 @@ temporary directory are rejected.
 
 ### Synthetic structured-import demo
 
-The checked-in proposal manifest and resume are conspicuously fictional. Use only
-these synthetic fixtures while Phase 0's real-data safeguards remain incomplete:
+The checked-in proposal manifest and resume are conspicuously fictional. Use
+these fixtures for development. The end-to-end synthetic gate is
+`python -W error scripts/check_pilot.py` with both optional extras and TeX installed.
+It never reads a personal runtime and exercises the full lifecycle, including
+backup/restore and deletion. The older structured-import example is:
 
 ```bash
 GROUNDED_APPLY_HOME=/tmp/grounded-apply-synthetic-demo \
@@ -184,7 +221,9 @@ assigns the registered manifest-ingress identifier. A matching digest proves
 that the two inputs belong together; it does not authenticate who authored the
 source or proposals.
 
-Every allowed claim type has a closed value-schema-version-1 shape. Before any
+Every allowed claim type has a closed versioned value shape. Vocabulary 1 retains
+the original career types; vocabulary 2 adds explicit candidate name and contact
+fields. Workflows bind the smallest vocabulary needed. Before any
 storage transaction, the service snapshots all nested request state and
 validates the whole batch under content policy 2. All restricted-text matchers
 are derived from one immutable taxonomy version 1 covering work authorization
@@ -297,7 +336,7 @@ Manifest version 1, request-identity versions 1–3, result-manifest versions 1�
 content-policy version 1, and the former public `CreateImportProposal` shape are
 intentionally unsupported. Current imports use manifest 2, request identity 4,
 result manifest 3, record digest 1, content policy 2, restricted taxonomy 1, and
-database schema 2. Migration 002 upgrades the schema but deliberately does not
+database schema 4. Migration 002 upgrades the schema but deliberately does not
 invent review associations or record digests for earlier imports. Regenerate
 manifest-v1 input; for an earlier manifest-v2 workflow, use a fresh opaque
 idempotency key in disposable synthetic state. There is no automatic policy
@@ -323,8 +362,9 @@ approved evidence -> claims -> job requirements -> claim packet
                   -> verified prose -> rendered artifact -> human review
 ```
 
-Job discovery, resume/PDF generation, application tracking, and browser-assisted
-safe-fill are roadmap work. Browser automation will stop at authentication,
+Job discovery and browser-assisted safe-fill remain roadmap work. Resume/PDF
+generation and manual application tracking are part of the local pilot.
+Future browser automation will stop at authentication,
 CAPTCHA, sensitive or legal questions, ambiguous fields, signatures, and final
 submission.
 
@@ -355,7 +395,7 @@ Repository agents and contributors must follow the complete rules in
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — local workflow and handoff protocol
 - [`docs/adr/0001-local-first-modular-monolith.md`](docs/adr/0001-local-first-modular-monolith.md) — accepted architecture
 
-## Contributing during Phase 0
+## Contributing
 
 Start by following the resume protocol in `AGENTS.md`. Keep changes small, add
 synthetic tests for new behavior, preserve unfamiliar working-tree changes, and
