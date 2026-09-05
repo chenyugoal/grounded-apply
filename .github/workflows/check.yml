@@ -25,8 +25,11 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      GROUNDED_APPLY_HOME: ${{ runner.temp }}/grounded-apply-ci-unused
     steps:
+      - name: Isolate runtime outside the checkout
+        shell: bash
+        run: |
+          printf 'GROUNDED_APPLY_HOME=%s/grounded-apply-ci-unused\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

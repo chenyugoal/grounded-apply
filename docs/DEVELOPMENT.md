@@ -56,6 +56,7 @@ Run commands from the repository root.
 | Real PDF gate | `python -W error scripts/check_materials.py` | TeX + materials extra required; skips fail |
 | Complete synthetic pilot | `python -W error scripts/check_pilot.py [--demo-output NEW_EXTERNAL_DIR]` | Both extras + TeX required; includes recovery and deletion |
 | Installed pilot gate | `python scripts/check_package.py --pilot-wheelhouse ABSOLUTE_PATH` | Fresh offline install of both extras + full pilot; TeX required |
+| Workflow expression validation | `actionlint -shellcheck= -pyflakes= .github/workflows/check.yml` | Supported with actionlint 1.7.12 installed; separate from application tests |
 
 The full gate runs its CLI smokes and the test suite with warnings treated as
 errors, without creating bytecode in the checkout. The wrapper adds `src` to
@@ -98,6 +99,22 @@ read-only, checkout credentials are not persisted, and no artifacts or runtime
 logs are uploaded. This is ordinary `pull_request` CI, not privileged
 `pull_request_target` execution. Hosted results remain unverified until that
 exact workflow revision runs; local Python 3.13.1 results cannot establish them.
+
+When editing the workflow, also run the workflow expression validation command
+above. Passing application tests do not validate GitHub's workflow syntax. Use
+the official [actionlint 1.7.12 release](https://github.com/rhysd/actionlint/releases/tag/v1.7.12)
+and verify its published archive checksum when installing a binary; this is a
+development-only tool, not an application dependency. The documented command
+checks workflow syntax, context availability and action usage while disabling
+the separate optional ShellCheck and Pyflakes integrations.
+
+The runtime override is assigned in the first shell step using `RUNNER_TEMP`
+and `GITHUB_ENV`, so later steps inherit an isolated path outside the checkout.
+Do not reference `runner.temp` in job-level `env`: GitHub does not provide the
+`runner` context there. See the official
+[context availability table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
+Workflow validation happens before any test job starts; the hosted matrix still
+needs a successful run after a workflow correction is pushed.
 
 ### Local pilot verification
 
