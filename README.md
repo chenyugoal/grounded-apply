@@ -80,8 +80,8 @@ Use command `--json` to retain normal errors and warnings on stdout in this mode
 The optional installed-package gate, `python scripts/check_package.py`, is
 documented in the development guide and verifies a fresh wheel installation.
 The configured GitHub Actions matrix runs the synthetic checks and installed
-package gates on Linux/macOS with Python 3.12/3.13. Hosted matrix results remain
-unverified; see the handoff for actual local evidence.
+package gates on Linux/macOS with Python 3.12/3.13. The hosted matrix has not yet
+passed in full; see the handoff for current hosted results and local verification.
 Workflow changes also require `actionlint -shellcheck= -pyflakes=
 .github/workflows/check.yml` with actionlint 1.7.12 installed. This checks GitHub
 workflow expressions separately from the application tests; setup and scope are

@@ -213,6 +213,28 @@ def _validate_schema_state(
     connection: sqlite3.Connection,
     migrations: tuple[Migration, ...],
 ) -> int:
+    """Read version, tables, and ledger from one consistent snapshot.
+
+    Initial/final validation and existing-only opens run outside the migration
+    write lock. Their reads must not straddle another initializer's commit.
+    Release our read transaction before acquiring a migration write lock, while
+    leaving an existing caller-owned transaction untouched on every exit path.
+    """
+
+    owns_transaction = not connection.in_transaction
+    if owns_transaction:
+        connection.execute("BEGIN")
+    try:
+        return _validate_schema_snapshot(connection, migrations)
+    finally:
+        if owns_transaction and connection.in_transaction:
+            connection.execute("ROLLBACK")
+
+
+def _validate_schema_snapshot(
+    connection: sqlite3.Connection,
+    migrations: tuple[Migration, ...],
+) -> int:
     current = read_schema_version(connection)
     if current > LATEST_SCHEMA_VERSION:
         raise FutureSchemaError(

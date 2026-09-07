@@ -97,8 +97,9 @@ dependency wheels, and all synthetic runtime state stay in runner temporary
 directories. Checkout/setup actions are pinned by commit, permissions are
 read-only, checkout credentials are not persisted, and no artifacts or runtime
 logs are uploaded. This is ordinary `pull_request` CI, not privileged
-`pull_request_target` execution. Hosted results remain unverified until that
-exact workflow revision runs; local Python 3.13.1 results cannot establish them.
+`pull_request_target` execution. The hosted matrix has not yet passed in full;
+see SESSION_HANDOFF for the reported job results and pending correction. Local
+results cannot establish a successful hosted run of a patched revision.
 
 When editing the workflow, also run the workflow expression validation command
 above. Passing application tests do not validate GitHub's workflow syntax. Use
@@ -113,8 +114,8 @@ and `GITHUB_ENV`, so later steps inherit an isolated path outside the checkout.
 Do not reference `runner.temp` in job-level `env`: GitHub does not provide the
 `runner` context there. See the official
 [context availability table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
-Workflow validation happens before any test job starts; the hosted matrix still
-needs a successful run after a workflow correction is pushed.
+Workflow validation happens before any test job starts. It is a separate gate
+from successful execution of the application checks on every matrix target.
 
 ### Local pilot verification
 
@@ -627,6 +628,17 @@ audits that provenance but rejects derived values during resolution until a
 registered evaluator can recompute them.
 
 ## Persistence and migrations
+
+Schema validation reads `user_version`, table existence, and migration history
+inside one transaction so another initializer's commit cannot mix database
+revisions. It releases its own read snapshot before migration locking and leaves
+caller-owned transactions untouched. Each migration still revalidates under
+`BEGIN IMMEDIATE` and atomically commits its schema, ledger, and version update.
+Future, unversioned, and inconsistent databases still fail closed.
+`tests.test_schema` forces another connection to migrate between validation reads
+for both fresh and version-1 databases and retains the eight-worker initialization
+test. The deterministic fixture uses WAL through private schema helpers so a
+writer can commit during a read; public read-only WAL/sidecar guards are unchanged.
 
 SQLite is the target default source of truth; FTS or embeddings are secondary
 indexes only. Once persistence lands:

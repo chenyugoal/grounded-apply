@@ -8,6 +8,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from grounded_apply.repositories._schema import (
     LATEST_SCHEMA_VERSION,
@@ -16,6 +17,7 @@ from grounded_apply.repositories._schema import (
     default_migrations_directory,
     initialize_schema,
     read_schema_version,
+    validate_schema,
 )
 from grounded_apply.repositories import inspect_schema
 from grounded_apply.config import UnsafeRuntimePathError
@@ -54,6 +56,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 initialize_schema(connection, default_migrations_directory())
 
             self.assertEqual(read_schema_version(connection), future_version)
+            self.assertFalse(connection.in_transaction)
             self.assertIsNone(
                 connection.execute(
                     "SELECT 1 FROM sqlite_schema WHERE name = 'schema_migrations'"
@@ -71,6 +74,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 initialize_schema(connection, default_migrations_directory())
 
             self.assertEqual(read_schema_version(connection), 0)
+            self.assertFalse(connection.in_transaction)
 
     def test_read_only_inspection_validates_without_changing_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -113,6 +117,107 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertEqual(versions, [LATEST_SCHEMA_VERSION] * worker_count)
             self.assertEqual(inspect_schema(database), LATEST_SCHEMA_VERSION)
 
+    def test_schema_validation_uses_one_snapshot_during_concurrent_migration(self) -> None:
+        for operation in (initialize_schema, validate_schema):
+            for initial_version in (0, 1):
+                with self.subTest(operation=operation.__name__, version=initial_version):
+                    with tempfile.TemporaryDirectory() as directory:
+                        database = Path(directory) / "snapshot.db"
+                        reader = self.connect(database)
+                        writer = self.connect(database)
+                        try:
+                            # WAL lets the other connection commit at this exact
+                            # read boundary without blocking on the reader. This
+                            # private-helper fixture does not change public WAL guards.
+                            self.assertEqual(
+                                reader.execute("PRAGMA journal_mode = WAL").fetchone()[0],
+                                "wal",
+                            )
+                            if initial_version == 1:
+                                self.initialize_version_one(reader)
+                            if operation is validate_schema:
+                                reader.execute("PRAGMA query_only = ON")
+                            migrated = False
+
+                            def read_then_migrate(connection: sqlite3.Connection) -> int:
+                                nonlocal migrated
+                                version = read_schema_version(connection)
+                                if connection is reader and not migrated:
+                                    self.assertEqual(version, initial_version)
+                                    migrated = True
+                                    initialize_schema(writer, default_migrations_directory())
+                                return version
+
+                            with patch(
+                                "grounded_apply.repositories._schema.read_schema_version",
+                                side_effect=read_then_migrate,
+                            ):
+                                version = operation(reader, default_migrations_directory())
+
+                            self.assertTrue(migrated)
+                            self.assertEqual(
+                                version,
+                                LATEST_SCHEMA_VERSION
+                                if operation is initialize_schema else initial_version,
+                            )
+                            self.assertFalse(reader.in_transaction)
+                            self.assertFalse(writer.in_transaction)
+                            self.assertEqual(read_schema_version(reader), LATEST_SCHEMA_VERSION)
+                            self.assertEqual(
+                                reader.execute(
+                                    "SELECT version FROM schema_migrations ORDER BY version"
+                                ).fetchall(),
+                                [(version,) for version in range(1, LATEST_SCHEMA_VERSION + 1)],
+                            )
+                        finally:
+                            reader.close()
+                            writer.close()
+
+    def test_validation_preserves_caller_transaction_on_success_and_failure(self) -> None:
+        connection = self.connect(Path(":memory:"))
+        self.addCleanup(connection.close)
+        migrations = default_migrations_directory()
+        initialize_schema(connection, migrations)
+        original = connection.execute(
+            "SELECT applied_at, checksum_sha256 FROM schema_migrations WHERE version = 1"
+        ).fetchone()
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "UPDATE schema_migrations SET applied_at = '2026-09-04T00:00:00Z' WHERE version = 1"
+        )
+        self.assertEqual(validate_schema(connection, migrations), LATEST_SCHEMA_VERSION)
+        self.assertTrue(connection.in_transaction)
+        invalid_checksum = "0" * 64
+        connection.execute(
+            "UPDATE schema_migrations SET checksum_sha256 = ? WHERE version = 1",
+            (invalid_checksum,),
+        )
+        with self.assertRaisesRegex(SchemaError, "checksum mismatch"):
+            validate_schema(connection, migrations)
+        self.assertTrue(connection.in_transaction)
+        self.assertEqual(connection.execute(
+            "SELECT checksum_sha256 FROM schema_migrations WHERE version = 1"
+        ).fetchone()[0], invalid_checksum)
+        connection.rollback()
+        self.assertEqual(connection.execute(
+            "SELECT applied_at, checksum_sha256 FROM schema_migrations WHERE version = 1"
+        ).fetchone(), original)
+
+    def initialize_version_one(self, connection: sqlite3.Connection) -> None:
+        first_path = default_migrations_directory() / "001_initial.sql"
+        first_sql = first_path.read_text(encoding="utf-8")
+        connection.executescript(first_sql)
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, name, checksum_sha256, applied_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (1, first_path.name, hashlib.sha256(first_sql.encode("utf-8")).hexdigest(),
+             "2026-08-11T12:00:00Z"),
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+
     def test_version_one_database_upgrades_without_rewriting_the_initial_migration(
         self,
     ) -> None:
@@ -121,27 +226,7 @@ class SchemaMigrationTests(unittest.TestCase):
             connection = self.connect(database)
             self.addCleanup(connection.close)
             migrations = default_migrations_directory()
-            first_path = migrations / "001_initial.sql"
-            first_sql = first_path.read_text(encoding="utf-8")
-            connection.executescript(first_sql)
-            connection.execute(
-                """
-                INSERT INTO schema_migrations (
-                    version,
-                    name,
-                    checksum_sha256,
-                    applied_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (
-                    1,
-                    first_path.name,
-                    hashlib.sha256(first_sql.encode("utf-8")).hexdigest(),
-                    "2026-08-11T12:00:00Z",
-                ),
-            )
-            connection.execute("PRAGMA user_version = 1")
-            connection.commit()
+            self.initialize_version_one(connection)
             self.assertIsNone(
                 connection.execute(
                     "SELECT 1 FROM sqlite_schema "
