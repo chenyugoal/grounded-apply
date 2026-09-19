@@ -60,8 +60,16 @@ on PATH. Unsupported interpreters stop with setup guidance. For example,
 shell activation. The base CLI has no runtime package
 dependencies and does not require installation. Encrypted backup/restore requires
 the optional `backup` extra; PDF generation/verification requires the `materials`
-extra plus `pdflatex`, `lmodern`, `geometry`, and `enumitem`. The quickstart explains
-the isolated environment. The currently verified platform is macOS/Python 3.13.1.
+extra plus `pdflatex`, `lmodern`, `geometry`, `enumitem`, and `needspace`. The
+quickstart explains the isolated environment. The latest local verification is
+macOS/Python 3.12.14; see the checkpoint for platform limits.
+
+New resumes use a clean sans-serif layout with section rules, compact role and
+education headings, and source-aware bullets. Codex can choose heading, bullet,
+or paragraph presentation with `materials build --layout-file FILE`; the closed
+JSON format is in [the quickstart](docs/QUICKSTART.md). Approved wording and PDF
+text checks remain mandatory. Existing version-1 materials retain their original
+layout and approvals; a new layout produces a new draft requiring review.
 
 ```bash
 source .venv/bin/activate

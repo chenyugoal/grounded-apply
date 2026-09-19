@@ -5,189 +5,138 @@ architecture decisions are in `docs/adr/`.
 
 ## Checkpoint
 
-- **Updated:** 2026-09-19 12:05 CDT
-- **Branch / HEAD:** `codex/phase-0-truth-layer`, `3fc3251` (local origin matches).
-  Starting tree was clean. No commit, push, or GitHub rerun was made.
+- **Updated:** 2026-09-19 15:40 CDT
+- **Branch / HEAD:** `codex/phase-0-truth-layer`, `66f71ad` (local origin matches).
+  Starting tree was clean. No commit, push or hosted CI rerun was made.
 - **Milestone:** Codex-guided application preparation for industry research and
-  engineering roles (ADR 0007) is **implemented and locally verified**.
-- **Delivered:** repository `grounded-apply` skill and conversational guide;
-  read-only `brief` service/CLI; deterministic stage-based next actions;
-  explicit/local-virtualenv interpreter selection; synthetic two-job researcher
-  pilot and fresh installed-pilot coverage. Schema remains 4. No model provider,
-  live fetching, browser fill, message, or external submission was added.
-- **Briefing:** validates profile, jobs, materials and application history in
-  one read snapshot. Output contains counts, IDs, URLs, current readiness,
-  latest/application-bound material references and actions; no raw career text,
-  answer bodies, review tokens or PDF bytes. Keyword retrieval counts are not
-  fit scores. Seven-day response checks are configurable per call and on demand.
-- **Current change:** the skill now defaults to conversational, on-demand fact
-  reviews instead of persistent Markdown copies or duplicate session notes.
-  Explicitly requested private exports remain possible. Database evidence,
-  approvals, material versions and submission history remain authoritative;
-  this is workflow guidance, not a per-profile setting or automatic cleanup.
-- **Working tree:** the milestone is committed in `3fc3251`. Only the current
-  skill/documentation correction is uncommitted: `.agents/skills/grounded-apply/SKILL.md`,
-  `docs/CODEX_WORKFLOW.md`, `docs/ROADMAP.md`, and this handoff. No application
-  code, schema, configuration, commands or runtime layout changed.
+  engineering roles (ADR 0007) remains implemented and locally verified.
+- **Current change:** versioned resume presentation (ADR 0008) is implemented
+  and locally verified. New builds use 11-point sans-serif, centered identity,
+  section rules, aligned role/education headings, restrained bold labels,
+  source-aware bullets, ragged-right wrapping and heading space reservations.
+- **CLI:** `materials build --layout-file FILE` accepts a closed schema mapping
+  selected claim IDs to heading/bullet/paragraph, without factual edits or TeX.
+  `-` reads stdin; only one input may use stdin. Choices bind workflow identity
+  and the bundle. Existing version-1 rendering, reads, export, approvals and
+  idempotent retries retain their original transformation. Schema remains 4.
+- **Skill:** inspect the supplied original as a visual reference, preview styles,
+  inspect every PDF page and rebuild through the CLI. Do not silently discard
+  relevant evidence to bypass a layout error. The existing lean review default
+  remains: conversational views, no duplicate Markdown/profile/session exports.
+- **Working tree:** source, tests, synthetic pilot, skill, README, quickstart,
+  development/workflow/roadmap/checkpoint docs are modified; ADR 0008 is new.
+  All changes are uncommitted. No personal data, PDFs or other generated artifacts
+  belong in this checkout.
 
 ## Resume findings and environment
 
-The starting checkpoint incorrectly described the milestone as uncommitted;
-Git shows it in `3fc3251`. The required first command passed unchanged:
+The starting checkpoint described the previous skill change as uncommitted;
+Git shows it committed in `66f71ad`. The mandatory first command passed before
+edits:
 
 ```text
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_briefing tests.test_launcher -v
-PASS — 13 tests, zero skips, 39.521s
+PASS — 13 tests, zero skips, 40.344s
 ```
 
-The bounded follow-up is a skill/workflow correction to ADR 0007. No personal
-profile was opened or modified during this development session. Existing truth,
-privacy, explicit export and destructive-action rules remain in force.
-
-Prior session environment findings (September 18): the schema snapshot correction
-was already committed in `4a86427`. Its original first-command results were:
-
-```text
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error -m unittest tests.test_schema -v
-FAIL — system python3 is 3.9; datetime.UTC is unavailable
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/chenyu/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -W error -m unittest tests.test_schema -v
-PASS — 8 tests, zero skips, 0.193s
-```
-
-The old `.venv` had broken links to a removed Homebrew Python 3.13. A creation
-attempt updated its config but could not replace those links. The remaining
-directory was preserved at `/private/tmp/grounded-apply-preexisting-venv-20260918`;
-a fresh `.venv` was created with the bundled Python 3.12.14 and the pinned optional
-dependencies installed offline from wheels. No candidate data was involved.
+The bounded scope was presentation and its Codex workflow, preserving approved
+facts and historical versions. Initial synthetic header/bold-label extraction
+checks found missing spaces across font/box boundaries. Version 2 now emits
+explicit PDF interword spaces; the exact-text verifier was not weakened.
+Final regression checks pass. No unresolved local failures remain.
 
 Current environment: macOS, Python 3.12.14, SQLite 3.53.1, TeX Live 2026,
-pypdf 6.10.0, cryptography 50.0.1, cffi 2.1.1, pycparser 3.0. The wrapper chooses
-`GAPPLY_PYTHON`, then `.venv/bin/python3`, then PATH's `python3`, checking the
-version before imports. A fresh checkout still needs compatible Python and the
-optional dependencies/TeX for PDF and backup functions.
+pypdf 6.10.0, cryptography 50.0.1, cffi 2.1.1, pycparser 3.0. Local `needspace`
+was available and is now documented alongside lmodern, geometry and enumitem.
+No new Python runtime dependency was added. The launcher chooses GAPPLY_PYTHON,
+then the repository virtualenv, then PATH python3; system python3 is 3.9 and is
+not a supported application interpreter. Earlier 3.13.1 verification predates
+this renderer change; do not present it as this session's result.
 
-Disposable build/skill tools: `/private/tmp/grounded-apply-milestone-tools-20260918`
-(requirements-build, both extras, PyYAML 6.0.3). Dependency wheels:
-`/private/tmp/grounded-apply-milestone-wheels-20260918`. The initial sandboxed pip
-download failed DNS; the approved network retry passed. These are not tracked.
+Disposable build/skill tools: `/private/tmp/grounded-apply-milestone-tools-20260918`.
+Offline wheels: `/private/tmp/grounded-apply-milestone-wheels-20260918`.
+The repository `.venv` is usable; a fresh checkout needs Python 3.12+, optional
+extras and local TeX for their respective gates.
 
 ## Verification
 
-Current session (September 19):
-
 ```text
-PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python /Users/chenyu/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/grounded-apply
-PASS — skill format; relative references also resolve
-./scripts/check
-PASS — 360 tests, zero skips, 145.754s; includes CLI smokes
 PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_materials.py
-PASS — 9 tests, zero skips, 30.344s
+PASS — 15 tests, zero skips, 56.010s
+./scripts/check
+PASS — 366 tests, zero skips, 172.395s; includes CLI smoke checks
 PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_backup.py
-PASS — 28 tests, zero skips, 10.225s
+PASS — 28 tests, zero skips, 9.053s
 PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_pilot.py
 PASS — complete synthetic CLI pilot, real PDF, diagnostics, backup/restore,
-retirement and deletion
+retirement and deletion; now exercises layout-file preview/build/replay/export
 PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python scripts/check_package.py --pilot-wheelhouse /private/tmp/grounded-apply-milestone-wheels-20260918
-PASS — source archive/wheel, isolated offline install, migrations, decisions,
-optional encryption and complete installed pilot
-git diff --check
-PASS — complete four-file diff inspected; no personal workflow data or artifacts
-```
-
-Logs: `/private/tmp/gapply-lean-review-{full,materials,backup,pilot,package}-20260919.log`.
-All runtime checks use synthetic, disposable data. No new implementation tests
-or independent agent run are needed for this narrow skill/documentation change.
-No behavior-enforcing retention feature is claimed from these checks.
-
-Prior milestone verification (September 18, retained for implementation evidence):
-
-```text
-GAPPLY_PYTHON=/Users/chenyu/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error -m unittest tests.test_launcher tests.test_briefing -v
-PASS — 12 tests, zero skips, 36.675s before the forward-test correction
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_briefing.BriefingTests.test_saved_draft_is_reviewable_before_an_application_is_created tests.test_briefing.SearchActionTests -v
-PASS — 2 tests, zero skips, 3.363s after the correction
-./scripts/check
-PASS — final 360 tests, zero skips, 137.772s; includes all CLI smokes and full discovery
-PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_materials.py
-PASS — 9 tests, zero skips, 29.413s
-PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_backup.py
-PASS — 28 tests, zero skips, 8.905s
-PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_pilot.py --demo-output /private/tmp/grounded-apply-milestone-demo-final-20260918
-PASS — two job families, real PDFs, exact degree/publication wording, answers,
-approval/manual-submission gates, briefing, encrypted backup/restore,
-retirement invalidation, immutable history, diagnostics and confirmed deletion
-PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python scripts/check_package.py --pilot-wheelhouse /private/tmp/grounded-apply-milestone-wheels-20260918
-PASS — source archive/wheel, fresh offline installed extras, encryption round trip,
-complete extended pilot using installed code and bundled migrations
+PASS — source archive/wheel, fresh offline install, migrations/decisions,
+optional encryption and complete installed pilot with layout-file
 PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python /Users/chenyu/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/grounded-apply
-PASS — skill format; relative references also checked and resolve
-sh -n scripts/python scripts/gapply scripts/check
-PASS
+PASS — skill format; relative references also resolve
+./scripts/gapply materials build --help
+PASS — layout-file option and stdin description present
 git diff --check
-PASS — complete modified/new code, tests, skill and documentation inspected
+PASS — complete diff inspected; no personal facts, generated artifacts or unrelated changes
 ```
 
-Logs: `/private/tmp/gapply-milestone-{focused,check-final,materials,backup,pilot-final,package-final}.log`.
-The first extended pilot exposed a harness assumption that the first global
-material belonged to the engineering job; assertions now filter by job. Final
-source and installed pilots pass. Final engineering selection also keeps its
-project group together instead of placing an independent research bullet under it.
+Logs: `/private/tmp/gapply-layout-{materials,full,backup,pilot,package}-20260919.log`.
+All development gates use synthetic data. No delegated agent run was requested
+or used for this change. The private user demonstration was regenerated through
+validated CLI services separately; its content and workflow identifiers remain
+outside repository documentation.
 
-Visual QA command:
-`pdftoppm -scale-to 1400 -png /private/tmp/grounded-apply-milestone-demo-final-20260918/resume.pdf /private/tmp/gapply-milestone-resume-final`.
-Inspected its one-page PNG: readable text, dates and bullets, no clipping or
-overlaps. Validation reports nine factual units, zero unsupported units, critical
-fields present and human approval required.
+The six new tests cover presentation schema/type/selection rejection, layout
+binding to approval/idempotency, legacy build/replay/export/approval, approved
+TeX-source marker handling, real one/two-page headers and long prose, impossible
+word overflow and real legacy PDFs. Existing fabricated-text, stale-evidence,
+TeX injection and submission/history tests also pass.
 
-Independent skill forward-test used only `/private/tmp/gapply-forward-20260918`.
-An agent operated the skill on a fictional approved researcher profile and saved
-research-engineering job. It selected evidence, filled a career question from
-an approved claim, exported/visually inspected a real PDF, and recomputed all
-seven export-file hashes. It preserved expected-degree/submitted-paper wording,
-left sponsorship as NeedInfo, ignored job-text injection, and left the bundle
-unapproved with no application/submission. It found saved drafts still suggested
-assess_job; the policy and regression fix now return review_material, independently
-retested without mutation. Remaining usability limit: `profile show` has no claim
-filter, so source-group context may require reading the full small profile.
+Visual QA used `tests.test_materials.layout_fixture(1)` and `(7)` through the
+real renderer. Saved synthetic PDFs are `/private/tmp/gapply-layout-synthetic-1.pdf`
+and `-7.pdf`. Both pages of the latter were rasterized with bundled pdftoppm
+(`-scale-to 1200 -png`) and inspected: readable text, aligned headings and dates,
+no clipping/overlap, expected degree status preserved, role headings kept with
+following bullets. A separate private one-page demonstration was also inspected.
+Exact text extraction remains required; visual inspection is an additional gate.
 
 ## Product state and limits
 
 - Normal use is through Codex and `.agents/skills/grounded-apply/SKILL.md`;
-  CLI remains the deterministic contract. See `docs/CODEX_WORKFLOW.md`.
-- Development gates use only synthetic candidate data and perform no external
-  application. Personal workflow state belongs outside this development handoff.
-- Input remains UTF-8 text with explicit labels/recognized sections. Review
-  skipped lines. Tailoring selects/orders approved wording; new prose remains
-  a proposal until it passes the existing import/review contract.
-- PDF/DOCX ingestion, live discovery/fetching, semantic fit/rewrite validation,
-  browser filling, messaging, scheduled reminders, automatic retention and GUI
-  remain later work. No promise of interviews or offers.
-- Schema 4/private runtime contracts remain unchanged. External sources, exports
+  the CLI remains the deterministic contract. See `docs/CODEX_WORKFLOW.md`.
+- Role grouping, chronology and relevance are chosen by Codex/user, not inferred
+  by the renderer. Four-field headings only replace exact pipe separators with
+  layout; all approved text, dates, ownership and metrics remain in the mapping.
+- The one/two-page limit remains. Unsupported glyphs, overflow and unexpected
+  PDF text fail closed; there is no automatic font shrinking or truncation.
+  Source TeX is treated as evidence, never executed. Universal ATS compatibility
+  has not been established. Theme customization is not shipped.
+- Semantic rewriting, PDF/DOCX ingestion, live fetching/discovery, browser fill,
+  messaging, scheduled reminders, automatic retention and GUI remain later work.
+- Schema 4/private runtime contracts remain unchanged. External sources/exports
   and backups are caller-owned. The 16 MiB database/deletion bounds, sampled
-  same-UID TOCTOU limits, no secure-erasure claim, and read-only WAL/sidecar refusal
-  remain in force.
-- Hosted CI was not inspected this session. Prior user-reported evidence passed
+  same-UID TOCTOU limits, no secure-erasure claim and read-only WAL/sidecar refusal
+  remain in force. No personal workflow state belongs in this handoff.
+- Hosted CI was not inspected this session. Earlier user-reported evidence passed
   macOS 15/Python 3.12 and 3.13 plus Ubuntu 24.04/Python 3.13. The former Ubuntu/
-  Python 3.12 race is corrected in HEAD, but its hosted rerun is unverified.
-  Local success is not complete OS/interpreter release coverage.
+  Python 3.12 race was corrected before this session, but its hosted rerun remains
+  unverified. Local success is not complete OS/interpreter release coverage.
 
 ## Next exact tasks
 
-1. Start with `git diff --stat` and inspect the four skill/documentation changes
-   before a requested commit/push. The base milestone is committed; this session
-   has made no commit/push.
-2. For actual use, start at `docs/CODEX_WORKFLOW.md`: obtain an explicit private
-   data-home path, user-supplied UTF-8 career inventory, and one or two job
-   descriptions/URLs. Review selected facts before approval. Never reuse fictional
-   fixture facts as a real user's profile.
-3. The next bounded development improvement, if needed after the first trial,
-   starts at `src/grounded_apply/cli.py::_command_profile_show`: add a claim-ID
-   filter for minimal source-context retrieval, preserving validated evidence
-   references, with unknown/retired/pending claim tests. It is not implemented
-   or required to use this bounded milestone.
+1. Start with `git diff --stat` and review the uncommitted renderer, service, CLI,
+   regression tests, pilot and documentation changes before any requested commit.
+2. For actual use, follow `docs/CODEX_WORKFLOW.md` with the user's already
+   authorized private home. New builds use version 2 automatically; inspect
+   every page and obtain the normal exact-bundle approval before marking ready.
+3. If minimal profile retrieval is the next requested improvement, start at
+   `src/grounded_apply/cli.py::_command_profile_show`: add a claim-ID filter with
+   validated source references and unknown/retired/pending tests. It is not yet
+   implemented and is not required for the current presentation milestone.
 
 ## First command
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_briefing tests.test_launcher -v
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_materials.py
 ```

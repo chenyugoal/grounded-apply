@@ -1056,6 +1056,12 @@ def _question_input(location: str | None) -> object:
     return value["questions"]
 
 
+def _layout_input(location: str | None) -> object:
+    if location is None:
+        return None
+    return _load_proposal_object(_read_utf8_input(location, label="layout input", max_bytes=32 * 1024))
+
+
 def _selected_ids(value: str) -> tuple[str, ...]:
     if len(value) > 22000:
         raise CliInputError("Too many selected claim IDs")
@@ -1081,9 +1087,11 @@ def _command_materials(args: argparse.Namespace) -> int:
                 data = {"materials": service.list(args.job_id)}
                 message = "\n".join(f"{m['material_id']} [{m['status']}] job={m['job_id']}" for m in data["materials"]) or "No saved materials."
             elif action == "build":
+                if args.layout_file == "-" and args.questions_file == "-":
+                    raise CliInputError("Only one material input may read stdin")
                 data = service.build(args.job_id, _selected_ids(args.claim_ids),
                     idempotency_key=args.idempotency_key, dry_run=args.dry_run,
-                    questions=_question_input(args.questions_file))
+                    questions=_question_input(args.questions_file), layout=_layout_input(args.layout_file))
                 message = "Material plan ready for review." if args.dry_run else f"Draft material: {data['material_id']}\nBundle SHA-256: {data['bundle_sha256']}\nExport and review before materials approve."
             elif action == "approve":
                 data = service.approve(args.material_id, bundle_sha256=args.bundle_sha256,
@@ -1404,6 +1412,7 @@ def build_parser() -> argparse.ArgumentParser:
             for option in ("job-id", "claim-ids", "idempotency-key"):
                 item.add_argument("--" + option, required=True)
             item.add_argument("--questions-file")
+            item.add_argument("--layout-file", help="Presentation-only JSON; use - for stdin.")
             item.add_argument("--dry-run", action="store_true")
         elif name == "list":
             item.add_argument("--job-id")

@@ -98,7 +98,7 @@ data is unnecessary, and the truth/privacy invariants have automated coverage.
 | Immutable job text and URL | Implemented | User-supplied text, digest, capture time and source spans; no live fetch/verification |
 | Requirement extraction | Implemented for recognized text headings | Exact quotes, classification basis and ambiguity labels; no semantic hiring hypotheses |
 | Evidence matrix and gaps | Implemented | Approved-packet retrieval, shared terms, structured unknowns; fit and hiring probability stay unresolved |
-| Structured resume, LaTeX, PDF, text and manifest | Implemented | Selected exact approved text, source order/bullet preservation, mappings, current evidence recheck, exact PDF extraction and overflow gates, visual inspection |
+| Structured resume, LaTeX, PDF, text and manifest | Implemented | Version-2 clean typography, source-aware bullets and role/education headings, closed presentation overrides, exact approved text/mappings, extraction and overflow gates; version-1 validation/replay/approvals preserved (ADR 0008) |
 | Copy-paste career answers | Implemented | Selected approved text plus mappings; sensitive/unknown questions yield NeedInfo, required missing answers block approval |
 | Application tracker and submission snapshot | Implemented | Validated transitions, append-only audited/hash-linked events and immutable exact bundle snapshot; retirement preserves history and blocks future use |
 | Human approval and submission boundary | Implemented | Exact material digest approval; applied requires explicit confirmation of manual submission; no external action |

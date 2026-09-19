@@ -158,9 +158,13 @@ def check_pilot(command: list[str], workspace: Path, *, source_path: Path | None
     ]}), encoding="utf-8")
     answers = cli("answers", "--job-id", job, "--questions-file", str(questions))
     assert answers["stored"] is False and answers["answers"][1]["answer"] is None
+    layout = workspace / "fictional-layout.json"
+    heading_id = next(c["id"] for c in claims if "Example Robotics" in c["canonical_text"])
+    layout.write_text(json.dumps({"schema_version": 1, "presentations": {heading_id: "heading"}}), encoding="utf-8")
     material_args = ("materials", "build", "--job-id", job, "--claim-ids", ",".join(career),
-        "--questions-file", str(questions), "--idempotency-key", "synthetic-material")
-    cli(*material_args, "--dry-run")
+        "--questions-file", str(questions), "--layout-file", str(layout), "--idempotency-key", "synthetic-material")
+    plan = cli(*material_args, "--dry-run")
+    assert next(u for u in plan["structure"]["units"] if u["claim_id"] == heading_id)["presentation"] == "heading"
     built = cli(*material_args)
     material, digest = built["material_id"], built["bundle_sha256"]
     assert cli(*material_args)["material_id"] == material

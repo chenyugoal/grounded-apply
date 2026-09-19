@@ -73,11 +73,20 @@ emphasize approved implementation, testing, systems, and delivery evidence.
 Neither route permits upgrading academic prototypes into production experience,
 contributions into leadership, or expected degrees into awarded degrees.
 
-Codex selects and orders exact approved text for the current fixed template.
+Codex selects and orders exact approved text for the versioned resume template.
 It can propose clearer language for separate review, but that proposal is not a
 verified artifact. There is no automatic semantic rewrite or cover-letter
 generator in this milestone. Keep employer/title/date/bullet groups together;
 the program does not infer those associations.
+
+New builds use a restrained sans-serif layout, section rules, aligned headings,
+and source-aware bullets. Codex can supply `--layout-file` to adjust presentation
+without changing facts; see the quickstart for its closed JSON schema. When a
+source CV is supplied, use it as a visual reference. Inspect every exported page
+for hierarchy, line wrapping, whitespace and heading placement, and rebuild if
+needed. Never hide a layout failure by silently discarding relevant experience.
+Earlier material versions keep their original layout; changing presentation
+creates a new draft that needs review.
 
 Use `materials build --dry-run` before building and exporting. Inspect the
 exported PDF and answers. Approval binds the displayed bundle SHA-256; a changed

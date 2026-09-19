@@ -12,7 +12,7 @@ commands that work now from the target toolchain described in the product design
 The base bootstrap has no runtime dependencies. Encrypted profile backup/restore
 uses the optional `backup` extra (`cryptography`); no plaintext fallback exists.
 The `materials` extra supplies pypdf. PDF generation also requires local
-`pdflatex` with `lmodern`, `geometry`, and `enumitem`. No model SDK is used.
+`pdflatex` with `lmodern`, `geometry`, `enumitem`, and `needspace`. No model SDK is used.
 `pyproject.toml` contains
 packaging metadata and Hatchling as its build backend, but repository development
 does not currently require installing the package.
@@ -51,7 +51,7 @@ assumed. No dependencies are installed by the launcher.
 | Claim withdrawal/replacement | `./scripts/gapply profile retire --claim-id ID [--replacement-claim-id ID] --actor-id ACTOR --idempotency-key KEY [--preview-token TOKEN --confirm] [--json]` | Audited preview/confirmation |
 | Job capture | `./scripts/gapply jobs add --url URL --source-file FILE --idempotency-key KEY [--dry-run] [--json]` | User-supplied UTF-8 snapshot, no fetch |
 | Job review/matrix | `./scripts/gapply jobs list`; `./scripts/gapply jobs show --job-id ID`; `./scripts/gapply jobs assess --job-id ID` | Read-only; each supports `--json` |
-| Resume build | `./scripts/gapply materials build --job-id ID --claim-ids ID1,ID2 --idempotency-key KEY [--questions-file FILE] [--dry-run] [--json]` | Approved packets, local LaTeX/PDF and exact extracted-text validation |
+| Resume build | `./scripts/gapply materials build --job-id ID --claim-ids ID1,ID2 --idempotency-key KEY [--questions-file FILE] [--layout-file FILE] [--dry-run] [--json]` | Approved packets, versioned presentation, local LaTeX/PDF and exact extracted-text validation |
 | Material inspection | `./scripts/gapply materials show --material-id ID [--json]` | Revalidates current facts and PDF |
 | Saved material versions | `./scripts/gapply materials list [--job-id ID] [--json]` | Validated summaries; retired evidence yields needs_review |
 | Material approval | `./scripts/gapply materials approve --material-id ID --bundle-sha256 HASH --actor-id ACTOR --idempotency-key KEY [--confirm] [--json]` | Requires human review of exact bundle |

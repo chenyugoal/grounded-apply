@@ -10,9 +10,12 @@ import tempfile
 import unicodedata
 from pathlib import Path
 
-from grounded_apply.services.material_models import MaterialValidationError, RenderedResume, ResumeStructure
+from grounded_apply.services.material_models import (
+    HEADING_TYPES, MaterialValidationError, RenderedResume, ResumeStructure, heading_fields, presented_text,
+)
 
-RENDERER = "grounded-apply.latex-resume@1"
+RENDERER = "grounded-apply.latex-resume@2"
+_RENDERERS = {"approved_text_selection@1": "grounded-apply.latex-resume@1", "approved_text_selection@2": RENDERER}
 _SECTIONS = (
     ("Experience", {"employment_description", "employment_title", "employment_dates", "achievement", "project_outcome"}),
     ("Projects", {"portfolio_item", "project_contribution"}),
@@ -34,7 +37,7 @@ def escaped(text: str) -> str:
     return r"\ ".join(r"\kern0pt{}".join(_ESCAPE.get(c, c) for c in word) for word in text.split(" "))
 
 
-def latex_source(structure: ResumeStructure) -> str:
+def _legacy_latex_source(structure: ResumeStructure) -> str:
     names = [u for u in structure.units if u.claim_type == "candidate_name"]
     if len(names) != 1:
         raise MaterialValidationError("Resume requires exactly one approved name")
@@ -77,6 +80,74 @@ def latex_source(structure: ResumeStructure) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _emphasized(text: str) -> str:
+    label, colon, rest = text.partition(": ")
+    if colon and 1 <= len(label) <= 65:
+        return r"\textbf{" + escaped(label + ": ") + "}" + escaped(rest)
+    return escaped(text)
+
+
+def latex_source(structure: ResumeStructure) -> str:
+    if structure.transformation == "approved_text_selection@1":
+        return _legacy_latex_source(structure)
+    if structure.transformation not in _RENDERERS:
+        raise MaterialValidationError("Unsupported material transformation")
+    names = [u for u in structure.units if u.claim_type == "candidate_name"]
+    contacts = [u for u in structure.units if u.claim_type.startswith("contact_")]
+    if len(names) != 1:
+        raise MaterialValidationError("Resume requires exactly one approved name")
+    lines = [r"\documentclass[11pt,letterpaper]{article}", r"\usepackage[T1]{fontenc}",
+        r"\usepackage[utf8]{inputenc}", r"\usepackage{lmodern}",
+        r"\renewcommand{\familydefault}{\sfdefault}", r"\usepackage[margin=0.55in]{geometry}",
+        r"\usepackage{enumitem}", r"\usepackage{needspace}",
+        r"\input{glyphtounicode}\pdfgentounicode=1\pdfinterwordspaceon", r"\pagestyle{empty}",
+        r"\setlength{\parindent}{0pt}\setlength{\parskip}{2pt}",
+        r"\raggedright\hyphenpenalty=10000\exhyphenpenalty=10000",
+        r"\setlength{\emergencystretch}{2em}",
+        r"\setlist[itemize]{leftmargin=1.3em,labelsep=0.5em,itemsep=2pt,parsep=0pt,topsep=3pt,partopsep=0pt}",
+        r"\begin{document}", r"{\centering{\fontsize{22}{25}\selectfont\bfseries " + escaped(names[0].text) + r"}\par",
+        r"\vspace{3pt}{\small " + r" \enspace | \enspace ".join(escaped(u.text) for u in contacts) + r"}\par}"]
+    for title, types in _SECTIONS:
+        units = [u for u in structure.units if u.claim_type in types]
+        if not units:
+            continue
+        lines.append(r"\par\Needspace{7\baselineskip}\vspace{9pt}{\large\bfseries " + title + r"}\par\nobreak\vspace{1pt}\hrule height 0.4pt\nobreak\vspace{5pt}")
+        in_list = False
+        for index, unit in enumerate(units):
+            if unit.presentation not in {"bullet", "paragraph", "heading"}:
+                raise MaterialValidationError("Unsupported factual presentation")
+            if unit.presentation == "bullet":
+                if not in_list:
+                    lines.append(r"\begin{itemize}")
+                    in_list = True
+                lines.append(r"\item " + _emphasized(unit.text))
+                continue
+            if in_list:
+                lines.append(r"\end{itemize}")
+                in_list = False
+            if unit.presentation == "heading":
+                if unit.claim_type not in HEADING_TYPES:
+                    raise MaterialValidationError("Unsupported heading claim type")
+                fields = heading_fields(unit)
+                lines.append(r"\par\Needspace{5\baselineskip}" + (r"\vspace{5pt}" if index else ""))
+                if len(fields) == 4:
+                    for left, right, style in ((fields[0], fields[1], r"\bfseries"), (fields[2], fields[3], r"\itshape")):
+                        lines.append(r"\noindent\parbox[t]{0.65\linewidth}{\raggedright " + style + " " + escaped(left + " ")
+                            + r"\strut}\hfill\parbox[t]{0.33\linewidth}{\raggedleft " + (r"\itshape " if style == r"\itshape" else "")
+                            + escaped(right) + r"\strut}\par\nobreak")
+                else:
+                    lines.append(r"{\bfseries " + escaped(unit.text) + r"}\par\nobreak")
+            else:
+                lines.append(_emphasized(unit.text) + r"\par")
+        if in_list:
+            lines.append(r"\end{itemize}")
+    known = {"candidate_name"} | {u.claim_type for u in contacts} | set().union(*(types for _, types in _SECTIONS))
+    if any(u.claim_type not in known for u in structure.units):
+        raise MaterialValidationError("Resume contains an unsupported factual section")
+    lines.append(r"\end{document}")
+    return "\n".join(lines) + "\n"
+
+
 def normalized(text: str) -> str:
     # Whitespace and Unicode presentation ligatures may differ after PDF text
     # extraction. No alphanumeric character, ownership word, or metric is dropped.
@@ -90,7 +161,7 @@ def expected_text(structure: ResumeStructure) -> str:
         units = [u for u in structure.units if u.claim_type in types]
         if units:
             lines.append(title)
-            lines.extend(("•" if u.presentation == "bullet" else "") + u.text for u in units)
+            lines.extend(("•" if u.presentation == "bullet" else "") + presented_text(structure, u) for u in units)
     return "\n".join(lines)
 
 
@@ -149,19 +220,19 @@ class LatexResumeRenderer:
             except (OSError, subprocess.TimeoutExpired):
                 raise MaterialValidationError("Local PDF rendering failed or exceeded its time limit") from None
         text, pages = self._extract(pdf)
-        rendered = RenderedResume(pdf, latex, text, pages, RENDERER)
+        rendered = RenderedResume(pdf, latex, text, pages, _RENDERERS[structure.transformation])
         self.validate(structure, rendered)
         return rendered
 
     def validate(self, structure: ResumeStructure, rendered: RenderedResume) -> None:
-        if rendered.renderer != RENDERER or rendered.latex != latex_source(structure):
+        if rendered.renderer != _RENDERERS.get(structure.transformation) or rendered.latex != latex_source(structure):
             raise MaterialValidationError("Resume template or LaTeX does not match approved structure")
         text, pages = self._extract(rendered.pdf)
         if text != rendered.extracted_text or pages != rendered.page_count:
             raise MaterialValidationError("PDF text or page count differs from validation")
         extracted = normalized(text)
         for unit in structure.units:
-            if normalized(unit.text) not in extracted:
+            if normalized(presented_text(structure, unit)) not in extracted:
                 raise MaterialValidationError("PDF is missing a critical factual unit or contains unsupported glyphs")
         if extracted != normalized(expected_text(structure)):
             raise MaterialValidationError("PDF contains text outside the approved factual units and fixed headings")

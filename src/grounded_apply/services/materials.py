@@ -13,7 +13,8 @@ from grounded_apply.repositories import RepositoryError, SQLiteRepository
 from grounded_apply.services.jobs import JobService
 from grounded_apply.services.matching import job_policy, terms
 from grounded_apply.services.material_models import (
-    FactualUnit, MaterialValidationError, RenderedResume, ResumeRenderer, ResumeStructure,
+    HEADING_TYPES, TRANSFORMATIONS, FactualUnit, MaterialValidationError, RenderedResume,
+    ResumeRenderer, ResumeStructure, validate_layout,
 )
 from grounded_apply.services.profile import ProfileService
 from grounded_apply.services.questionnaires import QuestionnaireService, validate_question_specs
@@ -21,6 +22,8 @@ from grounded_apply.services.workflow import (
     digest, existing_workflow, finish_workflow, hash_bytes, opaque, request_input,
     start_workflow, timestamp, validate_workflow,
 )
+
+CURRENT_TRANSFORMATION = "approved_text_selection@2"
 
 
 class MaterialBlocked(MaterialValidationError):
@@ -34,7 +37,7 @@ def _missing(intent: str, question: str) -> dict[str, str]:
 
 
 def _structure(data: dict[str, Any]) -> ResumeStructure:
-    if set(data) != {"job_id", "units", "schema_version", "transformation"} or data["schema_version"] != 1 or data["transformation"] != "approved_text_selection@1":
+    if set(data) != {"job_id", "units", "schema_version", "transformation"} or data["schema_version"] != 1 or data["transformation"] not in TRANSFORMATIONS:
         raise MaterialValidationError("Unsupported material structure")
     units = []
     for unit in data["units"]:
@@ -42,7 +45,7 @@ def _structure(data: dict[str, Any]) -> ResumeStructure:
         for key in ("packet_claim_ids", "evidence_ids", "requirement_ids"):
             value[key] = tuple(value[key])
         units.append(FactualUnit(**value))
-    return ResumeStructure(data["job_id"], tuple(units))
+    return ResumeStructure(data["job_id"], tuple(units), transformation=data["transformation"])
 
 
 class MaterialService:
@@ -50,7 +53,13 @@ class MaterialService:
         self._repository = repository
         self._renderer = renderer
 
-    def plan(self, job_id: str, claim_ids: tuple[str, ...]) -> ResumeStructure:
+    def plan(self, job_id: str, claim_ids: tuple[str, ...], *, layout: object = None,
+             transformation: str = "approved_text_selection@2") -> ResumeStructure:
+        if transformation not in TRANSFORMATIONS:
+            raise MaterialValidationError("Unsupported material transformation")
+        styles = validate_layout(layout, claim_ids)
+        if transformation == "approved_text_selection@1" and styles:
+            raise MaterialValidationError("Legacy materials cannot change presentation on replay")
         if not claim_ids or len(claim_ids) > 80 or len(set(claim_ids)) != len(claim_ids):
             raise ValueError("Select one to eighty distinct claim IDs")
         for claim_id in claim_ids:
@@ -82,11 +91,19 @@ class MaterialService:
                     continue
                 packet = outcome.packet
                 relevant = tuple(r.id for r in job.requirements if terms(r.quote) & terms(claim.canonical_text))
+                presentation = "bullet" if any(re.match(r"^\s*[-*•]\s+", e.source_text or "") for e in packet.evidence) else "paragraph"
+                if transformation == "approved_text_selection@2":
+                    if any(re.match(r"^\s*\\resumeItem\s*\{", e.source_text or "") for e in packet.evidence):
+                        presentation = "bullet"
+                    if claim.claim_type in HEADING_TYPES and any(re.match(r"^\s*\\resumeSubheading\b", e.source_text or "") for e in packet.evidence):
+                        presentation = "heading"
+                    presentation = styles.get(claim_id, presentation)
+                    if ((claim.claim_type == "candidate_name" or claim.claim_type.startswith("contact_")) and claim_id in styles
+                        or presentation == "heading" and claim.claim_type not in HEADING_TYPES):
+                        raise MaterialValidationError("Presentation is incompatible with the selected claim type")
                 units.append(FactualUnit(claim.id, claim.claim_type, claim.canonical_text,
                     packet.claim_ids, tuple(e.id for e in packet.evidence), relevant,
-                    digest(to_jsonable(packet)),
-                    "bullet" if any(re.match(r"^\s*[-*•]\s+", e.source_text or "") for e in packet.evidence)
-                    else "paragraph"))
+                    digest(to_jsonable(packet)), presentation))
             for kind in ("candidate_name", "contact_email"):
                 if sum(u.claim_type == kind for u in units) != 1:
                     issues.append(_missing(kind, "Select exactly one approved value for this resume field."))
@@ -94,18 +111,32 @@ class MaterialService:
                 issues.append(_missing("career_evidence", "Approve and select career evidence for the resume."))
             if issues:
                 raise MaterialBlocked(issues)
-            return ResumeStructure(job_id, tuple(units))
+            return ResumeStructure(job_id, tuple(units), transformation=transformation)
 
     def build(self, job_id: str, claim_ids: tuple[str, ...], *, idempotency_key: str, dry_run: bool = False,
-              questions: object = ()) -> dict[str, Any]:
+              questions: object = (), layout: object = None) -> dict[str, Any]:
         if type(dry_run) is not bool:
             raise ValueError("Dry run must be boolean")
-        structure = self.plan(job_id, claim_ids)
+        styles = validate_layout(layout, claim_ids)
+        transformation = CURRENT_TRANSFORMATION
+        # A retry retains its original registered transformation, including v1.
+        with self._repository.read_transaction():
+            previous = self._repository.get_workflow_run_by_idempotency_key("material_build", request_input(idempotency_key, {})["idempotency_sha256"])
+            if previous is not None:
+                try:
+                    previous_input = json.loads(previous["input_json"])
+                    validate_workflow(previous, "material_build", previous_input)
+                    transformation = previous_input["transformation"]
+                except (KeyError, TypeError, ValueError):
+                    raise MaterialValidationError("Material replay audit is invalid") from None
+        structure = self.plan(job_id, claim_ids, layout=layout, transformation=transformation)
         question_specs = validate_question_specs(questions)
         answers = QuestionnaireService(self._repository).prepare(job_id, question_specs)
         payload = request_input(idempotency_key, {"job_id": job_id, "selected_claim_ids": list(claim_ids),
             "structure_sha256": digest(asdict(structure)), "transformation": structure.transformation,
             "question_specs_sha256": digest(question_specs), "answers_sha256": digest(answers)})
+        if transformation == "approved_text_selection@2":
+            payload["presentations"] = styles
         with self._repository.read_transaction():
             existing = existing_workflow(self._repository, "material_build", payload)
             if existing is not None:
@@ -122,7 +153,7 @@ class MaterialService:
         with self._repository.transaction():
             # Prevent a fact retired or changed while the compiler ran from
             # entering a new material version.
-            if self.plan(job_id, claim_ids) != structure:
+            if self.plan(job_id, claim_ids, layout=layout, transformation=transformation) != structure:
                 raise MaterialValidationError("Approved facts changed during rendering")
             if QuestionnaireService(self._repository).prepare(job_id, question_specs) != answers:
                 raise MaterialValidationError("Questionnaire evidence changed during rendering")
@@ -175,6 +206,7 @@ class MaterialService:
                 or manifest["latex_sha256"] != hash_bytes(rendered.latex.encode())
                 or manifest["text_sha256"] != hash_bytes(rendered.extracted_text.encode())
                 or manifest["structure_sha256"] != digest(asdict(structure))
+                or manifest["transformation"] != structure.transformation
                 or manifest["job_source_sha256"] != job.source_sha256
                 or manifest["created_at"] != record["created_at"]
                 or validation != {"schema_version": 1, "valid": True, "factual_units": len(structure.units),
@@ -192,10 +224,15 @@ class MaterialService:
                 "job_id": job.id, "selected_claim_ids": payload["selected_claim_ids"],
                 "structure_sha256": digest(asdict(structure)), "transformation": structure.transformation,
                 "question_specs_sha256": digest(manifest["question_specs"]), "answers_sha256": digest(manifest["answers"])}
+            layout = None
+            if structure.transformation == "approved_text_selection@2":
+                layout = {"schema_version": 1, "presentations": payload["presentations"]}
+                expected["presentations"] = validate_layout(layout, tuple(payload["selected_claim_ids"]))
             validate_workflow(workflow, "material_build", expected)
             if json.loads(workflow["generated_artifacts_json"]) != [material_id] or workflow["created_at"] != record["created_at"]:
                 raise ValueError
-            if require_current and self.plan(job.id, tuple(payload["selected_claim_ids"])) != structure:
+            if require_current and self.plan(job.id, tuple(payload["selected_claim_ids"]), layout=layout,
+                                             transformation=structure.transformation) != structure:
                 raise MaterialBlocked([_missing("claim_review", "Facts changed; generate and review a new material version.")])
             if require_current and list(QuestionnaireService(self._repository).prepare(job.id, manifest["question_specs"])) != manifest["answers"]:
                 raise MaterialBlocked([_missing("answer_review", "Answer evidence changed; prepare and review the material again.")])

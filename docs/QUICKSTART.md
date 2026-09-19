@@ -11,8 +11,8 @@ submit an application. No model or network call occurs in these commands.
 
 ## Start
 
-Python 3.12+ is required. The locally verified environment is macOS with Python
-3.13.1, TeX Live 2026 (`pdflatex`, `lmodern`, `geometry`, `enumitem`), pypdf 6.10.0,
+Python 3.12+ is required. The latest locally verified environment is macOS with Python
+3.12.14, TeX Live 2026 (`pdflatex`, `lmodern`, `geometry`, `enumitem`, `needspace`), pypdf 6.10.0,
 and cryptography 50.0.1. PDF input is not supported yet; export your resume to
 UTF-8 plain text first. The output template supports text handled by pdfLaTeX;
 unsupported glyphs, overflow, or extraction differences block generation.
@@ -147,9 +147,33 @@ Use `materials list --job-id JOB_ID` to find saved drafts and approved versions.
 The directory also contains LaTeX, extracted text, claim mappings, validation,
 answers, and a file-hash receipt. It must be a new destination; exact unchanged
 export retries are allowed, but changed or partial exports are never overwritten.
-Outputs are at most two pages. Long or unsupported content must be revised or
-selected differently through approved facts; do not edit generated files and
-assume the old approval covers them.
+New builds use 11-point sans-serif text, section dividers, aligned role/education
+headings, and readable bullets. Plain-text bullet markers and approved evidence
+starting with `\resumeItem{` are recognized; `\resumeSubheading` marks supported
+role/education headings. Source TeX is never executed. Other text remains a
+paragraph unless you supply presentation choices:
+
+```json
+{"schema_version": 1, "presentations": {"ID1": "heading", "ID2": "bullet", "ID3": "paragraph"}}
+```
+
+Pass that private file with `--layout-file FILE` on both preview and build, or use
+`--layout-file -` for stdin (only one input can use stdin). Keys must be selected
+claim IDs. Values cannot contain prose, markup, fonts, or factual edits; contact
+styles cannot be overridden. Headings are supported for employment descriptions,
+employment titles, education, degrees, and portfolio items. A heading containing
+exactly four nonempty ` | `-separated fields lays them out as two rows, in original
+reading order. Other headings stay intact on one or more lines. Keep related
+headers and bullets adjacent; associations are not inferred.
+
+Outputs are at most two pages. Long prose wraps; unrenderable content fails
+without truncation or automatic font shrinking. Inspect every page before
+delivery. Correct presentation first; if the content still needs editing, use
+the approved-fact review path. Do not silently discard relevant facts to bypass
+overflow or edit exported files behind an approval. A different selection or
+layout needs a new idempotency key and fresh material review. Existing version-1
+materials and retries retain their original layout and approval. An omitted
+layout is equivalent to an empty presentations object.
 
 After reviewing the exact bundle, approve its displayed hash:
 

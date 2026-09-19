@@ -46,8 +46,14 @@ when exact arguments are needed. Resolve these paths relative to this skill.
   and the few questions that change the decision. Shared keywords are retrieval,
   not proof of qualification. Label your relevance judgments as inference.
 - **Prepare a pack:** choose approved facts with the user, preserve employer,
-  dates and associated bullets together, and build a draft. Export and visually
-  inspect its PDF, then present the actual resume and answers for review. The
+  dates and associated bullets together, and build a draft. Use the versioned
+  clean resume layout; when supplied, inspect the original CV as a visual
+  reference. Preview the structure and use `--layout-file` for heading/bullet
+  choices when source formatting is missing (schema in the quickstart). Export
+  and visually inspect every PDF page for hierarchy, wrapping, whitespace and
+  orphan headings. Fix presentation through a new build, never by editing an
+  exported file or dropping relevant evidence merely to avoid overflow. Present
+  the actual resume and answers for review. The
   material remains a draft until the user approves its exact bundle digest.
 - **Resume and track:** use `brief` to present the most useful next actions.
   Record user-reported stage changes with preview tokens. Before adding an
