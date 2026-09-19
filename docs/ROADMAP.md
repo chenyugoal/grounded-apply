@@ -41,7 +41,8 @@ derivations, automatic retention, and Phases 2–5 remain planned or in progress
 ## Current milestone — Codex-guided application preparation
 
 **Status: Implemented and locally verified** (ADR 0007, September 18, 2026).
-The changes are in the working tree; see SESSION_HANDOFF.md for exact evidence.
+The milestone is committed in `3fc3251`; see SESSION_HANDOFF.md for subsequent
+working-tree changes and exact verification evidence.
 
 Make the local pilot useful through Codex for industry research and engineering
 applications: onboard selected facts once, compare user-supplied jobs against

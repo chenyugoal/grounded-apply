@@ -5,8 +5,8 @@ architecture decisions are in `docs/adr/`.
 
 ## Checkpoint
 
-- **Updated:** 2026-09-18 18:26 CDT
-- **Branch / HEAD:** `codex/phase-0-truth-layer`, `4a86427` (local origin matches).
+- **Updated:** 2026-09-19 12:05 CDT
+- **Branch / HEAD:** `codex/phase-0-truth-layer`, `3fc3251` (local origin matches).
   Starting tree was clean. No commit, push, or GitHub rerun was made.
 - **Milestone:** Codex-guided application preparation for industry research and
   engineering roles (ADR 0007) is **implemented and locally verified**.
@@ -20,20 +20,32 @@ architecture decisions are in `docs/adr/`.
   latest/application-bound material references and actions; no raw career text,
   answer bodies, review tokens or PDF bytes. Keyword retrieval counts are not
   fit scores. Seven-day response checks are configurable per call and on demand.
-- **Working tree:** the milestone is uncommitted. Modified: `AGENTS.md`,
-  `README.md`, `docs/DEVELOPMENT.md`, `docs/QUICKSTART.md`, `docs/ROADMAP.md`, this
-  handoff, `scripts/check`, `scripts/check_package.py`, `scripts/check_pilot.py`,
-  `scripts/gapply`, `src/grounded_apply/cli.py`, and
-  `src/grounded_apply/diagnostics.py`. New: `.agents/skills/grounded-apply/SKILL.md`,
-  `docs/CODEX_WORKFLOW.md`, ADR 0007, `scripts/python`,
-  `src/grounded_apply/domain/search_actions.py`,
-  `src/grounded_apply/services/briefing.py`, `tests/test_briefing.py`, and
-  `tests/test_launcher.py`.
+- **Current change:** the skill now defaults to conversational, on-demand fact
+  reviews instead of persistent Markdown copies or duplicate session notes.
+  Explicitly requested private exports remain possible. Database evidence,
+  approvals, material versions and submission history remain authoritative;
+  this is workflow guidance, not a per-profile setting or automatic cleanup.
+- **Working tree:** the milestone is committed in `3fc3251`. Only the current
+  skill/documentation correction is uncommitted: `.agents/skills/grounded-apply/SKILL.md`,
+  `docs/CODEX_WORKFLOW.md`, `docs/ROADMAP.md`, and this handoff. No application
+  code, schema, configuration, commands or runtime layout changed.
 
 ## Resume findings and environment
 
-The old checkpoint was stale: the schema snapshot correction is already committed
-in `4a86427`. The required first command was executed verbatim:
+The starting checkpoint incorrectly described the milestone as uncommitted;
+Git shows it in `3fc3251`. The required first command passed unchanged:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_briefing tests.test_launcher -v
+PASS — 13 tests, zero skips, 39.521s
+```
+
+The bounded follow-up is a skill/workflow correction to ADR 0007. No personal
+profile was opened or modified during this development session. Existing truth,
+privacy, explicit export and destructive-action rules remain in force.
+
+Prior session environment findings (September 18): the schema snapshot correction
+was already committed in `4a86427`. Its original first-command results were:
 
 ```text
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error -m unittest tests.test_schema -v
@@ -60,6 +72,34 @@ Disposable build/skill tools: `/private/tmp/grounded-apply-milestone-tools-20260
 download failed DNS; the approved network retry passed. These are not tracked.
 
 ## Verification
+
+Current session (September 19):
+
+```text
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python /Users/chenyu/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/grounded-apply
+PASS — skill format; relative references also resolve
+./scripts/check
+PASS — 360 tests, zero skips, 145.754s; includes CLI smokes
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_materials.py
+PASS — 9 tests, zero skips, 30.344s
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_backup.py
+PASS — 28 tests, zero skips, 10.225s
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_pilot.py
+PASS — complete synthetic CLI pilot, real PDF, diagnostics, backup/restore,
+retirement and deletion
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python scripts/check_package.py --pilot-wheelhouse /private/tmp/grounded-apply-milestone-wheels-20260918
+PASS — source archive/wheel, isolated offline install, migrations, decisions,
+optional encryption and complete installed pilot
+git diff --check
+PASS — complete four-file diff inspected; no personal workflow data or artifacts
+```
+
+Logs: `/private/tmp/gapply-lean-review-{full,materials,backup,pilot,package}-20260919.log`.
+All runtime checks use synthetic, disposable data. No new implementation tests
+or independent agent run are needed for this narrow skill/documentation change.
+No behavior-enforcing retention feature is claimed from these checks.
+
+Prior milestone verification (September 18, retained for implementation evidence):
 
 ```text
 GAPPLY_PYTHON=/Users/chenyu/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error -m unittest tests.test_launcher tests.test_briefing -v
@@ -114,8 +154,8 @@ filter, so source-group context may require reading the full small profile.
 
 - Normal use is through Codex and `.agents/skills/grounded-apply/SKILL.md`;
   CLI remains the deterministic contract. See `docs/CODEX_WORKFLOW.md`.
-- No real candidate data was loaded or external application made. A real trial
-  requires user-supplied source files/jobs and an explicit private storage target.
+- Development gates use only synthetic candidate data and perform no external
+  application. Personal workflow state belongs outside this development handoff.
 - Input remains UTF-8 text with explicit labels/recognized sections. Review
   skipped lines. Tailoring selects/orders approved wording; new prose remains
   a proposal until it passes the existing import/review contract.
@@ -133,8 +173,9 @@ filter, so source-group context may require reading the full small profile.
 
 ## Next exact tasks
 
-1. Start with `git diff --stat` and inspect the listed new files before a requested
-   commit/push. The local milestone is complete; no commit/push has been made.
+1. Start with `git diff --stat` and inspect the four skill/documentation changes
+   before a requested commit/push. The base milestone is committed; this session
+   has made no commit/push.
 2. For actual use, start at `docs/CODEX_WORKFLOW.md`: obtain an explicit private
    data-home path, user-supplied UTF-8 career inventory, and one or two job
    descriptions/URLs. Review selected facts before approval. Never reuse fictional

@@ -55,6 +55,18 @@ when exact arguments are needed. Resolve these paths relative to this skill.
   Record `applied` only after explicit confirmation of a manual submission.
   Response-check suggestions are on demand; they send nothing and schedule nothing.
 
+## Keep review output lean
+
+Show fact reviews in the conversation by default, using `profile review --json`
+for pending facts and `profile show --json` for recorded facts and evidence.
+Regenerate readable views when requested; avoid persistent Markdown review
+copies, profile summaries, or session notes that duplicate database state.
+Create a saved review export only when the user asks to keep one, at an explicit
+private location outside the managed runtime and repository. This is a skill
+default, not a stored per-profile setting or automatic cleanup feature.
+Keep database facts, evidence, approval history, material versions and submission
+snapshots intact. This default does not authorize deleting existing files.
+
 ## Boundaries that matter
 
 The shipped generator selects exact approved wording; it does not verify free
@@ -85,7 +97,7 @@ specific action. Otherwise ask only when a concrete reviewed result or required
 missing fact is ready; continue independent preparation while waiting. Legal,
 sensitive, signature and final-submission steps stay with the user.
 
-Finish each work session with artifact links, current application state, remaining
-user decisions, and the next useful action. Keep personal checkpoints in the
-validated private runtime, not repository docs or fixtures. The database remains
-the source of truth when resuming in a later Codex task.
+Finish each work session with links to any requested artifacts, current
+application state, remaining user decisions, and the next useful action. Resume
+from the database rather than creating a duplicate checkpoint file. Personal
+workflow state never belongs in repository docs or fixtures.

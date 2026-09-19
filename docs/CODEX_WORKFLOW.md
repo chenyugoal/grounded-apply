@@ -41,6 +41,17 @@ same approved facts can then support multiple applications without repeated
 approval. New facts and corrections go through review; retirement keeps old
 submission history intact.
 
+Facts, selected source evidence, and approval records live in SQLite. Codex shows
+readable fact reviews in the conversation by default and regenerates them from
+`profile review --json` (pending facts) or `profile show --json` (recorded facts).
+The repository skill avoids persistent Markdown review copies and duplicate
+profile or session summaries. No user setup is needed for this default when
+using the skill; it is workflow guidance, not a per-profile configuration flag
+or automatic retention service. Ask explicitly to keep a review export at a
+private location outside the managed runtime and repository. Database evidence,
+approval history, material versions, and submission snapshots remain intact;
+the default does not authorize deleting existing files.
+
 Exact commands and dependency setup are in [QUICKSTART.md](QUICKSTART.md).
 The launcher uses `GAPPLY_PYTHON` if supplied, otherwise `.venv/bin/python3` if
 present, otherwise `python3` from PATH. An incompatible interpreter fails with a
