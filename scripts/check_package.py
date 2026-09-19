@@ -117,7 +117,7 @@ def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | Non
             raise RuntimeError("Installed CLI version disagrees with package metadata")
         for args in (
             [], ["profile", "import"], ["profile", "review"], ["profile", "decide"],
-            ["backup"], ["restore"],
+            ["backup"], ["restore"], ["brief"],
         ):
             run([str(command), *args, "--help"], cwd=workspace, environ=environment)
 

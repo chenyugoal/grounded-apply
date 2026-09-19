@@ -38,6 +38,29 @@ PDFs/answers, explicit material approval, and manual application history. Broade
 semantic contradiction handling, novel-obfuscation classification, registered
 derivations, automatic retention, and Phases 2–5 remain planned or in progress.
 
+## Current milestone — Codex-guided application preparation
+
+**Status: Implemented and locally verified** (ADR 0007, September 18, 2026).
+The changes are in the working tree; see SESSION_HANDOFF.md for exact evidence.
+
+Make the local pilot useful through Codex for industry research and engineering
+applications: onboard selected facts once, compare user-supplied jobs against
+evidence, prepare reviewed PDF/answer bundles, and resume from a clear next-action
+briefing. Codex handles commands and IDs; the user controls facts and submission.
+
+| Deliverable | Status | Acceptance evidence |
+|---|---|---|
+| Repository job-search skill and conversational workflow | Implemented | Skill validation and independent operation produced a real draft without approval, sensitive inference, or submission |
+| Read-only next-action briefing | Implemented | Workflow stages, stale readiness, pending facts, required unknowns, job filtering, on-demand response checks, and no-write/diagnostic tests pass |
+| Usable interpreter setup | Implemented | Explicit Python override, local virtualenv selection, literal argument forwarding and actionable version error verified |
+| Research/engineering reuse demonstration | Implemented | One fictional researcher, two jobs, real PDFs/answers, exact degree/publication status, approvals, resumption and unchanged history; PDF visually reviewed |
+| Complete regression and installed-pilot gates | Implemented locally | 360 tests with zero skips, required PDF/encryption gates, complete CLI and fresh offline installed pilot pass on macOS/Python 3.12.14 |
+
+The milestone does not depend on live job discovery, semantic rewriting,
+browser filling, email/calendar integrations, or a GUI. These remain subsequent
+upgrades on the same services, facts and history. Success means useful reviewed
+application preparation, not a promise of interviews or offers.
+
 ## Phase 0 — Repository and truth layer
 
 **Status: In progress**

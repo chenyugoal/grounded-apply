@@ -1,5 +1,9 @@
 # Use the local application pilot
 
+For normal use, ask Codex to follow [CODEX_WORKFLOW.md](CODEX_WORKFLOW.md) or invoke
+`$grounded-apply`. The commands below are the tool contract Codex operates; you
+do not need to type them yourself.
+
 This is a local command-line workflow. Codex can operate it with you: import a
 resume once, review the facts, then reuse selected approved facts for each job.
 It does not discover openings, rewrite your career history, fetch a job page, or
@@ -22,8 +26,17 @@ source .venv/bin/activate
 ./scripts/gapply --help
 ```
 
-The `.venv` on the current development machine is already prepared. Activate it
-in each new shell, then use `./scripts/gapply`. For an installed wheel use the
+Use a Python 3.12+ executable for the first command; some systems' `python3`
+still names an older interpreter. Never assume a previous task's `.venv` exists.
+The repository launcher selects `GAPPLY_PYTHON` if explicitly set, then
+`.venv/bin/python3` if present, then `python3` on PATH. Activation is optional
+once `.venv` is prepared. For example:
+
+```bash
+GAPPLY_PYTHON=/absolute/path/to/python3.12 ./scripts/gapply --help
+```
+
+For an installed wheel use the
 `backup,materials` extras and the `gapply` entry point instead.
 
 Choose a dedicated private directory **outside this repository** for your data.
@@ -92,6 +105,12 @@ its `--preview-token TOKEN --confirm`. Omit the replacement for withdrawal.
 Original history remains, and retired facts cannot authorize new materials.
 
 ## Prepare one job
+
+To resume an existing search, run `./scripts/gapply brief --json` first. It shows
+saved jobs, recorded stages, material readiness, missing-evidence counts, and
+next actions without storing anything. Use `--job-id JOB_ID` for one job or
+`--follow-up-days 14` for a different response-check interval. These suggestions
+are on demand; they do not schedule reminders or send messages.
 
 Copy the job's visible text into a UTF-8 file. Use its HTTPS URL without tracking
 parameters, credentials, or fragments. Saving it records your supplied text and

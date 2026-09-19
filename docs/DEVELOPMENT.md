@@ -21,11 +21,19 @@ does not currently require installing the package.
 
 Run commands from the repository root.
 
+`scripts/gapply` and `scripts/check` use the same interpreter selection:
+`GAPPLY_PYTHON` when set, then `.venv/bin/python3` when present, otherwise
+`python3` on PATH. A version check runs before importing the application.
+`sh scripts/python ...` uses this contract for direct Python verification scripts.
+Use an explicit compatible interpreter to create `.venv`; its existence is not
+assumed. No dependencies are installed by the launcher.
+
 | Purpose | Current command | Status |
 |---|---|---|
 | Full repository gate | `./scripts/check` | Supported now |
 | CLI help | `./scripts/gapply --help`; `./scripts/gapply profile decide --help` | Supported now |
 | Environment/path diagnostics | `./scripts/gapply doctor --json` | Supported now |
+| Search resumption | `./scripts/gapply brief [--job-id ID] [--follow-up-days 7] [--json]` | Read-only validated snapshot; stage-based next actions, no scheduling or messages |
 | Content-free command event stream | `./scripts/gapply --log-events doctor --json` | Supported; opt-in JSONL on stderr, private response on stdout |
 | Structured profile proposal import | `./scripts/gapply profile import --source-file FILE --proposals-file FILE --idempotency-key KEY [--dry-run] [--json]` | Supported |
 | Pending profile review | `./scripts/gapply profile review [--json]` | Supported, read-only |
@@ -118,6 +126,17 @@ Workflow validation happens before any test job starts. It is a separate gate
 from successful execution of the application checks on every matrix target.
 
 ### Local pilot verification
+
+The Codex entry point is `.agents/skills/grounded-apply/SKILL.md`; product usage
+is documented in `CODEX_WORKFLOW.md`. The skill does not bypass service checks
+or upgrade proposals into approved facts. `brief` reads validated profiles,
+jobs, materials and application history in one read transaction. Its output
+contains IDs/URLs/status/counts, but no raw career text, answer bodies, tokens,
+or material bytes. Profile review counts are global even when filtering a job.
+The configurable response interval is applied to recorded submission time;
+it is neither an employer deadline nor a persisted or scheduled reminder.
+
+Focused gate: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_briefing tests.test_launcher -v`.
 
 See `QUICKSTART.md` for the user workflow. In a disposable environment with the
 build and backup requirements already installed, add the material parser and
@@ -428,8 +447,10 @@ prefix, and the nearest nonblank exact recognized label-only line in a
 an answer from its label. Label-only matching applies the same bounded
 fixed-point percent decoding and Unicode/control normalization used by the
 taxonomy without classifying unrelated unselected lines. Semantic contradiction
-classification, redacted logging, and data lifecycle commands are still required
-before real candidate use. If more than 512 code points precede the selection on
+classification remains outside the bounded pilot; human review is required.
+Content-free diagnostics, encrypted database backup, support export, and
+whole-portable-home deletion are now implemented as described above. If more
+than 512 code points precede the selection on
 the same logical line, validation fails closed rather than silently treating a
 truncated suffix as the complete label context.
 
@@ -533,7 +554,9 @@ fail review/decision closed without displaying their old provenance. Future
 version changes likewise require a registered dispatcher or an explicit
 migration; stored version tags do not by themselves grant compatibility.
 
-This boundary is currently for synthetic development data only.
+Development verification uses synthetic data only. The bounded personal-use
+workflow follows ADR 0006 and CODEX_WORKFLOW.md, with selected retention and
+explicit fact approval in a private runtime outside the repository.
 
 ### Planned command hardening
 

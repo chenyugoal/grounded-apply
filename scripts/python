@@ -1,0 +1,18 @@
+#!/bin/sh
+# One interpreter contract for the repository launcher and verification gates.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+if [ -n "${GAPPLY_PYTHON:-}" ]; then
+    GAPPLY_RUNTIME="$GAPPLY_PYTHON"
+elif [ -x "$REPO_DIR/.venv/bin/python3" ]; then
+    GAPPLY_RUNTIME="$REPO_DIR/.venv/bin/python3"
+else
+    GAPPLY_RUNTIME=python3
+fi
+if ! "$GAPPLY_RUNTIME" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
+    echo 'Grounded Apply requires Python 3.12+. Set GAPPLY_PYTHON to a compatible executable or create .venv with that interpreter. See docs/QUICKSTART.md.' >&2
+    exit 2
+fi
+exec "$GAPPLY_RUNTIME" "$@"

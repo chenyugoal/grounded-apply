@@ -5,6 +5,14 @@ local-first, evidence-backed job-search assistant. The governing product design
 is [`GROUNDED_APPLY_DESIGN.md`](GROUNDED_APPLY_DESIGN.md); accepted architecture
 decisions live under `docs/adr/`.
 
+For **operating a user's job search**, use the repository skill at
+`.agents/skills/grounded-apply/SKILL.md` and `docs/CODEX_WORKFLOW.md`. Codex runs
+the typed CLI and presents decisions/artifacts; the user need not manage command
+syntax. The development-session protocol below applies to repository changes,
+not ordinary use of an existing profile. Do not copy personal workflow state
+into the development handoff. Truth, privacy and external-action rules apply to
+both development and product use.
+
 ## Repository state is the source of truth
 
 Do not rely on a previous chat transcript to decide what exists. Use the code,
@@ -192,6 +200,7 @@ The current zero-install interface is:
 ./scripts/check
 ./scripts/gapply --help
 ./scripts/gapply doctor --json
+./scripts/gapply brief --help
 ./scripts/gapply --log-events doctor --json
 ./scripts/gapply profile import --help
 ./scripts/gapply profile review --help
@@ -210,8 +219,12 @@ The optional installed-package gate is `python scripts/check_package.py` from a
 disposable environment with `requirements-build.txt` installed. It is verified
 on Python 3.13.1 and adds no base application runtime dependency. It builds and
 tests outside the checkout; see `docs/DEVELOPMENT.md` for the exact setup commands.
+The repository launcher and `scripts/check` select `GAPPLY_PYTHON`, then a local
+`.venv/bin/python3`, then `python3` on PATH; Python 3.12+ is mandatory. The same
+selection is available through `sh scripts/python` for direct check scripts.
 Encrypted profile backup/restore uses the optional `backup` extra. Its required
 gate is `python -W error scripts/check_backup.py`; a base-suite crypto skip does
 not verify encryption. Use `scripts/check_package.py --backup-wheelhouse PATH`
-to verify the extra in an offline fresh installation. Full filesystem backup,
-support export, deletion, and retention remain unfinished.
+to verify the extra in an offline fresh installation. Fixed-schema support
+export and whole-portable-home deletion are implemented; full filesystem backup,
+per-record deletion, and automatic retention remain unfinished.

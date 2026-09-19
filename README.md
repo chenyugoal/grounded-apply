@@ -11,6 +11,18 @@ application record. Its central rule is simple:
 
 ## Current status
 
+The **Codex-guided application preparation** milestone is implemented and locally
+verified for industry research and engineering workflows. Tell Codex what you want to do;
+it operates the local tools and handles IDs and commands. The repository skill
+and [conversational workflow](docs/CODEX_WORKFLOW.md) cover profile review,
+job comparison, application packs, and resumption. See [the roadmap](docs/ROADMAP.md)
+and live checkpoint for verification status.
+
+`./scripts/gapply brief --json` provides a read-only next-action view across
+saved jobs and applications. Its ordering follows workflow stage, not fit or
+hiring probability; response-check suggestions neither send messages nor schedule
+reminders. Private facts and application history stay in the existing runtime.
+
 Grounded Apply now has a **local application pilot**: extract selected facts from
 a UTF-8 resume, approve them once, save job text and its URL, inspect a requirement
 evidence matrix, produce a traceable PDF and career answers, approve the material,
@@ -41,7 +53,11 @@ implemented and verified.
 
 ## Start the local pilot
 
-Prerequisite: Python 3.12 or newer. The base CLI has no runtime package
+Prerequisite: Python 3.12 or newer. The repository launcher uses `GAPPLY_PYTHON`
+when supplied, otherwise `.venv/bin/python3` when present, otherwise `python3`
+on PATH. Unsupported interpreters stop with setup guidance. For example,
+`GAPPLY_PYTHON=/absolute/path/to/python3.12 ./scripts/gapply --help` needs no
+shell activation. The base CLI has no runtime package
 dependencies and does not require installation. Encrypted backup/restore requires
 the optional `backup` extra; PDF generation/verification requires the `materials`
 extra plus `pdflatex`, `lmodern`, `geometry`, and `enumitem`. The quickstart explains

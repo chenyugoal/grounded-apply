@@ -1124,6 +1124,29 @@ def _command_answers(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_brief(args: argparse.Namespace) -> int:
+    from grounded_apply.repositories.latex_renderer import LatexResumeRenderer
+    from grounded_apply.services.briefing import BriefingService
+    from grounded_apply.services.materials import MaterialService
+
+    with _open_initialized_profile_repository(resolve_runtime_paths(), read_only=True) as repository:
+        data = BriefingService(repository, MaterialService(repository, LatexResumeRenderer())).brief(
+            job_id=args.job_id, follow_up_days=args.follow_up_days)
+    profile = data["profile"]
+    lines = [f"{data['job_count']} saved jobs; {data['application_count']} applications; "
+             f"{profile['pending_review_count']} facts awaiting review.",
+             "Action order follows workflow stage, not fit. Response checks send no messages."]
+    if not data["items"]:
+        lines.append("Review your career facts and supply the text and URL of a job to begin.")
+    for item in data["items"]:
+        lines.append(f"[{item['state']}] {item['source_url']}\n"
+                     f"  {item['next_action']['kind']}: {item['next_action']['reason']}\n"
+                     f"  {item['requirements_without_retrieved_evidence']} requirements without retrieved evidence; "
+                     f"job={item['job_id']}")
+    _emit(args, command="brief", data=data, message=_terminal_safe("\n".join(lines)))
+    return 0
+
+
 def _command_applications(args: argparse.Namespace) -> int:
     from grounded_apply.repositories.latex_renderer import LatexResumeRenderer
     from grounded_apply.services.applications import ApplicationService
@@ -1323,6 +1346,13 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = commands.add_parser("doctor", help="Check the local installation safely.")
     _add_json_flag(doctor_parser)
     doctor_parser.set_defaults(handler=_command_doctor, command_name="doctor")
+
+    brief_parser = commands.add_parser("brief", help="Review saved jobs and next actions without changing state.", allow_abbrev=False)
+    brief_parser.add_argument("--job-id", help="Limit the briefing to one saved job.")
+    brief_parser.add_argument("--follow-up-days", type=int, default=7,
+                              help="Days before suggesting a response check (1–90; default 7). No messages or reminders are sent.")
+    _add_json_flag(brief_parser)
+    brief_parser.set_defaults(handler=_command_brief, command_name="brief")
 
     backup_parser = commands.add_parser(
         "backup", help="Encrypt a bounded profile database snapshot.", allow_abbrev=False,
@@ -1556,7 +1586,7 @@ def _command_name_from_argv(argv: Sequence[str]) -> str:
         profile_command = argv[1]
         if profile_command in {"init", "import", "review", "decide", "show", "retire", "extract", "onboard"}:
             return f"profile.{profile_command}"
-    if argv[0] in {"paths", "doctor", "backup", "restore", "delete", "answers", "export"}:
+    if argv[0] in {"paths", "doctor", "brief", "backup", "restore", "delete", "answers", "export"}:
         return argv[0]
     return "unknown"
 

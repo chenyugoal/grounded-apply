@@ -19,6 +19,7 @@ class DiagnosticCommand(StrEnum):
     UNKNOWN = "unknown"
     PATHS = "paths"
     DOCTOR = "doctor"
+    BRIEF = "brief"
     BACKUP = "backup"
     RESTORE = "restore"
     DELETE = "delete"

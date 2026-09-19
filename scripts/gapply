@@ -3,4 +3,5 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m grounded_apply "$@"
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+    exec sh "$SCRIPT_DIR/python" -m grounded_apply "$@"

@@ -5,158 +5,148 @@ architecture decisions are in `docs/adr/`.
 
 ## Checkpoint
 
-- **Updated:** 2026-09-04 22:18 CDT
-- **Branch / HEAD:** `codex/phase-0-truth-layer`, `3350c55` (local origin matches).
-  The user committed/pushed the preceding workflow fix. This session has not
-  committed, pushed, or triggered a GitHub rerun.
-- **Current task:** Fix the concurrent SQLite initialization failure reported
-  from Ubuntu 24.04/Python 3.12 after the workflow syntax correction.
-- **Hosted evidence:** The user supplied three successful matrix jobs:
-  macOS 15/Python 3.12, macOS 15/Python 3.13, Ubuntu 24.04/Python 3.13.
-  Ubuntu 24.04/Python 3.12.14 ran 345 tests with 16 optional-provider skips and
-  one error in `test_concurrent_initialization_is_idempotent`: schema version
-  zero combined with populated user tables. This is an application race, not
-  another workflow-expression failure. No new run URL was supplied; these job
-  results came from the user's log, not authenticated remote inspection.
-- **Root cause:** `_validate_schema_state` previously read `user_version`, table
-  existence, and migration history in separate autocommit snapshots outside
-  the per-migration write lock. A concurrent commit could mix revisions,
-  producing a false unversioned-schema or version/ledger mismatch error.
-- **Local correction — implemented and verified:** Validation owns a read
-  transaction when none exists, releases it on success or failure before any
-  migration write lock, and preserves caller-owned transactions. Existing
-  per-migration `BEGIN IMMEDIATE` revalidation and atomic commits remain.
-  Schema stays at version 4; no migration, retry workaround, or relaxed
-  future/unversioned/checksum/WAL/privacy guard was added.
-- **Regression evidence:** A deterministic two-connection test commits the
-  other initializer immediately after the version read, for fresh and version-1
-  databases through both initialization and query-only validation. All four
-  cases fail on the original code and pass with the correction. The fixture
-  uses WAL in private schema helpers to permit a commit during the read; public
-  read-only adapters still refuse WAL. Transaction-ownership tests also cover
-  successful validation and checksum failure. Future/unversioned rejection
-  tests now verify that validation leaves no transaction open.
-- **Working tree:** Six modified files: `src/grounded_apply/repositories/_schema.py`,
-  `tests/test_schema.py`, `README.md`, `docs/DEVELOPMENT.md`, `docs/ROADMAP.md`,
-  and this checkpoint. Starting tree was clean. The fix is local/uncommitted.
-  Hosted verification of this correction is still pending.
+- **Updated:** 2026-09-18 18:26 CDT
+- **Branch / HEAD:** `codex/phase-0-truth-layer`, `4a86427` (local origin matches).
+  Starting tree was clean. No commit, push, or GitHub rerun was made.
+- **Milestone:** Codex-guided application preparation for industry research and
+  engineering roles (ADR 0007) is **implemented and locally verified**.
+- **Delivered:** repository `grounded-apply` skill and conversational guide;
+  read-only `brief` service/CLI; deterministic stage-based next actions;
+  explicit/local-virtualenv interpreter selection; synthetic two-job researcher
+  pilot and fresh installed-pilot coverage. Schema remains 4. No model provider,
+  live fetching, browser fill, message, or external submission was added.
+- **Briefing:** validates profile, jobs, materials and application history in
+  one read snapshot. Output contains counts, IDs, URLs, current readiness,
+  latest/application-bound material references and actions; no raw career text,
+  answer bodies, review tokens or PDF bytes. Keyword retrieval counts are not
+  fit scores. Seven-day response checks are configurable per call and on demand.
+- **Working tree:** the milestone is uncommitted. Modified: `AGENTS.md`,
+  `README.md`, `docs/DEVELOPMENT.md`, `docs/QUICKSTART.md`, `docs/ROADMAP.md`, this
+  handoff, `scripts/check`, `scripts/check_package.py`, `scripts/check_pilot.py`,
+  `scripts/gapply`, `src/grounded_apply/cli.py`, and
+  `src/grounded_apply/diagnostics.py`. New: `.agents/skills/grounded-apply/SKILL.md`,
+  `docs/CODEX_WORKFLOW.md`, ADR 0007, `scripts/python`,
+  `src/grounded_apply/domain/search_actions.py`,
+  `src/grounded_apply/services/briefing.py`, `tests/test_briefing.py`, and
+  `tests/test_launcher.py`.
+
+## Resume findings and environment
+
+The old checkpoint was stale: the schema snapshot correction is already committed
+in `4a86427`. The required first command was executed verbatim:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error -m unittest tests.test_schema -v
+FAIL — system python3 is 3.9; datetime.UTC is unavailable
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/chenyu/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -W error -m unittest tests.test_schema -v
+PASS — 8 tests, zero skips, 0.193s
+```
+
+The old `.venv` had broken links to a removed Homebrew Python 3.13. A creation
+attempt updated its config but could not replace those links. The remaining
+directory was preserved at `/private/tmp/grounded-apply-preexisting-venv-20260918`;
+a fresh `.venv` was created with the bundled Python 3.12.14 and the pinned optional
+dependencies installed offline from wheels. No candidate data was involved.
+
+Current environment: macOS, Python 3.12.14, SQLite 3.53.1, TeX Live 2026,
+pypdf 6.10.0, cryptography 50.0.1, cffi 2.1.1, pycparser 3.0. The wrapper chooses
+`GAPPLY_PYTHON`, then `.venv/bin/python3`, then PATH's `python3`, checking the
+version before imports. A fresh checkout still needs compatible Python and the
+optional dependencies/TeX for PDF and backup functions.
+
+Disposable build/skill tools: `/private/tmp/grounded-apply-milestone-tools-20260918`
+(requirements-build, both extras, PyYAML 6.0.3). Dependency wheels:
+`/private/tmp/grounded-apply-milestone-wheels-20260918`. The initial sandboxed pip
+download failed DNS; the approved network retry passed. These are not tracked.
 
 ## Verification
 
-Session-resume first command on 3350c55:
-
 ```text
-/private/tmp/gapply-actionlint-w2c997go/actionlint -shellcheck= -pyflakes= .github/workflows/check.yml
-PASS — exit 0, no findings; workflow unchanged in this session
-```
-
-Narrow reproduction and validation:
-
-```text
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src .venv/bin/python -W error -m unittest tests.test_schema.SchemaMigrationTests.test_schema_validation_uses_one_snapshot_during_concurrent_migration -v
-BEFORE production fix: FAIL — all four subcases reproduce mixed-snapshot errors
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src .venv/bin/python -W error -m unittest tests.test_schema -v
-AFTER: PASS — 8 tests, zero skips, 0.235s (Python 3.13.1 / SQLite 3.47.2)
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Users/chenyu/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 -W error -m unittest tests.test_schema -v
-AFTER: PASS — 8 tests, zero skips, 0.166s (Python 3.12.14 / SQLite 3.53.1)
-```
-
-During test authoring, the transaction-ownership fixture initially used an invalid
-checksum length and hit the SQL CHECK before validation. It now uses a
-well-shaped wrong digest; the final test reaches and verifies checksum rejection.
-
-Repeated original eight-worker test, Python 3.13.1:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src .venv/bin/python -W error - <<'PYTEST'
-import unittest
-from tests.test_schema import SchemaMigrationTests
-suite = unittest.TestSuite(SchemaMigrationTests('test_concurrent_initialization_is_idempotent') for _ in range(100))
-result = unittest.TextTestRunner(verbosity=0).run(suite)
-raise SystemExit(not result.wasSuccessful())
-PYTEST
-```
-
-PASS — 100 repetitions, 8.914s. The same 100-case suite ran with
-`/Users/chenyu/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3`
-(Python 3.12.14), with `sys.version` and `sqlite3.sqlite_version` printed first:
-PASS — 100 repetitions, 9.111s. These are local macOS results, not Ubuntu runs.
-
-Repository and installed-workflow gates after the fix:
-
-```text
-PATH="$PWD/.venv/bin:$PATH" ./scripts/check
-PASS — 347 tests, zero skips, 105.857s
-PATH="/private/tmp/gapply-schema-race-py312-rawg5z9o/bin:$PATH" ./scripts/check
-PASS — 347 tests, 16 expected optional-provider skips, 89.805s
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -W error scripts/check_materials.py
-PASS — 9 tests, zero skips, 30.997s
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -W error scripts/check_backup.py
-PASS — 28 tests, zero skips, 7.972s
-PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-release-tools-20260904/bin/python scripts/check_package.py --pilot-wheelhouse /private/tmp/grounded-apply-backup-wheels-20260904
-PASS — source archive/wheel, fresh offline base + backup/materials installation,
-complete synthetic CLI pilot, real PDF, encrypted backup/restore, immutable
-history, retirement, support export, deletion, replay and diagnostic separation
+GAPPLY_PYTHON=/Users/chenyu/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error -m unittest tests.test_launcher tests.test_briefing -v
+PASS — 12 tests, zero skips, 36.675s before the forward-test correction
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_briefing.BriefingTests.test_saved_draft_is_reviewable_before_an_application_is_created tests.test_briefing.SearchActionTests -v
+PASS — 2 tests, zero skips, 3.363s after the correction
+./scripts/check
+PASS — final 360 tests, zero skips, 137.772s; includes all CLI smokes and full discovery
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_materials.py
+PASS — 9 tests, zero skips, 29.413s
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_backup.py
+PASS — 28 tests, zero skips, 8.905s
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_pilot.py --demo-output /private/tmp/grounded-apply-milestone-demo-final-20260918
+PASS — two job families, real PDFs, exact degree/publication wording, answers,
+approval/manual-submission gates, briefing, encrypted backup/restore,
+retirement invalidation, immutable history, diagnostics and confirmed deletion
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python scripts/check_package.py --pilot-wheelhouse /private/tmp/grounded-apply-milestone-wheels-20260918
+PASS — source archive/wheel, fresh offline installed extras, encryption round trip,
+complete extended pilot using installed code and bundled migrations
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python /Users/chenyu/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/grounded-apply
+PASS — skill format; relative references also checked and resolve
+sh -n scripts/python scripts/gapply scripts/check
+PASS
 git diff --check
-PASS — complete source/test/documentation diff inspected; no secrets, personal
-data, generated artifacts, debug output or unrelated changes introduced
+PASS — complete modified/new code, tests, skill and documentation inspected
 ```
 
-The Python 3.12 gate used a newly created dependency-free disposable virtualenv.
-The 16 skips do not verify optional features; the separate required gates and
-installed pilot do. Logs are `/private/tmp/gapply-schema-race-check.log`,
-`/private/tmp/gapply-schema-race-py312-check.log`,
-`/private/tmp/gapply-schema-race-materials.log`,
-`/private/tmp/gapply-schema-race-backup.log`, and
-`/private/tmp/gapply-schema-race-package.log`. All test data is fictional and
-outside the repository. SQLite's documented transaction/snapshot semantics were
-checked against https://www.sqlite.org/isolation.html and
-https://www.sqlite.org/lang_transaction.html.
+Logs: `/private/tmp/gapply-milestone-{focused,check-final,materials,backup,pilot-final,package-final}.log`.
+The first extended pilot exposed a harness assumption that the first global
+material belonged to the engineering job; assertions now filter by job. Final
+source and installed pilots pass. Final engineering selection also keeps its
+project group together instead of placing an independent research bullet under it.
 
-## Product state and limitations
+Visual QA command:
+`pdftoppm -scale-to 1400 -png /private/tmp/grounded-apply-milestone-demo-final-20260918/resume.pdf /private/tmp/gapply-milestone-resume-final`.
+Inspected its one-page PNG: readable text, dates and bullets, no clipping or
+overlaps. Validation reports nine factual units, zero unsupported units, critical
+fields present and human approval required.
 
-The complete bounded local pilot is committed in b426e14 and described by ADR
-0006 and `docs/QUICKSTART.md`: selected UTF-8 resume onboarding, explicit fact
-approval, immutable user-supplied job text/URL, approved-evidence retrieval and
-gaps, exact-text LaTeX/PDF and career answers, material approval, saved material
-lookup, append-only manual application history/submission snapshots, withdrawal/
-replacement, encrypted database backup/restore, support export and whole-home
-deletion. PDF visual QA passed in the preceding development session; the
-fictional bundle remains at `/private/tmp/grounded-apply-pilot-final-demo-20260905`.
+Independent skill forward-test used only `/private/tmp/gapply-forward-20260918`.
+An agent operated the skill on a fictional approved researcher profile and saved
+research-engineering job. It selected evidence, filled a career question from
+an approved claim, exported/visually inspected a real PDF, and recomputed all
+seven export-file hashes. It preserved expected-degree/submitted-paper wording,
+left sponsorship as NeedInfo, ignored job-text injection, and left the bundle
+unapproved with no application/submission. It found saved drafts still suggested
+assess_job; the policy and regression fix now return review_material, independently
+retested without mutation. Remaining usability limit: `profile show` has no claim
+filter, so source-group context may require reading the full small profile.
 
-- The local platform is macOS/Python 3.13.1 with TeX Live 2026. `.venv` contains
-  cryptography 50.0.1, cffi 2.1.1, pycparser 3.0 and pypdf 6.10.0. Reportlab is
-  not a runtime dependency. Hosted results are partial, as recorded above; the patched revision is not yet verified there.
-- Real candidate data has never been loaded in this task. No real profile or
-  external application was created. Private data belongs outside the checkout.
-- Only UTF-8 text input is supported. Name/contact labels and per-fact approval
-  are explicit. Tailoring selects/orders approved wording; no model, discovery,
-  live job fetch, semantic rewriting, browser fill or submission is implemented.
-- Schema 4 stores pilot material bytes and history, retaining backup/deletion
-  coverage. External sources, exports and backups remain caller-owned. Database
-  backup and deletion inventory have the documented 16 MiB bounds.
-- Retired claims block future use while immutable submission history remains.
-  Current authority comes from validated profile/packet services, not raw rows.
-- Filesystem guards are sampled checks, not same-UID authentication or secure
-  erasure. Partial deletion operations are never silently resumed.
+## Product state and limits
+
+- Normal use is through Codex and `.agents/skills/grounded-apply/SKILL.md`;
+  CLI remains the deterministic contract. See `docs/CODEX_WORKFLOW.md`.
+- No real candidate data was loaded or external application made. A real trial
+  requires user-supplied source files/jobs and an explicit private storage target.
+- Input remains UTF-8 text with explicit labels/recognized sections. Review
+  skipped lines. Tailoring selects/orders approved wording; new prose remains
+  a proposal until it passes the existing import/review contract.
+- PDF/DOCX ingestion, live discovery/fetching, semantic fit/rewrite validation,
+  browser filling, messaging, scheduled reminders, automatic retention and GUI
+  remain later work. No promise of interviews or offers.
+- Schema 4/private runtime contracts remain unchanged. External sources, exports
+  and backups are caller-owned. The 16 MiB database/deletion bounds, sampled
+  same-UID TOCTOU limits, no secure-erasure claim, and read-only WAL/sidecar refusal
+  remain in force.
+- Hosted CI was not inspected this session. Prior user-reported evidence passed
+  macOS 15/Python 3.12 and 3.13 plus Ubuntu 24.04/Python 3.13. The former Ubuntu/
+  Python 3.12 race is corrected in HEAD, but its hosted rerun is unverified.
+  Local success is not complete OS/interpreter release coverage.
 
 ## Next exact tasks
 
-1. Start with `git diff -- src/grounded_apply/repositories/_schema.py tests/test_schema.py`.
-   The local fix and verification are complete; review the six-file change for
-   commit/push. No commit or push was performed in this session.
-2. After pushing the correction, inspect all four jobs in the new GitHub Actions
-   run. Record the exact revision and outcomes here. Do not mark the hosted
-   matrix implemented until the patched revision passes all targets. Rerunning
-   3350c55 may intermittently pass but does not contain the race correction.
-   Current CI covers base and encryption/package checks; hosted TeX/pilot
-   coverage is separate future work.
-3. For personal pilot use, start with `docs/QUICKSTART.md`, an explicit private
-   storage target, a user-supplied UTF-8 resume path and job text. Review selected
-   facts before recording approvals. Never use fictional fixture facts as theirs.
+1. Start with `git diff --stat` and inspect the listed new files before a requested
+   commit/push. The local milestone is complete; no commit/push has been made.
+2. For actual use, start at `docs/CODEX_WORKFLOW.md`: obtain an explicit private
+   data-home path, user-supplied UTF-8 career inventory, and one or two job
+   descriptions/URLs. Review selected facts before approval. Never reuse fictional
+   fixture facts as a real user's profile.
+3. The next bounded development improvement, if needed after the first trial,
+   starts at `src/grounded_apply/cli.py::_command_profile_show`: add a claim-ID
+   filter for minimal source-context retrieval, preserving validated evidence
+   references, with unknown/retired/pending claim tests. It is not implemented
+   or required to use this bounded milestone.
 
 ## First command
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error -m unittest tests.test_schema -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_briefing tests.test_launcher -v
 ```

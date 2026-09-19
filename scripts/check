@@ -13,6 +13,7 @@ fi
 
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply profile decide --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply brief --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply backup --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply restore --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 GROUNDED_APPLY_HOME="$CHECK_RUNTIME_ROOT" \
@@ -20,4 +21,4 @@ PYTHONDONTWRITEBYTECODE=1 GROUNDED_APPLY_HOME="$CHECK_RUNTIME_ROOT" \
 PYTHONDONTWRITEBYTECODE=1 GROUNDED_APPLY_HOME="$CHECK_RUNTIME_ROOT" \
     ./scripts/gapply --log-events doctor --json >/dev/null 2>/dev/null
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-    python3 -W error -m unittest discover -s tests -v
+    sh "$SCRIPT_DIR/python" -W error -m unittest discover -s tests -v
