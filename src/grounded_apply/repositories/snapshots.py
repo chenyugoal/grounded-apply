@@ -13,6 +13,7 @@ from grounded_apply.services.backup import BackupError, MAX_SNAPSHOT_BYTES
 
 
 _SCHEMA_QUERY = "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"
+_RESTORABLE_SCHEMA_VERSIONS = frozenset({4, 5, 6, 7})
 
 
 def validate_profile_snapshot(snapshot: bytes) -> None:
@@ -29,18 +30,20 @@ def validate_profile_snapshot(snapshot: bytes) -> None:
         or snapshot[:16] != b"SQLite format 3\x00" or snapshot[18:20] != b"\x01\x01"
     ):
         raise BackupError("Unsupported profile database image")
+    schema_version = int.from_bytes(snapshot[60:64], "big")
     page_size = int.from_bytes(snapshot[16:18], "big")
     page_size = 65536 if page_size == 1 else page_size
     if (
         page_size < 512 or page_size > 65536 or page_size & (page_size - 1)
         or int.from_bytes(snapshot[28:32], "big") * page_size != len(snapshot)
-        or int.from_bytes(snapshot[60:64], "big") != LATEST_SCHEMA_VERSION
+        or schema_version not in _RESTORABLE_SCHEMA_VERSIONS
+        or schema_version > LATEST_SCHEMA_VERSION
     ):
         raise BackupError("Unsupported profile database size or schema version")
     try:
         with closing(sqlite3.connect(":memory:", isolation_level=None)) as reference:
             reference.execute("PRAGMA temp_store = MEMORY")
-            initialize_schema(reference, default_migrations_directory())
+            initialize_schema(reference, default_migrations_directory(), target_version=schema_version)
             expected = reference.execute(_SCHEMA_QUERY).fetchall()
         with closing(sqlite3.connect(":memory:", isolation_level=None)) as database:
             database.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
@@ -52,7 +55,7 @@ def validate_profile_snapshot(snapshot: bytes) -> None:
             database.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
             if database.execute(_SCHEMA_QUERY).fetchall() != expected:
                 raise BackupError("Snapshot SQL schema does not match registered migrations")
-            if validate_schema(database, default_migrations_directory()) != LATEST_SCHEMA_VERSION:
+            if validate_schema(database, default_migrations_directory()) != schema_version:
                 raise BackupError("Snapshot schema version is unsupported")
             if database.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                 raise BackupError("Snapshot integrity check failed")

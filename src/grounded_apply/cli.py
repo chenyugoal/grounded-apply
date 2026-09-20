@@ -53,6 +53,37 @@ class PostCommitOutputError(RuntimeError):
     """A committed operation could not report its terminal result."""
 
 
+class BatchOutcomeUnknownError(RuntimeError):
+    """A durable batch may have progressed before its result was reported."""
+
+
+class SearchOutcomeUnknownError(RuntimeError):
+    """A configured search may have progressed before output was reported."""
+
+
+class ScheduleOutcomeUnknownError(RuntimeError):
+    """Daily scheduling state may have changed before output was reported."""
+
+
+_SCHEDULE_RECOVERY = (
+    "Daily schedule state or run progress may already be saved. Inspect schedules show/list; "
+    "retry configuration or changes with the same key, and tick the same schedule. "
+    "Reuse the same notification ID when acknowledging delivery."
+)
+
+
+_SEARCH_RECOVERY = (
+    "Search configuration or run progress may already be saved. Retry the same "
+    "request and idempotency key, or resume the saved run ID. Inspect searches scopes/list."
+)
+
+
+_BATCH_RECOVERY = (
+    "Batch progress may already be saved. Retry preparation with the same spec and "
+    "idempotency key, or resume the same batch ID. Saved drafts still require review."
+)
+
+
 def _add_json_flag(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Emit stable JSON output.")
 
@@ -210,6 +241,29 @@ def _command_doctor(args: argparse.Namespace) -> int:
                 warnings.append(
                     "Profile storage is not initialized; run `gapply profile init`."
                 )
+            else:
+                from dataclasses import asdict
+                from grounded_apply.services.storage_capacity import storage_capacity
+
+                require_initialized_profile_storage(paths, read_only=True)
+                before = paths.database.stat()
+                require_initialized_profile_storage(paths, read_only=True)
+                after = paths.database.stat()
+                if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+                ):
+                    raise UnsafeRuntimePathError("Profile database changed during storage inspection")
+                capacity = storage_capacity(after.st_size)
+                checks["database"]["storage"] = asdict(capacity)
+                if capacity.status != "available":
+                    warnings.append(
+                        f"Profile database uses {capacity.database_file_bytes} of {capacity.snapshot_limit_bytes} "
+                        f"supported bytes; {capacity.remaining_bytes} bytes of file headroom remain. "
+                        "Daily packages and history consume this allowance. This is not a backup validation "
+                        "or a guarantee that the next operation will fit."
+                    )
+                if capacity.status == "exceeded":
+                    checks["database"]["ok"] = False
         except Exception as error:  # fail closed without leaking database contents
             checks["database"] = {
                 "error": f"{type(error).__name__}: {error}",
@@ -1121,6 +1175,342 @@ def _command_materials(args: argparse.Namespace) -> int:
     return 0
 
 
+def _batch_message(data: dict[str, Any], *,
+                   recovery_action: str = "Resume this batch to continue.",
+                   published_locations: dict[str, str | None] | None = None) -> str:
+    counts = data.get("counts", {})
+    lines = [f"Batch {data.get('batch_id', 'preview')}: {data.get('status', 'preview')}",
+             f"{counts.get('draft', 0)} drafts; {counts.get('blocked', 0)} blocked; "
+             f"{data.get('remaining_count', 0)} remaining."]
+    for item in data.get("items", ()):
+        detail = f"[{item['status']}] job={item['job_id']}"
+        if item.get("title"):
+            detail += f" {item['title']}"
+        if item.get("material_id"):
+            detail += f" material={item['material_id']}"
+            if item.get("material_approved"):
+                detail += " (existing exact-bundle approval)"
+        if item.get("questionnaire_coverage") == "unknown":
+            detail += " — application questions not supplied"
+        lines.append(detail)
+        if item.get("source_url"):
+            lines.append(f"  {item['source_url']}")
+        if published_locations is not None and item["job_id"] in published_locations:
+            location = published_locations[item["job_id"]]
+            lines.append(f"  Published location: {location if location is not None else 'not provided; review required'}")
+    for group in data.get("grouped_blockers", ()):
+        detail = f"Needs review: {group.get('reason', group.get('kind', 'need_info'))}"
+        if group.get("question_label"):
+            detail += f" — {group['question_label']}"
+        lines.append(detail)
+    if data.get("stop_reason"):
+        lines.append(f"Stopped: {data['stop_reason']}. {recovery_action}")
+    lines.append("Unapproved drafts require review. This run recorded no approvals or application submissions.")
+    return "\n".join(_terminal_safe(line) for line in lines)
+
+
+def _search_message(data: dict[str, Any], *, scheduled: bool = False) -> str:
+    lines = [f"Search run {data.get('run_id', 'preview')}: {data.get('status', 'configured')}"]
+    for source in data.get("sources", ()):
+        report = source.get("report") or {}
+        status = report.get("status", source.get("stage", "pending"))
+        detail = f"{source['source_id']}: {status}; {source.get('captured_count', 0)} captured"
+        if report.get("remaining_count") is not None:
+            detail += f"; {report['remaining_count']} indexed postings unread"
+        lines.append(detail)
+    filter_labels = {"title_excluded": "title excluded", "location_excluded": "location excluded",
+        "location_not_matched": "location did not match", "location_unknown_excluded": "missing location excluded"}
+    skipped = data.get("skipped", {})
+    for reason, label in filter_labels.items():
+        if skipped.get(reason, 0):
+            lines.append(f"Saved preparation filter: {skipped[reason]} {label}.")
+    if data.get("coverage_complete") is False:
+        lines.append("Source coverage is incomplete; source results show the gaps.")
+    if data.get("stop_reason"):
+        lines.append(f"Stopped: {data['stop_reason']}. Saved progress remains available.")
+    message = "\n".join(_terminal_safe(line) for line in lines)
+    batch = data.get("batch")
+    if isinstance(batch, dict):
+        locations = {item["job_id"]: item["location"] for item in data.get("selection", ()) if "location" in item}
+        message += "\n" + _batch_message(batch,
+            recovery_action="Tick this schedule to continue." if scheduled else "Resume this saved search run to continue.",
+            published_locations=locations or None)
+    elif data.get("review_available", True):
+        message += f"\n{len(data.get('selection', ()))} jobs selected; no material batch prepared."
+    return message
+
+
+def _schedule_message(data: dict[str, Any]) -> str:
+    lines = [f"Schedule {data.get('schedule_id', 'preview')}: {data.get('status', 'validated')}"]
+    next_due = data.get("next_due")
+    if next_due is not None:
+        lines.append(f"Next due: {next_due.get('due_at') if isinstance(next_due, dict) else next_due}")
+    if data.get("notifications_pending"):
+        lines.append(f"{data['notifications_pending']} notification(s) awaiting delivery acknowledgment.")
+    notification = data.get("notification")
+    if isinstance(notification, dict):
+        lines.append(f"Pending notification: {notification.get('id')}")
+        if notification.get("run_id") is not None:
+            lines.append(f"Notification review run: {notification['run_id']}")
+    if data.get("stop_reason"):
+        lines.append(f"Stopped: {data['stop_reason']}.")
+    message = "\n".join(_terminal_safe(line) for line in lines)
+    if isinstance(data.get("child"), dict):
+        message += "\n" + _search_message(data["child"], scheduled=True)
+    return message
+
+
+def _command_schedules(args: argparse.Namespace) -> int:
+    from grounded_apply.repositories.discovery_http import PublicJobHTTPTransport
+    from grounded_apply.repositories.latex_renderer import LatexResumeRenderer
+    from grounded_apply.services.schedule_policy import validate_schedule_manifest
+    from grounded_apply.services.schedules import ScheduleLeaseActiveError, ScheduleService
+
+    action = args.schedules_command
+    dry_run = bool(getattr(args, "dry_run", False))
+    mutating = action in {"configure", "tick", "pause", "resume", "ack"} and not dry_run
+    manifest = None
+    if action == "configure":
+        manifest = _load_proposal_object(_read_utf8_input(
+            args.spec_file, label="daily schedule specification", max_bytes=1024 * 1024))
+        validate_schedule_manifest(manifest)
+    for name in ("idempotency_key", "schedule_id", "notification_id"):
+        if getattr(args, name, None) is not None:
+            _validated_idempotency_key(getattr(args, name))
+
+    def repository_factory(read_only: bool):
+        return _open_initialized_profile_repository(resolve_runtime_paths(), read_only=read_only)
+
+    service = ScheduleService(repository_factory, PublicJobHTTPTransport(), LatexResumeRenderer())
+    execution_error = None
+    if action == "configure":
+        data = service.configure(manifest, idempotency_key=args.idempotency_key, dry_run=dry_run)
+        message = "Daily schedule specification validated." if dry_run else _schedule_message(data)
+        message += "\nA separate wake-up mechanism must invoke schedules tick; this command installs none."
+    elif action == "list":
+        data = {"schedules": service.list(), "read_only": True, "external_action_taken": False}
+        message = "\n".join(_terminal_safe(f"{item['schedule_id']} [{item['status']}]")
+                            for item in data["schedules"]) or "No daily schedules."
+    elif action == "show":
+        data = service.get(args.schedule_id)
+        message = _schedule_message(data)
+    elif action in {"pause", "resume"}:
+        data = service.set_enabled(args.schedule_id, action == "resume", idempotency_key=args.idempotency_key)
+        message = _schedule_message(data)
+    elif action == "ack":
+        data = service.ack(args.schedule_id, args.notification_id, idempotency_key=args.idempotency_key)
+        message = _schedule_message(data)
+    else:
+        try:
+            data = service.tick(args.schedule_id, dry_run=dry_run)
+        except ScheduleLeaseActiveError:
+            data = {**service.get(args.schedule_id), "stop_reason": "lease_active", "executed": False}
+        except Exception:
+            try:
+                data = service.get(args.schedule_id)
+            except Exception:
+                data = {"schedule_id": args.schedule_id, "review_available": False,
+                        "external_action_taken": False, "application_ready": False}
+            data = {**data, "status": "failed", "stop_reason": "shared_failure", "recovery": _SCHEDULE_RECOVERY}
+            execution_error = {"type": "ScheduleExecutionError", "message": "Daily execution failed. " + _SCHEDULE_RECOVERY}
+        message = _schedule_message(data)
+        if execution_error is not None:
+            message = execution_error["message"] + "\n" + message
+    code = 2 if execution_error is not None else 0
+    if action == "tick" and not dry_run:
+        child = data.get("child") or {}
+        if execution_error is not None or data.get("stop_reason") == "lease_active":
+            code = 2
+        elif data.get("executed"):
+            if (data.get("status") in {"failed", "budget_exhausted", "retry_limit"}
+                or child.get("remaining_count", 0) or child.get("stop_reason")
+                or child.get("coverage_complete") is False):
+                code = 2
+            elif child.get("blockers_count", 0):
+                code = 3
+    try:
+        _emit(args, command="schedules." + action, data=data, message=message, ok=code == 0,
+              error=execution_error)
+    except Exception:
+        if mutating:
+            raise ScheduleOutcomeUnknownError(_SCHEDULE_RECOVERY) from None
+        raise ValueError("Daily schedule output failed") from None
+    return code
+
+
+def _command_searches(args: argparse.Namespace) -> int:
+    from grounded_apply.repositories.discovery_http import PublicJobHTTPTransport
+    from grounded_apply.repositories.latex_renderer import LatexResumeRenderer
+    from grounded_apply.services.searches import SearchLeaseActiveError, SearchService, validate_search_manifest
+
+    action = args.searches_command
+    dry_run = bool(getattr(args, "dry_run", False))
+    mutating = action in {"configure", "run", "resume"} and not dry_run
+    manifest = None
+    if action == "configure":
+        manifest = _load_proposal_object(_read_utf8_input(
+            args.spec_file, label="search specification", max_bytes=4 * 1024 * 1024))
+        validate_search_manifest(manifest)
+        _validated_idempotency_key(args.idempotency_key)
+    if action == "run":
+        _validated_idempotency_key(args.idempotency_key)
+    if getattr(args, "search_id", None) is not None:
+        _validated_idempotency_key(args.search_id)
+    if getattr(args, "run_id", None) is not None:
+        _validated_idempotency_key(args.run_id)
+    if action in {"run", "resume"} and (not 1 <= args.max_items <= 50 or not 1 <= args.max_seconds <= 3600):
+        raise CliInputError("Search invocation budgets require 1–50 items and 1–3600 seconds")
+
+    def repository_factory(read_only: bool):
+        return _open_initialized_profile_repository(resolve_runtime_paths(), read_only=read_only)
+
+    service = SearchService(repository_factory, PublicJobHTTPTransport(), LatexResumeRenderer())
+    execution_error = None
+    if action == "configure":
+        data = service.configure(manifest, idempotency_key=args.idempotency_key, dry_run=dry_run)
+        message = "Search scope validated." if dry_run else f"Search scope saved: {data['search_id']}"
+    elif action == "scopes":
+        data = {"searches": service.list_searches(), "read_only": True, "external_action_taken": False}
+        message = "\n".join(_terminal_safe(item["search_id"]) for item in data["searches"]) or "No saved search scopes."
+    elif action == "list":
+        data = {"runs": service.list(search_id=args.search_id), "read_only": True, "external_action_taken": False}
+        message = "\n".join(_terminal_safe(f"{item['run_id']} [{item['status']}]") for item in data["runs"]) or "No saved search runs."
+    elif action == "show":
+        data = service.get(args.run_id)
+        message = _search_message(data)
+    elif action == "export":
+        from grounded_apply.repositories.review_files import export_search_review
+
+        snapshot = service.export_snapshot(args.run_id)
+        data = export_search_review(snapshot, Path(args.output_dir),
+                                    paths=resolve_runtime_paths(), dry_run=dry_run)
+        message = ("Review folder validated." if dry_run else "Review folder exported: " +
+                   _terminal_safe(str(Path(args.output_dir) / "review.md")))
+        message += ("\nDrafts and blockers still require review. These private copies are outside "
+                    "managed runtime backup and deletion.")
+    else:
+        try:
+            if action == "run":
+                data = service.run(args.search_id, idempotency_key=args.idempotency_key,
+                                   max_items=args.max_items, max_seconds=args.max_seconds)
+            else:
+                data = service.resume(args.run_id, max_items=args.max_items, max_seconds=args.max_seconds)
+        except SearchLeaseActiveError as error:
+            data = {**service.get(error.run_id), "stop_reason": "lease_active"}
+        except Exception as error:
+            run_id = getattr(args, "run_id", None) or getattr(error, "run_id", None)
+            try:
+                data = service.get(run_id) if run_id is not None else {}
+            except Exception:
+                data = {}
+            if not data:
+                data = {"run_id": run_id, "review_available": False,
+                        "external_action_taken": False, "application_ready": False}
+            data = {**data, "status": "failed", "stop_reason": "shared_failure", "recovery": _SEARCH_RECOVERY}
+            execution_error = {"type": "SearchExecutionError", "message": "Search execution failed. " + _SEARCH_RECOVERY}
+        message = _search_message(data)
+        if execution_error is not None:
+            message = execution_error["message"] + "\n" + message
+    code = 0
+    if action in {"run", "resume"}:
+        batch = data.get("batch") or {}
+        if (data.get("remaining_count", 0) or data.get("stop_reason") or data.get("status") == "failed"
+            or data.get("coverage_complete") is False or batch.get("remaining_count", 0)):
+            code = 2
+        elif data.get("blockers_count", batch.get("blockers_count", 0)):
+            code = 3
+    try:
+        _emit(args, command="searches." + action, data=data, message=message, ok=code == 0,
+              error=execution_error)
+    except Exception:
+        if mutating:
+            raise SearchOutcomeUnknownError(_SEARCH_RECOVERY) from None
+        if action == "export" and not dry_run:
+            raise ValueError("Review export output failed. Retry the same run and destination to verify "
+                             "a completed copy. If that destination is incomplete or changed, choose "
+                             "a new destination; existing files are not overwritten.") from None
+        raise ValueError("Search output failed") from None
+    return code
+
+
+def _command_batches(args: argparse.Namespace) -> int:
+    from grounded_apply.repositories.latex_renderer import LatexResumeRenderer
+    from grounded_apply.services.batches import BatchLeaseActiveError, BatchService, validate_batch_manifest
+    from grounded_apply.services.materials import MaterialDependencyError, MaterialService
+
+    action = args.batches_command
+    dry_run = bool(getattr(args, "dry_run", False))
+    mutating = action in {"prepare", "resume"} and not dry_run
+    manifest = None
+    execution_error = None
+    if action == "prepare":
+        manifest = _load_proposal_object(_read_utf8_input(
+            args.spec_file, label="batch specification", max_bytes=4 * 1024 * 1024))
+        validate_batch_manifest(manifest)
+        _validated_idempotency_key(args.idempotency_key)
+    if action in {"prepare", "resume"}:
+        if not 1 <= args.max_items <= 50 or not 1 <= args.max_seconds <= 3600:
+            raise CliInputError("Batch budgets require 1–50 items and 1–3600 seconds")
+    if action in {"resume", "show"}:
+        _validated_idempotency_key(args.batch_id)
+    with _open_initialized_profile_repository(resolve_runtime_paths(), read_only=not mutating) as repository:
+        service = BatchService(repository, MaterialService(repository, LatexResumeRenderer()))
+        if action == "list":
+            data = {"batches": service.list(), "read_only": True, "external_action_taken": False}
+            message = "\n".join(
+                f"{item['batch_id']} [{item['status']}]" for item in data["batches"]
+            ) or "No saved batches."
+        elif action == "show":
+            data = service.get(args.batch_id)
+            message = _batch_message(data)
+        else:
+            if action == "prepare":
+                data = service.create(manifest, idempotency_key=args.idempotency_key, dry_run=dry_run)
+                batch_id = data.get("batch_id")
+            else:
+                batch_id = args.batch_id
+            if not dry_run:
+                try:
+                    data = service.run(batch_id, max_items=args.max_items, max_seconds=args.max_seconds)
+                except BatchLeaseActiveError:
+                    data = {**service.get(batch_id), "stop_reason": "lease_active"}
+                except Exception as error:
+                    # Shared failures stop execution. Only return saved items if
+                    # the normal integrity-validating read can still prove them.
+                    try:
+                        data = service.get(batch_id)
+                    except Exception:
+                        data = {"batch_id": batch_id, "review_available": False,
+                                "external_action_taken": False, "application_ready": False}
+                    data = {**data, "status": "failed", "stop_reason": "shared_failure",
+                            "recovery": _BATCH_RECOVERY}
+                    failure = ("The PDF environment is unavailable; run doctor and check the PDF prerequisites. "
+                               if isinstance(error, MaterialDependencyError)
+                               else "Shared batch preparation failed; saved progress must be checked before reuse. ")
+                    execution_error = {"type": "BatchExecutionError", "message": failure + _BATCH_RECOVERY}
+            message = _batch_message(data)
+            if execution_error is not None:
+                message = execution_error["message"] + "\n" + (
+                    message if data.get("review_available", True)
+                    else f"Batch {batch_id}: validated review is unavailable.")
+    code = 0
+    if action in {"prepare", "resume"}:
+        if dry_run:
+            code = 3 if data.get("blockers_count", data.get("counts", {}).get("blocked", 0)) else 0
+        elif data.get("remaining_count", 0) or data.get("stop_reason") or data.get("status") == "failed":
+            code = 2
+        elif data.get("blockers_count", data.get("counts", {}).get("blocked", 0)):
+            code = 3
+    try:
+        _emit(args, command="batches." + action, data=data, message=message,
+              ok=code == 0, error=execution_error)
+    except Exception:
+        if mutating:
+            raise BatchOutcomeUnknownError(_BATCH_RECOVERY) from None
+        raise ValueError("Batch output failed") from None
+    return code
+
+
 def _command_answers(args: argparse.Namespace) -> int:
     from grounded_apply.services.questionnaires import QuestionnaireService
     with _open_initialized_profile_repository(resolve_runtime_paths(), read_only=True) as repository:
@@ -1187,6 +1577,94 @@ def _command_applications(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_jobs_discover(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+    from grounded_apply.repositories.discovery_http import PublicJobHTTPTransport
+    from grounded_apply.services.discovery import (
+        DiscoveryService, builtin_sources, validate_source_manifest,
+    )
+    from grounded_apply.services.jobs import DiscoveryCapacityError, DiscoveryRecordError, JobService
+
+    if args.preset:
+        sources = builtin_sources(args.preset)
+    else:
+        sources = validate_source_manifest(_load_proposal_object(_read_utf8_input(
+            args.sources_file, label="discovery sources", max_bytes=64 * 1024)))
+    # Validate local storage before contacting sources. Close it before network
+    # work; repeat the full runtime/open checks before any subsequent capture.
+    paths = None
+    if not args.dry_run:
+        paths = resolve_runtime_paths()
+        with _open_initialized_profile_repository(paths, read_only=True):
+            pass
+    report = DiscoveryService(PublicJobHTTPTransport()).discover(
+        sources, title_contains=tuple(args.title_contains), limit_per_source=args.limit_per_source)
+    data = asdict(report)
+    data.update({"schema_version": 1, "dry_run": args.dry_run,
+                 "storage_checked": paths is not None, "external_submission_taken": False,
+                 "content_trust": "untrusted", "captures": [], "capture_blockers": []})
+    storage_error = None
+    if paths is not None:
+        try:
+            with _open_initialized_profile_repository(paths, read_only=False) as repository:
+                service = JobService(repository)
+                for job in report.jobs:
+                    try:
+                        saved = service.capture_discovered(job)
+                    except DiscoveryCapacityError:
+                        storage_error = "capacity_reached"
+                        break
+                    except DiscoveryRecordError:
+                        data["capture_blockers"].append({"provider": job.provider,
+                            "board": job.board, "external_id": job.external_id,
+                            "reason": "snapshot_rejected"})
+                        continue
+                    data["captures"].append({**saved, "provider": job.provider,
+                        "board": job.board, "external_id": job.external_id,
+                        "title": job.title, "location": job.location,
+                        "source_url": job.source_url, "content_sha256": job.content_sha256})
+        except Exception:
+            # The fixed response preserves already reported captures and tells
+            # callers to replay stable identities if a later commit is uncertain.
+            storage_error = "capture_failed_retry_discovery"
+        # Captured snapshots are available through jobs show; avoid repeating an
+        # entire board of job descriptions in the routine private response.
+        data["jobs"] = [{"provider": job.provider, "board": job.board,
+                         "external_id": job.external_id, "title": job.title,
+                         "location": job.location, "source_url": job.source_url,
+                         "content_sha256": job.content_sha256} for job in report.jobs]
+    data["storage_error"] = storage_error
+    data["uncaptured_count"] = 0 if paths is None else len(report.jobs) - len(data["captures"])
+    incomplete = any(source.status != "successful" for source in report.sources)
+    warnings = ["Coverage is limited to configured feeds. Unchecked employers and failed sources may contain other openings."]
+    if incomplete:
+        warnings.append("Coverage is incomplete; inspect each source's status before concluding there are no openings.")
+    if storage_error or data["capture_blockers"]:
+        warnings.append("Some snapshots were not captured. Completed captures remain; repeating discovery reuses unchanged versions.")
+    lines = ["Discovery preview (network reads; no local writes)." if args.dry_run else "Discovery capture results."]
+    for source in report.sources:
+        lines.append(f"{_terminal_safe(source.source_id)}: {source.status}; {source.count} selected")
+        if source.error is not None:
+            lines.append(f"  Reason: {source.error}")
+        if source.careers_url:
+            lines.append(f"  Careers: {_terminal_safe(source.careers_url)}")
+    for job in report.jobs:
+        lines.append(f"{_terminal_safe(job.title)} — {_terminal_safe(job.source_url)}")
+    if paths is not None:
+        lines.append(f"{len(data['captures'])} captured/reused; {data['uncaptured_count']} not captured.")
+    # A nonzero exit preserves the report; partial success is never a clean sync.
+    code = 2 if incomplete or storage_error or data["capture_blockers"] else 0
+    try:
+        _emit(args, command="jobs.discover", data=data, message="\n".join(lines),
+              ok=code == 0, warnings=warnings,
+              error={"type": "IncompleteDiscovery", "message": "Inspect source coverage and capture results."} if code else None)
+    except Exception:
+        if not args.dry_run:
+            raise RuntimeError("Discovery output failed; snapshots may already be saved. Repeat discovery to recover unchanged captures.") from None
+        raise RuntimeError("Discovery preview output failed; no snapshots were saved.") from None
+    return code
+
+
 def _command_jobs(args: argparse.Namespace) -> int:
     from grounded_apply.domain import to_jsonable
     from grounded_apply.services.jobs import JobService, extract_requirements, validate_job_input
@@ -1208,7 +1686,8 @@ def _command_jobs(args: argparse.Namespace) -> int:
         else:
             with repository.read_transaction():
                 if args.jobs_command == "list":
-                    result = {"jobs": [{"job_id": j.id, "source_url": j.source_url, "captured_at": j.captured_at} for j in service.list()]}
+                    result = {"jobs": [{"job_id": j.id, "source_url": j.source_url, "captured_at": j.captured_at,
+                        "capture_method": j.capture_method} for j in service.list()]}
                     message = "\n".join(f"{j['job_id']} {_terminal_safe(j['source_url'])}" for j in result["jobs"]) or "No saved jobs."
                 elif args.jobs_command == "show":
                     job = service.get(args.job_id)
@@ -1404,6 +1883,63 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json_flag(export_parser)
     export_parser.set_defaults(handler=_command_export, command_name="export")
 
+    schedules_parser = commands.add_parser("schedules", help="Configure daily search policy and execute one bounded due occurrence.", allow_abbrev=False)
+    schedule_commands = schedules_parser.add_subparsers(dest="schedules_command", required=True)
+    for name in ("configure", "tick", "show", "list", "pause", "resume", "ack"):
+        item = schedule_commands.add_parser(name, allow_abbrev=False)
+        if name == "configure":
+            item.add_argument("--spec-file", required=True, help="Closed daily schedule JSON file, or - for stdin.")
+        elif name != "list":
+            item.add_argument("--schedule-id", required=True)
+        if name in {"configure", "pause", "resume", "ack"}:
+            item.add_argument("--idempotency-key", required=True)
+        if name in {"configure", "tick"}:
+            item.add_argument("--dry-run", action="store_true")
+        if name == "ack":
+            item.add_argument("--notification-id", required=True)
+        _add_json_flag(item)
+        item.set_defaults(handler=_command_schedules, command_name="schedules." + name)
+
+    searches_parser = commands.add_parser("searches", help="Save a search scope and discover jobs into a draft review queue.", allow_abbrev=False)
+    search_commands = searches_parser.add_subparsers(dest="searches_command", required=True)
+    for name in ("configure", "run", "resume", "show", "list", "scopes", "export"):
+        item = search_commands.add_parser(name, allow_abbrev=False)
+        if name == "configure":
+            item.add_argument("--spec-file", required=True, help="Closed search/preparation JSON file, or - for stdin.")
+            item.add_argument("--idempotency-key", required=True)
+            item.add_argument("--dry-run", action="store_true")
+        elif name == "run":
+            item.add_argument("--search-id", required=True)
+            item.add_argument("--idempotency-key", required=True)
+        elif name in {"resume", "show", "export"}:
+            item.add_argument("--run-id", required=True)
+        elif name == "list":
+            item.add_argument("--search-id")
+        if name in {"run", "resume"}:
+            item.add_argument("--max-items", type=int, default=20)
+            item.add_argument("--max-seconds", type=int, default=900)
+        if name == "export":
+            item.add_argument("--output-dir", required=True, help="New absolute private directory outside runtime storage.")
+            item.add_argument("--dry-run", action="store_true", help="Validate the full review copy without writing files.")
+        _add_json_flag(item)
+        item.set_defaults(handler=_command_searches, command_name="searches." + name)
+
+    batches_parser = commands.add_parser("batches", help="Prepare and resume a queue of draft application packages.", allow_abbrev=False)
+    batch_commands = batches_parser.add_subparsers(dest="batches_command", required=True)
+    for name in ("prepare", "resume", "show", "list"):
+        item = batch_commands.add_parser(name, allow_abbrev=False)
+        if name == "prepare":
+            item.add_argument("--spec-file", required=True, help="Versioned batch specification; use - for stdin.")
+            item.add_argument("--idempotency-key", required=True)
+            item.add_argument("--dry-run", action="store_true", help="Read-only evidence preview; no rendering or writes.")
+        if name in {"resume", "show"}:
+            item.add_argument("--batch-id", required=True)
+        if name in {"prepare", "resume"}:
+            item.add_argument("--max-items", type=int, default=20)
+            item.add_argument("--max-seconds", type=int, default=900)
+        _add_json_flag(item)
+        item.set_defaults(handler=_command_batches, command_name="batches." + name)
+
     materials_parser = commands.add_parser("materials", help="Build, inspect, approve, and export traceable resumes.", allow_abbrev=False)
     material_commands = materials_parser.add_subparsers(dest="materials_command", required=True)
     for name in ("build", "list", "show", "approve", "export"):
@@ -1454,8 +1990,19 @@ def build_parser() -> argparse.ArgumentParser:
         _add_json_flag(item)
         item.set_defaults(handler=_command_applications, command_name="applications." + name)
 
-    jobs_parser = commands.add_parser("jobs", help="Save job text and inspect evidence for its requirements.", allow_abbrev=False)
+    jobs_parser = commands.add_parser("jobs", help="Discover public jobs, save snapshots, and inspect evidence.", allow_abbrev=False)
     job_commands = jobs_parser.add_subparsers(dest="jobs_command", required=True)
+    discover = job_commands.add_parser("discover", help="Read configured public ATS feeds and capture immutable jobs.", allow_abbrev=False)
+    discovery_input = discover.add_mutually_exclusive_group(required=True)
+    discovery_input.add_argument("--sources-file", help="Versioned source manifest; use - for stdin.")
+    discovery_input.add_argument("--preset", choices=("major-tech",), help="Public employer catalog; unsupported career sites remain visible gaps.")
+    discover.add_argument("--title-contains", action="append", default=[], metavar="TERM",
+                          help="Optional title substring filter (OR); repeat for alternatives. This is not a fit score.")
+    discover.add_argument("--limit-per-source", type=int, default=100,
+                          help="Maximum selected jobs per source (1–1000; default 100); capped results report partial coverage.")
+    discover.add_argument("--dry-run", action="store_true", help="Fetch and preview without opening or writing profile storage.")
+    _add_json_flag(discover)
+    discover.set_defaults(handler=_command_jobs_discover, command_name="jobs.discover")
     for name in ("add", "list", "show", "assess"):
         item = job_commands.add_parser(name, allow_abbrev=False)
         if name == "add":
@@ -1585,11 +2132,14 @@ def build_parser() -> argparse.ArgumentParser:
 def _command_name_from_argv(argv: Sequence[str]) -> str:
     if not argv:
         return "unknown"
-    for root, names in (("materials", {"build", "list", "show", "approve", "export"}),
+    for root, names in (("schedules", {"configure", "tick", "show", "list", "pause", "resume", "ack"}),
+                        ("searches", {"configure", "run", "resume", "show", "list", "scopes", "export"}),
+                        ("batches", {"prepare", "resume", "show", "list"}),
+                        ("materials", {"build", "list", "show", "approve", "export"}),
                         ("applications", {"add", "list", "show", "transition"})):
         if argv[0] == root and len(argv) > 1 and argv[1] in names:
             return root + "." + argv[1]
-    if argv[0] == "jobs" and len(argv) > 1 and argv[1] in {"add", "list", "show", "assess"}:
+    if argv[0] == "jobs" and len(argv) > 1 and argv[1] in {"add", "list", "show", "assess", "discover"}:
         return "jobs." + argv[1]
     if argv[0] == "profile" and len(argv) > 1:
         profile_command = argv[1]
@@ -1631,7 +2181,7 @@ def _main(
                 message="Invalid command arguments.",
                 ok=False,
             )
-        elif command_name in {"profile.decide", "profile.retire", "backup", "restore", "delete"} or command_name.startswith(("materials.", "applications.", "jobs.")):
+        elif command_name in {"profile.decide", "profile.retire", "backup", "restore", "delete"} or command_name.startswith(("schedules.", "searches.", "batches.", "materials.", "applications.", "jobs.")):
             print(
                 "Error: Invalid command arguments. No external action was taken.",
                 file=sys.stderr,
@@ -1643,7 +2193,31 @@ def _main(
     try:
         return handler(args)
     except KeyboardInterrupt:
-        if getattr(args, "command_name", None) == "delete":
+        if getattr(args, "command_name", None) in {"schedules.configure", "schedules.tick", "schedules.pause", "schedules.resume", "schedules.ack"}:
+            if not getattr(args, "dry_run", False):
+                if diagnostics is not None:
+                    diagnostics.require_schedule_recovery()
+                print(f"Interrupted. {_SCHEDULE_RECOVERY}", file=sys.stderr)
+            else:
+                print("Interrupted. Preview saved no schedule changes.", file=sys.stderr)
+        elif getattr(args, "command_name", None) in {"searches.configure", "searches.run", "searches.resume"}:
+            if not getattr(args, "dry_run", False):
+                if diagnostics is not None:
+                    diagnostics.require_search_recovery()
+                print(f"Interrupted. {_SEARCH_RECOVERY}", file=sys.stderr)
+            else:
+                print("Interrupted. No search scope was saved.", file=sys.stderr)
+        elif getattr(args, "command_name", None) in {"batches.prepare", "batches.resume"}:
+            if not getattr(args, "dry_run", False):
+                if diagnostics is not None:
+                    diagnostics.require_batch_recovery()
+                print(f"Interrupted. {_BATCH_RECOVERY}", file=sys.stderr)
+            else:
+                print("Interrupted. No batch was saved.", file=sys.stderr)
+        elif getattr(args, "command_name", None) == "jobs.discover":
+            print("Interrupted. No snapshots were saved." if getattr(args, "dry_run", False)
+                  else "Interrupted. Snapshots may already be saved. Repeat discovery to recover unchanged captures.", file=sys.stderr)
+        elif getattr(args, "command_name", None) == "delete":
             from grounded_apply.services.deletion import RECOVERY
             if getattr(args, "confirm", False):
                 if diagnostics is not None:
@@ -1684,6 +2258,12 @@ def _main(
             diagnostics.require_deletion_recovery()
         if isinstance(error, BackupOutcomeUnknownError) and diagnostics is not None:
             diagnostics.require_backup_recovery()
+        if isinstance(error, BatchOutcomeUnknownError) and diagnostics is not None:
+            diagnostics.require_batch_recovery()
+        if isinstance(error, SearchOutcomeUnknownError) and diagnostics is not None:
+            diagnostics.require_search_recovery()
+        if isinstance(error, ScheduleOutcomeUnknownError) and diagnostics is not None:
+            diagnostics.require_schedule_recovery()
         if isinstance(error, PostCommitOutputError):
             if diagnostics is not None:
                 diagnostics.require_decision_recovery()

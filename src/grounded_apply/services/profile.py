@@ -85,6 +85,32 @@ _PROFILE_IMPORT_ARTIFACT_METADATA_BASE: Mapping[str, JsonValue] = MappingProxyTy
 )
 
 
+def resolve_selected_claim(
+    claim_id: str, claims: tuple[Claim, ...], evidence: tuple[Evidence, ...],
+    policy: ClaimUsePolicy,
+) -> ResolutionOutcome:
+    """Resolve a selection from a caller-owned, freshly validated snapshot.
+
+    This pure helper does not validate stored provenance or retain authority.
+    Independent skills and career bullets are multiple facts, not mutually
+    exclusive values. Single-valued fields retain whole-subject resolution.
+    Explicitly contradicted same-subject records always block selection.
+    """
+    from grounded_apply.domain import Resolved
+    selected = next((c for c in claims if c.id == claim_id), None)
+    if selected is None:
+        return resolve_claims((), intent="selected_claim", policy=policy)
+    own = resolve_claims((selected,), intent=selected.claim_type, policy=policy, evidence=evidence)
+    if not isinstance(own, Resolved):
+        return own
+    singular = {"candidate_name", "contact_email", "contact_phone", "contact_location",
+                "employment_title", "employment_dates"}
+    peers = tuple(c for c in claims if c.claim_type == selected.claim_type
+                  and (c.subject_type, c.subject_id) == (selected.subject_type, selected.subject_id)
+                  and (c.id == selected.id or selected.claim_type in singular or c.status == ClaimStatus.CONTRADICTED))
+    return resolve_claims(peers, intent=selected.claim_type, policy=policy, evidence=evidence)
+
+
 def _profile_import_artifact_metadata(
     source_codepoint_size: int,
 ) -> dict[str, JsonValue]:
@@ -2588,26 +2614,25 @@ class ProfileService:
         )
 
     def packet_for_claim(self, claim_id: str, *, policy: ClaimUsePolicy) -> ResolutionOutcome:
-        """Resolve a selected factual unit while preserving subject conflicts.
+        return self.packets_for_claims((claim_id,), policy=policy)[0]
 
-        Independent skills and career bullets are multiple facts, not mutually
-        exclusive values. Single-valued fields retain whole-subject resolution.
-        Explicitly contradicted same-subject records always block selection.
+    def packets_for_claims(
+        self, claim_ids: tuple[str, ...], *, policy: ClaimUsePolicy,
+    ) -> tuple[ResolutionOutcome, ...]:
+        """Resolve selected facts from one freshly validated read snapshot.
+
+        Nothing is cached on the service or returned as reusable authority. Each
+        invocation revalidates provenance and effective retirements, including
+        when called again after rendering or a mutation.
         """
-        from grounded_apply.domain import Resolved
-        claims, evidence = self.validated_profile()
-        selected = next((c for c in claims if c.id == claim_id), None)
-        if selected is None:
-            return resolve_claims((), intent="selected_claim", policy=policy)
-        own = resolve_claims((selected,), intent=selected.claim_type, policy=policy, evidence=evidence)
-        if not isinstance(own, Resolved):
-            return own
-        singular = {"candidate_name", "contact_email", "contact_phone", "contact_location",
-                    "employment_title", "employment_dates"}
-        peers = tuple(c for c in claims if c.claim_type == selected.claim_type
-                      and (c.subject_type, c.subject_id) == (selected.subject_type, selected.subject_id)
-                      and (c.id == selected.id or selected.claim_type in singular or c.status == ClaimStatus.CONTRADICTED))
-        return resolve_claims(peers, intent=selected.claim_type, policy=policy, evidence=evidence)
+        if (type(claim_ids) is not tuple or len(claim_ids) > 500
+            or any(type(value) is not str or not _IDEMPOTENCY_KEY_PATTERN.fullmatch(value)
+                   for value in claim_ids)):
+            raise ValueError("Select at most five hundred opaque claim IDs")
+        with self._repository.read_transaction():
+            claims, evidence = self.validated_profile()
+            return tuple(resolve_selected_claim(claim_id, claims, evidence, policy)
+                         for claim_id in claim_ids)
 
     def validated_profile(
         self, *, apply_retirements: bool = True,

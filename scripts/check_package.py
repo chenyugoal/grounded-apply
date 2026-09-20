@@ -73,8 +73,28 @@ def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | Non
                 "grounded_apply/migrations/002_profile_import_review_items.sql",
                 "grounded_apply/migrations/003_claim_retirements.sql",
                 "grounded_apply/migrations/004_application_pilot.sql",
+                "grounded_apply/migrations/005_preparation_batches.sql",
+                "grounded_apply/migrations/006_saved_searches.sql",
+                "grounded_apply/migrations/007_daily_schedules.sql",
                 "grounded_apply/diagnostics.py",
                 "grounded_apply/services/backup.py",
+                "grounded_apply/services/discovery.py",
+                "grounded_apply/services/batches.py",
+                "grounded_apply/services/searches.py",
+                "grounded_apply/services/review_exports.py",
+                "grounded_apply/repositories/review_files.py",
+                "grounded_apply/services/search_policy.py",
+                "grounded_apply/services/schedules.py",
+                "grounded_apply/services/schedule_policy.py",
+                "grounded_apply/services/schedule_notifications.py",
+                "grounded_apply/services/source_windows.py",
+                "grounded_apply/services/search_filters.py",
+                "grounded_apply/services/source_rotation.py",
+                "grounded_apply/services/storage_capacity.py",
+                "grounded_apply/services/storage_limits.py",
+                "grounded_apply/repositories/netflix_source.py",
+                "grounded_apply/repositories/discovery_http.py",
+                "grounded_apply/repositories/job_sources.py",
                 "grounded_apply/repositories/backup_crypto.py",
                 "grounded_apply/repositories/backup_files.py",
                 "grounded_apply/repositories/snapshots.py",
@@ -117,7 +137,9 @@ def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | Non
             raise RuntimeError("Installed CLI version disagrees with package metadata")
         for args in (
             [], ["profile", "import"], ["profile", "review"], ["profile", "decide"],
-            ["backup"], ["restore"], ["brief"],
+            ["backup"], ["restore"], ["brief"], ["jobs", "discover"], ["batches", "prepare"],
+            ["searches", "configure"], ["searches", "run"], ["searches", "export"],
+            ["schedules", "configure"], ["schedules", "tick"],
         ):
             run([str(command), *args, "--help"], cwd=workspace, environ=environment)
 
@@ -139,6 +161,37 @@ def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | Non
         first_init = cli("profile", "init")
         if cli("profile", "init")["schema_version"] != first_init["schema_version"]:
             raise RuntimeError("Initialization was not idempotent")
+        discovery_smoke = r'''
+import io, json
+from contextlib import redirect_stdout
+from unittest.mock import patch
+from grounded_apply.cli import main
+manifest = {"schema_version": 1, "sources": [
+    {"id": "fictional-source", "provider": "greenhouse", "board": "example"}]}
+payload = json.dumps({"jobs": [{"id": 1, "title": "Fictional Engineer",
+    "location": {"name": "Fictional City"}, "content": "<h2>Requirements</h2><p>Python.</p>"}],
+    "meta": {"total": 1}}).encode()
+def fetch(self, url, *, max_bytes, timeout):
+    assert url == "https://boards-api.greenhouse.io/v1/boards/example/jobs?content=true"
+    return payload
+results = []
+for extra in (["--dry-run"], [], []):
+    output = io.StringIO()
+    with patch("grounded_apply.repositories.discovery_http.PublicJobHTTPTransport.get", fetch), \
+         patch("sys.stdin", io.StringIO(json.dumps(manifest))), redirect_stdout(output):
+        code = main(["jobs", "discover", "--sources-file", "-", *extra, "--json"])
+    result = json.loads(output.getvalue())
+    assert code == 0 and result["ok"], result
+    results.append(result["data"])
+assert not results[0]["storage_checked"] and results[0]["captures"] == []
+first, retry = results[1]["captures"][0], results[2]["captures"][0]
+assert first["job_id"] == retry["job_id"] and retry["replayed"]
+print(json.dumps({"job_id": first["job_id"]}))
+'''
+        discovered = json.loads(run([str(executable), "-I", "-c", discovery_smoke],
+                                    cwd=workspace, environ=environment))
+        if cli("jobs", "show", "--job-id", discovered["job_id"])["capture_method"] != "public_ats_feed":
+            raise RuntimeError("Installed discovery capture lost source provenance")
         fixtures = REPOSITORY / "tests" / "fixtures" / "synthetic_profile"
         import_args = (
             "profile", "import", "--source-file", str(fixtures / "resume.txt"),
@@ -198,11 +251,37 @@ def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | Non
                 raise RuntimeError("Restored profile lost import or decision provenance")
             if len(cli("profile", "review")["items"]) != len(review["items"]) - 1:
                 raise RuntimeError("Restored review queue changed")
+            if cli("jobs", "show", "--job-id", discovered["job_id"])["capture_method"] != "public_ats_feed":
+                raise RuntimeError("Restored discovery capture lost source provenance")
         if pilot_wheelhouse is not None:
             from check_pilot import check_pilot
+            from check_batch import check_batch
+            from check_search import check_search
+            from check_schedule import check_schedule
+            from check_source_window import check_source_window
+            from check_search_filters import check_search_filters
+            from check_source_rotation import check_source_rotation
             pilot = workspace / "pilot"
             pilot.mkdir(mode=0o700)
             check_pilot([str(command)], pilot)
+            batch_workspace = workspace / "batch-pilot"
+            batch_workspace.mkdir(mode=0o700)
+            check_batch([str(command)], batch_workspace, include_backup=True)
+            search_workspace = workspace / "search-pilot"
+            search_workspace.mkdir(mode=0o700)
+            check_search([str(command)], search_workspace, include_backup=True)
+            schedule_workspace = workspace / "schedule-pilot"
+            schedule_workspace.mkdir(mode=0o700)
+            check_schedule([str(command)], schedule_workspace, include_backup=True)
+            window_workspace = workspace / "source-window-pilot"
+            window_workspace.mkdir(mode=0o700)
+            check_source_window([str(command)], window_workspace, include_backup=True)
+            filter_workspace = workspace / "search-filter-pilot"
+            filter_workspace.mkdir(mode=0o700)
+            check_search_filters([str(command)], filter_workspace, include_backup=True)
+            rotation_workspace = workspace / "source-rotation-pilot"
+            rotation_workspace.mkdir(mode=0o700)
+            check_source_rotation([str(command)], rotation_workspace, include_backup=True)
     print("PASS — source archive, wheel contents, isolated install, CLI, migrations, and synthetic workflow")
 
 

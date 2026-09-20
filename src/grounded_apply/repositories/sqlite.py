@@ -168,13 +168,16 @@ class SQLiteRepository:
         migrations.
         """
 
+        from grounded_apply.services.backup import MAX_SNAPSHOT_BYTES
+
         self._ensure_open()
         self._validate_storage()
         migrations_dir = self._migrations_dir or default_migrations_directory()
         version = (
             validate_schema(self._connection, migrations_dir)
             if self._existing_only
-            else initialize_schema(self._connection, migrations_dir)
+            else initialize_schema(self._connection, migrations_dir,
+                                   max_database_bytes=MAX_SNAPSHOT_BYTES)
         )
         if version != LATEST_SCHEMA_VERSION:
             raise SchemaError(
@@ -1415,7 +1418,7 @@ class SQLiteRepository:
         if current is None:
             raise RecordNotFoundError(f"Workflow run does not exist: {run_id}")
 
-        now = utc_now()
+        now = max(utc_now(), current["updated_at"], finished_at or current["created_at"])
         values: dict[str, object] = {"updated_at": now}
         if status is not None:
             values["status"] = status
@@ -1470,6 +1473,18 @@ class SQLiteRepository:
     def list_job_snapshots(self) -> list[Record]:
         self._require_initialized()
         return [_row_record(r) for r in self._connection.execute("SELECT * FROM job_snapshots ORDER BY captured_at, id")]
+
+    def database_size_bytes(self) -> int:
+        """Return allocated SQLite pages, including writes in the current transaction.
+
+        Call inside a mutation transaction to roll back additions that exceed a
+        storage budget. This does not shrink existing storage or enforce a global
+        limit on unrelated application operations.
+        """
+        self._require_initialized()
+        pages = self._connection.execute("PRAGMA page_count").fetchone()[0]
+        size = self._connection.execute("PRAGMA page_size").fetchone()[0]
+        return int(pages) * int(size)
 
     def list_job_requirements(self, job_id: str) -> list[Record]:
         self._require_initialized()
@@ -1553,6 +1568,233 @@ class SQLiteRepository:
         self._require_initialized()
         tables = ("claims", "evidence", "claim_retirements", "job_snapshots", "material_versions", "applications", "application_events")
         return {table: int(self._connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]) for table in tables}
+
+    def insert_preparation_batch(self, *, batch_id: str, manifest: object,
+                                 manifest_sha256: str, created_at: str,
+                                 workflow_run_id: str) -> None:
+        self._insert("preparation_batches", {"id": batch_id, "manifest_json": _json_text(manifest),
+            "manifest_sha256": manifest_sha256, "created_at": created_at,
+            "workflow_run_id": workflow_run_id})
+        self._connection.execute("INSERT INTO preparation_batch_leases (batch_id) VALUES (?)", (batch_id,))
+
+    def insert_saved_search(self, *, search_id: str, manifest: object, manifest_sha256: str,
+                            created_at: str, workflow_run_id: str) -> None:
+        self._insert("saved_searches", {"id": search_id, "manifest_json": _json_text(manifest),
+            "manifest_sha256": manifest_sha256, "created_at": created_at, "workflow_run_id": workflow_run_id})
+        self._connection.execute("INSERT INTO search_leases (search_id) VALUES (?)", (search_id,))
+
+    def insert_daily_schedule(self, *, schedule_id: str, search_id: str, manifest: object,
+                               manifest_sha256: str, search_manifest_sha256: str, created_at: str, workflow_run_id: str) -> None:
+        self._insert("daily_schedules", {"id": schedule_id, "search_id": search_id,
+            "manifest_json": _json_text(manifest), "manifest_sha256": manifest_sha256,
+            "search_manifest_sha256": search_manifest_sha256, "created_at": created_at, "workflow_run_id": workflow_run_id})
+        self._connection.execute("INSERT INTO schedule_leases (schedule_id) VALUES (?)", (schedule_id,))
+
+    def get_daily_schedule(self, schedule_id: str) -> Record | None:
+        return self._get_by_id("daily_schedules", schedule_id)
+
+    def list_daily_schedules(self) -> list[Record]:
+        return self._list("daily_schedules", filters={}, order_by="created_at, id", limit=None, offset=0)
+
+    def insert_schedule_occurrence(self, *, occurrence_id: str, schedule_id: str, local_date: str,
+                                    due_at: str, created_at: str, record_sha256: str) -> None:
+        self._insert("schedule_occurrences", {"id": occurrence_id, "schedule_id": schedule_id, "local_date": local_date,
+            "due_at": due_at, "created_at": created_at, "record_sha256": record_sha256})
+
+    def get_schedule_occurrence(self, occurrence_id: str) -> Record | None:
+        return self._get_by_id("schedule_occurrences", occurrence_id)
+
+    def list_schedule_occurrences(self, schedule_id: str) -> list[Record]:
+        return self._list("schedule_occurrences", filters={"schedule_id": schedule_id}, order_by="local_date, id", limit=None, offset=0)
+
+    def insert_schedule_event(self, *, event_id: str, schedule_id: str, position: int, at: str, action: str,
+                               state: object, workflow_run_id: str | None, previous_sha256: str | None, event_sha256: str) -> None:
+        self._insert("schedule_events", {"id": event_id, "schedule_id": schedule_id, "position": position, "at": at,
+            "action": action, "state_json": _json_text(state), "workflow_run_id": workflow_run_id,
+            "previous_sha256": previous_sha256, "event_sha256": event_sha256})
+
+    def list_schedule_events(self, schedule_id: str) -> list[Record]:
+        return self._list("schedule_events", filters={"schedule_id": schedule_id}, order_by="position", limit=None, offset=0)
+
+    def insert_occurrence_event(self, *, event_id: str, occurrence_id: str, position: int, at: str, action: str,
+                                 state: object, previous_sha256: str | None, event_sha256: str) -> None:
+        self._insert("occurrence_events", {"id": event_id, "occurrence_id": occurrence_id, "position": position,
+            "at": at, "action": action, "state_json": _json_text(state), "previous_sha256": previous_sha256, "event_sha256": event_sha256})
+
+    def list_occurrence_events(self, occurrence_id: str) -> list[Record]:
+        return self._list("occurrence_events", filters={"occurrence_id": occurrence_id}, order_by="position", limit=None, offset=0)
+
+    def get_schedule_lease(self, schedule_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM schedule_leases WHERE schedule_id = ?", (schedule_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def acquire_schedule_lease(self, schedule_id: str, *, occurrence_id: str, owner: str,
+                                 expected_epoch: int, now: str, expires_at: str) -> int | None:
+        self._require_initialized()
+        changed = self._connection.execute("""UPDATE schedule_leases SET occurrence_id = ?, owner = ?, expires_at = ?, epoch = epoch + 1
+            WHERE schedule_id = ? AND epoch = ? AND (owner IS NULL OR expires_at <= ?)""",
+            (occurrence_id, owner, expires_at, schedule_id, expected_epoch, now)).rowcount
+        return expected_epoch + 1 if changed == 1 else None
+
+    def revoke_schedule_lease(self, schedule_id: str) -> None:
+        """Fence an interrupted owner even if the schedule is immediately enabled again."""
+        self._require_initialized()
+        self._connection.execute("""UPDATE schedule_leases SET occurrence_id = NULL, owner = NULL,
+            expires_at = NULL, epoch = epoch + 1 WHERE schedule_id = ?""", (schedule_id,))
+
+    def release_schedule_lease(self, schedule_id: str, *, occurrence_id: str, owner: str, epoch: int) -> bool:
+        self._require_initialized()
+        return self._connection.execute("""UPDATE schedule_leases SET occurrence_id = NULL, owner = NULL, expires_at = NULL
+            WHERE schedule_id = ? AND occurrence_id = ? AND owner = ? AND epoch = ?""",
+            (schedule_id, occurrence_id, owner, epoch)).rowcount == 1
+
+    def insert_scheduled_search_link(self, run_id: str, occurrence_id: str) -> None:
+        self._require_initialized()
+        self._connection.execute("INSERT INTO scheduled_search_links (run_id, occurrence_id) VALUES (?, ?)", (run_id, occurrence_id))
+
+    def get_scheduled_search_link(self, run_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM scheduled_search_links WHERE run_id = ?", (run_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def get_occurrence_search_link(self, occurrence_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM scheduled_search_links WHERE occurrence_id = ?", (occurrence_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def insert_schedule_notification(self, *, notification_id: str, schedule_id: str, occurrence_id: str,
+                                       created_at: str, delta: object, summary_sha256: str,
+                                       previous_summary_sha256: str, notification_sha256: str) -> None:
+        self._insert("schedule_notifications", {"id": notification_id, "schedule_id": schedule_id,
+            "occurrence_id": occurrence_id, "created_at": created_at, "delta_json": _json_text(delta),
+            "summary_sha256": summary_sha256, "previous_summary_sha256": previous_summary_sha256,
+            "notification_sha256": notification_sha256})
+
+    def get_schedule_notification(self, notification_id: str) -> Record | None:
+        return self._get_by_id("schedule_notifications", notification_id)
+
+    def list_schedule_notifications(self, schedule_id: str) -> list[Record]:
+        return self._list("schedule_notifications", filters={"schedule_id": schedule_id}, order_by="created_at, id", limit=None, offset=0)
+
+    def insert_schedule_notification_ack(self, notification_id: str, acknowledged_at: str, workflow_run_id: str) -> None:
+        self._require_initialized()
+        self._connection.execute("INSERT INTO schedule_notification_acks VALUES (?, ?, ?)", (notification_id, acknowledged_at, workflow_run_id))
+
+    def get_schedule_notification_ack(self, notification_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM schedule_notification_acks WHERE notification_id = ?", (notification_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def get_saved_search(self, search_id: str) -> Record | None:
+        return self._get_by_id("saved_searches", search_id)
+
+    def list_saved_searches(self) -> list[Record]:
+        return self._list("saved_searches", filters={}, order_by="created_at, id", limit=None, offset=0)
+
+    def insert_search_run(self, *, run_id: str, search_id: str, created_at: str, workflow_run_id: str) -> None:
+        self._insert("search_runs", {"id": run_id, "search_id": search_id,
+            "created_at": created_at, "workflow_run_id": workflow_run_id})
+
+    def get_search_run(self, run_id: str) -> Record | None:
+        return self._get_by_id("search_runs", run_id)
+
+    def list_search_runs(self, search_id: str | None = None) -> list[Record]:
+        return self._list("search_runs", filters={} if search_id is None else {"search_id": search_id},
+            order_by="created_at, id", limit=None, offset=0)
+
+    def insert_search_event(self, *, event_id: str, run_id: str, position: int, at: str, action: str,
+                             state: object, previous_sha256: str | None, event_sha256: str) -> None:
+        self._insert("search_run_events", {"id": event_id, "run_id": run_id, "position": position,
+            "at": at, "action": action, "state_json": _json_text(state),
+            "previous_sha256": previous_sha256, "event_sha256": event_sha256})
+
+    def list_search_events(self, run_id: str) -> list[Record]:
+        return self._list("search_run_events", filters={"run_id": run_id}, order_by="position", limit=None, offset=0)
+
+    def get_search_lease(self, search_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM search_leases WHERE search_id = ?", (search_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def acquire_search_lease(self, search_id: str, *, run_id: str, expected_epoch: int,
+                              owner: str, now: str, expires_at: str) -> int | None:
+        self._require_initialized()
+        changed = self._connection.execute("""UPDATE search_leases SET run_id = ?, owner = ?, expires_at = ?, epoch = epoch + 1
+            WHERE search_id = ? AND epoch = ? AND (owner IS NULL OR expires_at <= ?)""",
+            (run_id, owner, expires_at, search_id, expected_epoch, now)).rowcount
+        return expected_epoch + 1 if changed == 1 else None
+
+    def release_search_lease(self, search_id: str, *, run_id: str, owner: str, epoch: int) -> bool:
+        self._require_initialized()
+        return self._connection.execute("""UPDATE search_leases SET run_id = NULL, owner = NULL, expires_at = NULL
+            WHERE search_id = ? AND run_id = ? AND owner = ? AND epoch = ?""",
+            (search_id, run_id, owner, epoch)).rowcount == 1
+
+    def insert_search_batch_link(self, batch_id: str, run_id: str) -> None:
+        self._require_initialized()
+        self._connection.execute("INSERT INTO search_batch_links (batch_id, run_id) VALUES (?, ?)", (batch_id, run_id))
+
+    def get_search_batch_link(self, batch_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM search_batch_links WHERE batch_id = ?", (batch_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def get_search_run_batch_link(self, run_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM search_batch_links WHERE run_id = ?", (run_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def get_preparation_batch(self, batch_id: str) -> Record | None:
+        return self._get_by_id("preparation_batches", batch_id)
+
+    def list_preparation_batches(self) -> list[Record]:
+        return self._list("preparation_batches", filters={}, order_by="created_at, id", limit=None, offset=0)
+
+    def insert_preparation_item(self, *, item_id: str, batch_id: str, position: int,
+                                job_id: str, spec: object, spec_sha256: str) -> None:
+        self._insert("preparation_batch_items", {"id": item_id, "batch_id": batch_id,
+            "position": position, "job_id": job_id, "spec_json": _json_text(spec), "spec_sha256": spec_sha256})
+
+    def list_preparation_items(self, batch_id: str) -> list[Record]:
+        return self._list("preparation_batch_items", filters={"batch_id": batch_id},
+            order_by="position", limit=None, offset=0)
+
+    def insert_preparation_event(self, *, event_id: str, item_id: str, position: int,
+                                 at: str, state: object, previous_sha256: str | None,
+                                 event_sha256: str) -> None:
+        self._insert("preparation_batch_events", {"id": event_id, "item_id": item_id,
+            "position": position, "at": at, "state_json": _json_text(state),
+            "previous_sha256": previous_sha256, "event_sha256": event_sha256})
+
+    def list_preparation_events(self, item_id: str) -> list[Record]:
+        return self._list("preparation_batch_events", filters={"item_id": item_id},
+            order_by="position", limit=None, offset=0)
+
+    def get_preparation_lease(self, batch_id: str) -> Record | None:
+        self._require_initialized()
+        row = self._connection.execute("SELECT * FROM preparation_batch_leases WHERE batch_id = ?", (batch_id,)).fetchone()
+        return None if row is None else _row_record(row)
+
+    def acquire_preparation_lease(self, batch_id: str, *, expected_epoch: int,
+                                   owner: str, now: str, expires_at: str) -> int | None:
+        """Compare-and-swap a validated lease; call inside a short transaction."""
+        self._require_initialized()
+        changed = self._connection.execute("""UPDATE preparation_batch_leases
+            SET owner = ?, expires_at = ?, epoch = epoch + 1, stop_reason = NULL
+            WHERE batch_id = ? AND epoch = ? AND (owner IS NULL OR expires_at <= ?)""",
+            (owner, expires_at, batch_id, expected_epoch, now)).rowcount
+        return expected_epoch + 1 if changed == 1 else None
+
+    def release_preparation_lease(self, batch_id: str, *, owner: str, epoch: int,
+                                  stop_reason: str | None) -> bool:
+        """Only the current owner may finish its invocation or clear its lease."""
+        self._require_initialized()
+        changed = self._connection.execute("""UPDATE preparation_batch_leases
+            SET owner = NULL, expires_at = NULL, stop_reason = ?
+            WHERE batch_id = ? AND owner = ? AND epoch = ?""",
+            (stop_reason, batch_id, owner, epoch)).rowcount
+        return changed == 1
 
     @contextmanager
     def read_transaction(self) -> Iterator[Self]:

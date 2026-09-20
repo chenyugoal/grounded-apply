@@ -2,6 +2,8 @@
 
 This guide describes the foundation and local application pilot. It separates
 commands that work now from the target toolchain described in the product design.
+The [daily quickstart](DAILY_QUICKSTART.md) describes user setup and review without
+requiring command syntax; this guide owns the executable verification matrix.
 
 ## Prerequisites
 
@@ -32,7 +34,7 @@ assumed. No dependencies are installed by the launcher.
 |---|---|---|
 | Full repository gate | `./scripts/check` | Supported now |
 | CLI help | `./scripts/gapply --help`; `./scripts/gapply profile decide --help` | Supported now |
-| Environment/path diagnostics | `./scripts/gapply doctor --json` | Supported now |
+| Environment/path diagnostics | `./scripts/gapply doctor --json` | Read-only schema/path checks and database file headroom; advisory at 90% of the snapshot limit, unhealthy above it; no backup-validity or next-write guarantee |
 | Search resumption | `./scripts/gapply brief [--job-id ID] [--follow-up-days 7] [--json]` | Read-only validated snapshot; stage-based next actions, no scheduling or messages |
 | Content-free command event stream | `./scripts/gapply --log-events doctor --json` | Supported; opt-in JSONL on stderr, private response on stdout |
 | Structured profile proposal import | `./scripts/gapply profile import --source-file FILE --proposals-file FILE --idempotency-key KEY [--dry-run] [--json]` | Supported |
@@ -50,6 +52,16 @@ assumed. No dependencies are installed by the launcher.
 | Current verified projection | `./scripts/gapply profile show [--json]` | Read-only; includes effective retirements |
 | Claim withdrawal/replacement | `./scripts/gapply profile retire --claim-id ID [--replacement-claim-id ID] --actor-id ACTOR --idempotency-key KEY [--preview-token TOKEN --confirm] [--json]` | Audited preview/confirmation |
 | Job capture | `./scripts/gapply jobs add --url URL --source-file FILE --idempotency-key KEY [--dry-run] [--json]` | User-supplied UTF-8 snapshot, no fetch |
+| Public job discovery | `./scripts/gapply jobs discover (--sources-file FILE\|--preset major-tech) [--title-contains TERM] [--limit-per-source 100] [--dry-run] [--json]` | Bounded Greenhouse/Ashby/Lever and Netflix reads; dry-run fetches without storage, otherwise validated idempotent capture; incomplete coverage returns exit 2 with results |
+| Batch preparation | `./scripts/gapply batches prepare --spec-file FILE --idempotency-key KEY [--dry-run] [--max-items 20] [--max-seconds 900] [--json]` | Closed saved-job specification, shared evidence choices, durable per-item progress and isolated blockers |
+| Batch recovery/review | `./scripts/gapply batches resume --batch-id ID`; `./scripts/gapply batches show --batch-id ID`; `./scripts/gapply batches list` | Resume accepts the same invocation budgets; show/list are read-only; each supports JSON |
+| Saved search scope | `./scripts/gapply searches configure --spec-file FILE --idempotency-key KEY [--dry-run] [--json]` | Immutable sources, shared evidence and bounds; v2 adds literal title/location preparation filters while preserving v1; syntax preview opens no runtime and makes no requests |
+| Search-to-draft execution | `./scripts/gapply searches run --search-id ID --idempotency-key KEY`; `./scripts/gapply searches resume --run-id ID` | Public discovery, capture and child batch; both accept `--max-items 20 --max-seconds 900 --json` |
+| Saved search review | `./scripts/gapply searches scopes`; `./scripts/gapply searches list [--search-id ID]`; `./scripts/gapply searches show --run-id ID` | Validated read-only views; each supports JSON |
+| Search review copies | `./scripts/gapply searches export --run-id ID --output-dir ABSOLUTE_DIR [--dry-run] [--json]` | Implemented: one current-fact snapshot, private Markdown/JSON index and current material copies; no overwrite or approval |
+| Daily search configuration | `./scripts/gapply schedules configure --spec-file FILE --idempotency-key KEY [--dry-run] [--json]` | Immutable saved-search/timezone/time/start-date/budget policy; installs no wake-up mechanism |
+| Daily execution and review | `./scripts/gapply schedules tick --schedule-id ID [--dry-run]`; `./scripts/gapply schedules show --schedule-id ID`; `./scripts/gapply schedules list` | One bounded due occurrence or recovery attempt; read-only preview/show/list; each supports JSON |
+| Daily control and delivery acknowledgment | `./scripts/gapply schedules pause --schedule-id ID --idempotency-key KEY`; `./scripts/gapply schedules resume --schedule-id ID --idempotency-key KEY`; `./scripts/gapply schedules ack --schedule-id ID --notification-id ID --idempotency-key KEY` | Pause fences dispatch; acknowledgment records delivery, never approval; each supports JSON |
 | Job review/matrix | `./scripts/gapply jobs list`; `./scripts/gapply jobs show --job-id ID`; `./scripts/gapply jobs assess --job-id ID` | Read-only; each supports `--json` |
 | Resume build | `./scripts/gapply materials build --job-id ID --claim-ids ID1,ID2 --idempotency-key KEY [--questions-file FILE] [--layout-file FILE] [--dry-run] [--json]` | Approved packets, versioned presentation, local LaTeX/PDF and exact extracted-text validation |
 | Material inspection | `./scripts/gapply materials show --material-id ID [--json]` | Revalidates current facts and PDF |
@@ -62,6 +74,12 @@ assumed. No dependencies are installed by the launcher.
 | Application transition | `./scripts/gapply applications transition --application-id ID --to STATE --actor-id ACTOR --idempotency-key KEY [--material-id ID] [--confirm-submitted] [--preview-token TOKEN --confirm] [--json]` | Append-only; applied records human submission, performs no external action |
 | Support export | `./scripts/gapply export --redacted ABSOLUTE_FILE [--dry-run] [--json]` | Fixed version/count fields; excludes personal content, paths, identifiers and logs |
 | Real PDF gate | `python -W error scripts/check_materials.py` | TeX + materials extra required; skips fail |
+| Saved-job batch gate | `python -W error scripts/check_batch.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Ten fictional jobs, two isolated blockers, real PDFs, replay/budget recovery and encrypted queue restoration |
+| Configured-search gate | `python -W error scripts/check_search.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Synthetic multi-source transport through actual adapters and CLI; real PDFs, changed/unchanged runs, budget resume, read-only one-folder review export/replay and encrypted restoration |
+| Daily-search gate | `python -W error scripts/check_schedule.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | External synthetic clock/transport, actual CLI, eleven real PDFs, quiet notifications, missed/paused days, bounded resume and encrypted restoration |
+| Advancing-source gate | `python -W error scripts/check_source_window.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Actual CLI and Netflix parsers over fictional public responses; later-window matches, exact replay, changed head posting, nine real PDFs and encrypted cursor restoration |
+| Preparation-filter gate | `python -W error scripts/check_search_filters.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Actual CLI, filters before preparation cap, explicit missing-location choice, two real PDFs, exact replay and encrypted restoration |
+| Source-rotation gate | `python -W error scripts/check_source_rotation.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Three daily runs reach three automatic boards under one-request/one-job limits; isolated blocker, two real PDFs, stable replay and encrypted priority restoration |
 | Complete synthetic pilot | `python -W error scripts/check_pilot.py [--demo-output NEW_EXTERNAL_DIR]` | Both extras + TeX required; includes recovery and deletion |
 | Installed pilot gate | `python scripts/check_package.py --pilot-wheelhouse ABSOLUTE_PATH` | Fresh offline install of both extras + full pilot; TeX required |
 | Workflow expression validation | `actionlint -shellcheck= -pyflakes= .github/workflows/check.yml` | Supported with actionlint 1.7.12 installed; separate from application tests |
@@ -148,6 +166,12 @@ download wheels for a fresh offline installation:
   --dest /tmp/grounded-apply-backup-wheels -r requirements-materials.txt
 /tmp/grounded-apply-build-tools/bin/python -W error scripts/check_materials.py
 /tmp/grounded-apply-build-tools/bin/python -W error scripts/check_pilot.py
+/tmp/grounded-apply-build-tools/bin/python -W error scripts/check_batch.py --with-backup
+/tmp/grounded-apply-build-tools/bin/python -W error scripts/check_search.py --with-backup
+/tmp/grounded-apply-build-tools/bin/python -W error scripts/check_schedule.py --with-backup
+/tmp/grounded-apply-build-tools/bin/python -W error scripts/check_source_window.py --with-backup
+/tmp/grounded-apply-build-tools/bin/python -W error scripts/check_search_filters.py --with-backup
+/tmp/grounded-apply-build-tools/bin/python -W error scripts/check_source_rotation.py --with-backup
 /tmp/grounded-apply-build-tools/bin/python scripts/check_package.py \
   --pilot-wheelhouse /tmp/grounded-apply-backup-wheels
 ```
@@ -161,11 +185,26 @@ backup/restore, retires a claim, and deletes both synthetic homes with receipts.
 The installed gate imports package code only from a fresh virtualenv and runs the
 same CLI flow. Its harness supplies literal synthetic inputs, never a user's
 runtime. Optional-provider skips in the base suite are not pilot release evidence.
+With `--pilot-wheelhouse`, the installed gate also runs the real-PDF batch,
+configured-search, daily-search, advancing-source, preparation-filter and
+source-rotation flows.
+Search fixtures inject their transport from an external
+temporary test module, prohibit real network access, and verify imports resolve
+to the intended source tree or installed wheel. There is no product test mode.
 
 Schema 003 stores append-only effective claim retirements; schema 004 stores jobs,
 requirements, material bytes/mappings/approvals, application events, and submission
-snapshots. Original import records remain intact for exact provenance replay.
-Current use must go through `ProfileService.validated_profile`/`packet_for_claim`;
+snapshots. Schema 005 adds immutable batch requests/items, append-only item
+checkpoints and fenced expiring leases. Original import records remain intact
+for exact provenance replay.
+Schema 006 adds verified saved search scopes, run events, search leases and
+child-batch links. Schema 007 adds daily schedules, occurrences, lifecycle events,
+parent leases, child links and notification acknowledgments. Each public migration checks the
+16 MiB allocation bound inside its transaction. An oversized migration rolls
+back, leaving its prior version restorable; earlier successful migrations may
+remain committed. No history is deleted to make an upgrade fit.
+Current use must go through `ProfileService.validated_profile`, `packet_for_claim`
+or `packets_for_claims`;
 raw repository rows are historical storage, not authority. Independent career
 bullets do not conflict just because they share a type. Singular facts and
 explicit contradictions still fail closed. Derived claims remain unusable without
@@ -186,11 +225,174 @@ Required unresolved answers block readiness. The application state records past
 events; `currently_ready` separately revalidates a ready-for-review material.
 Recording applied requires explicit confirmation of a human submission. Snapshots
 retain the exact tracked bundle but cannot observe edits made at an external site.
-No sensitive-answer memory, network fetching, browser automation, or final submit
-action is implemented. Current snapshots keep immutable historical bytes after
+No sensitive-answer memory, browser automation, or final submit action is
+implemented. Public-feed fetching is available through `jobs discover`, and
+`schedules tick` executes configured daily discovery/preparation. An external
+wake-up mechanism remains separate; arbitrary page fetching is unfinished.
+Current snapshots keep immutable historical bytes after
 retirement, while current material inspection/export/readiness fails closed.
 
+### Saved-job batch verification
+
+See [BATCH_PREPARATION.md](BATCH_PREPARATION.md) for the closed shared-evidence
+manifest, CLI, review states and recovery. Schema 005 stores immutable requests
+and items, append-only hash-linked checkpoints and expiring owner/epoch leases.
+Rendering runs outside write transactions. Lease fences and a bound expected
+material plan are rechecked before child writes; current evidence is rechecked
+inside the material commit. A stale owner or changed evidence cannot commit a
+child under an earlier preparation identity. Material writes reserve 256 KiB
+for checkpoint progress under the existing 16 MiB database limit.
+
+The ten-job real-PDF gate requires eight drafts and two isolated blockers, keeps
+a useful partial resume when a required answer is missing, verifies exact replay
+and budgeted recovery, and optionally restores the encrypted queue. It performs
+no approvals or submissions. All generated fixture PDFs need visual review when
+the rendering or output structure changes.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_batches tests.test_batch_cli tests.test_profile_batch_resolution tests.test_backup_schema_compatibility -v
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_batch.py --with-backup
+```
+
+Bulk claim resolution reuses one freshly validated read snapshot within a call,
+not cached authority across calls or rendering. Regression tests retain exact
+resolution outcomes and verify provenance changes, retirements and conflicting
+singular facts. Performance observations in the handoff are local synthetic
+measurements, not a measured improvement in user active time.
+Material planning also resolves automatic name/contact selection and explicitly
+selected facts from that same fresh snapshot. Rendering and material commit
+still perform independent fresh validation; the pure selection helper does not
+validate provenance or grant reusable authority.
+
+Search-history audits retain every historical PDF, bundle, binding, workflow and
+approval check, plus a fresh validated profile per batch. They resolve current
+facts only for exact incoming posting versions that could reuse a draft. The
+typed history result carries attempt counts and reuse eligibility, never a
+user-facing readiness report; ordinary review still checks all displayed facts.
+On the same restored 170-material synthetic history, one ten-PDF daily tick fell
+from 67.254s to 28.330s. Historical PDF checks stayed at 350; historical current
+plan/questionnaire calls fell from 350 to ten each. Timings reflect local load,
+not measured user-time savings. No evidence authority is cached across calls.
+
+### Configured-search verification
+
+[SEARCH_RUNS.md](SEARCH_RUNS.md) documents the immutable scope and combined
+review. Configuration stores no new candidate facts or approvals. Discovery runs
+with the runtime closed, then atomically captures one bounded source window and
+its checkpoint. Search-scoped leases fence source and child writes. Resume keeps
+the frozen selection; a new run skips currently valid unchanged drafts before
+its preparation cap. Validated historical submissions and explicit exclusions
+are checked before preparation and material commit.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_searches tests.test_search_policy tests.test_search_cli tests.test_migration_capacity -v
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_search.py --with-backup
+```
+
+The real-PDF fixture selects ten jobs across two feeds, isolates two injected
+renderer blockers and retains a third source failure. Subsequent runs exercise
+unchanged-feed advancement, changed versions and item-budget recovery. It checks
+sixteen real PDF bundles, no new fact/material approvals or applications, unknown
+questionnaire coverage, and encrypted restoration of scopes, runs and materials.
+This does not measure user active-time savings or verify a daily scheduler.
+
+Saved-search Netflix windows refresh one newest posting and advance through up
+to six later entries under the existing ten-request source budget. Cursor
+reservation and completion are validated search-ledger events; a later finished
+generation cannot be overwritten by an older resumed run. Legacy search events
+retain their exact bytes and hashes. Standalone discovery retains its bounded
+first-window behavior. Counts describe each invocation, never complete coverage.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_netflix_windows tests.test_search_windows tests.test_schedule_windows -v
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_source_window.py --with-backup
+```
+
+The window gate starts with seven nonmatching postings, reaches matching later
+windows, preserves progress through encrypted restore, detects a changed head
+posting and checks nine real PDFs. Adapter regressions distinguish isolated
+detail failures from source restrictions and count refused pre-GET budget
+reservations accurately. Daily composition checks next-day advancement, quiet
+same-day replay and interrupted-window recovery across midnight.
+
+Version-2 saved scopes add closed literal title/location preparation filters.
+Version-1 normalization and event shapes remain unchanged, and no SQL migration
+is needed. Filters run before capture and preparation quotas, within the already
+bounded adapter results. Unknown location defaults to include and stays visible
+as `null`; exclusion requires the explicit saved policy. The two-PDF acceptance
+gate reaches a later matching posting under a one-job cap and verifies both
+missing-location choices, replay, immutable scope binding and encrypted restore.
+Before each new source capture, validated historical item attempts order exact
+posting versions least-attempted first, with stable adapter-order ties. Completed
+current drafts still skip before quota use, and resumed selections stay frozen.
+Across new runs, a durable reservation also rotates automatic sources for both
+fetch/quota order and final round-robin. Manual gaps follow automatic sources;
+retries keep their reservation, failed leases consume none, and started legacy
+runs keep their original order. This is bounded fairness, not a coverage promise.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_search_filters tests.test_search_filter_integration tests.test_search_filter_cli -v
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_search_filters.py --with-backup
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_source_rotation tests.test_search_rotation -v
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_source_rotation.py --with-backup
+```
+
+### Daily-search verification
+
+[DAILY_SEARCHES.md](DAILY_SEARCHES.md) defines immutable schedule policy, local
+dates, bounded recovery and delivery acknowledgment. The service executes a
+tick; a separately authorized wake-up mechanism must invoke it. Its external
+test harness injects time and fictional feeds, prohibits real network access and
+checks source/wheel import origin. There is no production clock override.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_schedule_policy tests.test_schedule_notifications tests.test_schedules tests.test_schedule_cli -v
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_schedule.py --with-backup
+```
+
+The actual-CLI fixture verifies eight initial drafts and two isolated blockers,
+eleven real PDFs across changed postings and bounded recovery, quiet acknowledged
+unchanged results, one latest occurrence after thirty offline days, separate
+paused-day accounting and encrypted restoration. Core regressions cover local
+clock changes, stale workers, interrupts, child commits before parent checkpoints,
+exhausted-attempt reconciliation and altered histories. No personal schedule or
+external wake-up mechanism is installed by these checks.
+
+### Public discovery verification
+
+See [JOB_DISCOVERY.md](JOB_DISCOVERY.md) for the closed source manifest, coverage
+states, network bounds and capture semantics. The source/normalizer registry and
+the `job_discovery_capture` workflow type reuse schema-4 snapshot/audit tables;
+no schema migration or legacy `job_capture` rewrite is involved. New captures
+store source identity and per-job content hash, revalidate them on reads, and
+roll back additions above the existing 16 MiB database bound. A stable internally
+derived child key recovers a committed capture after interrupted output. This
+is per-posting replay, not a persisted multi-stage search runner or historical
+source-health service. Changed postings keep separate immutable versions.
+
+The HTTP adapter sends only fixed public GET requests, with no candidate claims,
+proxies, cookies, credentials, redirects or returned-link following. Host/path
+allowlisting and public-address screening do not pin DNS; DNS resolution has no
+portable hard deadline. HTTPS verifies the allowlisted host. Connection work has
+socket timeouts and established-response reads have a cumulative shutdown timer.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_discovery tests.test_discovery_http tests.test_discovery_capture tests.test_netflix_source tests.test_jobs tests.test_briefing -v
+```
+
+These tests use synthetic transports and data. Live public-board smoke checks
+are separate observations, make no profile reads/writes, and are not part of
+the offline repository or installed-package gates. Never add real postings or
+candidate data to fixtures. Record live source results and their limits in the
+handoff without copying job descriptions.
+
 ### Optional encrypted profile lifecycle verification
+
+Version-4 through version-7 snapshots are accepted only when their SQL structures and
+migration ledgers exactly match the corresponding registered migration prefix.
+Restore preserves the snapshot without migration. Run `profile init` explicitly
+to upgrade an older restored home before using current data commands. Future,
+unregistered or altered schemas still fail closed.
 
 Use a disposable environment and wheel directory outside the checkout:
 
@@ -221,9 +423,12 @@ keys, and non-digest filesystem artifact references fail closed.
 Passphrases are 12–1024 UTF-8 bytes through no-echo terminal input (twice on
 creation) or explicit bounded stdin, with no inline, environment, or file-secret
 option. Python does not guarantee memory erasure or protection against swap/core
-dumps. Archive size and Fernet creation time are visible. The schema-4 database
+dumps. Archive size and Fernet creation time are visible. The database
 includes generated PDF/LaTeX/text, job snapshots, answer bundles, and immutable
-application history. Source documents, exported copies, config, browser state,
+application history; schema 005 adds preparation queues/checkpoints and schema
+006 adds saved-search state and schema 007 adds daily occurrences, checkpoints
+and delivery acknowledgments.
+Source documents, exported copies, config, browser state,
 caches, and logs are outside this scope.
 Encryption does not upgrade claim truth, status, or provenance.
 
@@ -261,8 +466,10 @@ operation ID, timestamp, and phase. Exact complete retries require an absent
 target; partial receipts or targets are never silently resumed. Interrupted or
 indeterminate deletion emits the fixed `deletion_outcome_unknown` event and
 content-free receipt-inspection advice. External sources/backups and the receipt
-remain. Manual retention, logical deletion, and sampled same-UID TOCTOU limits
-apply; secure erasure and power-loss durability are not promised. See ADR 0004.
+remain. Only explicit whole-home deletion and caller-managed external archives
+are available; individual job/material pruning and automatic retention remain
+unfinished. Deletion is logical, and sampled same-UID TOCTOU limits apply;
+secure erasure and power-loss durability are not promised. See ADR 0004.
 
 Focused gate: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -W error -m unittest tests.test_deletion tests.test_logging -v`.
 
@@ -545,7 +752,7 @@ Manifest version 1, request-identity versions 1–3, result-manifest versions 1�
 content-policy version 1, and the former public `CreateImportProposal`
 constructor are unsupported. Current imports use manifest 2, request identity 4,
 result manifest 3, record digest 1, content policy 2, restricted taxonomy 1, and
-database schema 4. Migration 002 creates the association/decision table but does
+database schema 7. Migration 002 creates the association/decision table but does
 not fabricate record digests or associations for earlier imports. Regenerate
 manifest-v1 input; for an earlier manifest-v2 workflow, use a fresh opaque
 idempotency key in disposable synthetic state. There is no automatic policy

@@ -6,8 +6,10 @@ do not need to type them yourself.
 
 This is a local command-line workflow. Codex can operate it with you: import a
 resume once, review the facts, then reuse selected approved facts for each job.
-It does not discover openings, rewrite your career history, fetch a job page, or
-submit an application. No model or network call occurs in these commands.
+It does not rewrite your career history, fetch arbitrary job pages, or
+submit an application. Profile/material commands make no model or network calls;
+the optional [public discovery](JOB_DISCOVERY.md) command reads supported ATS
+feeds and a bounded Netflix sitemap route.
 
 ## Start
 
@@ -106,13 +108,28 @@ Original history remains, and retired facts cannot authorize new materials.
 
 ## Prepare one job
 
+To discover and prepare together under one agreed source/evidence scope, ask
+Codex to use [saved search runs](SEARCH_RUNS.md). It configures the scope, runs
+the bounded discovery-to-draft workflow, and resumes any saved progress. You do
+not need to supply each discovered job or repeat the shared claim selection.
+For a recurring run, give Codex the daily time and timezone and follow
+[daily searches](DAILY_SEARCHES.md). The saved schedule keeps limits and recovery
+state; an authorized wake-up mechanism must invoke it on the local host.
+
+For several saved jobs, ask Codex to use [batch preparation](BATCH_PREPARATION.md).
+It can reuse one agreed evidence selection, prepare independent drafts, and
+return a consolidated review queue. The individual commands below remain useful
+for inspecting or refining one item.
+
 To resume an existing search, run `./scripts/gapply brief --json` first. It shows
 saved jobs, recorded stages, material readiness, missing-evidence counts, and
 next actions without storing anything. Use `--job-id JOB_ID` for one job or
 `--follow-up-days 14` for a different response-check interval. These suggestions
 are on demand; they do not schedule reminders or send messages.
 
-Copy the job's visible text into a UTF-8 file. Use its HTTPS URL without tracking
+For supported public boards, Codex can use `jobs discover` to capture jobs first;
+see [source setup and coverage](JOB_DISCOVERY.md). For a manual capture, copy the
+job's visible text into a UTF-8 file. Use its HTTPS URL without tracking
 parameters, credentials, or fragments. Saving it records your supplied text and
 capture time; it does not verify that the opening is still live.
 

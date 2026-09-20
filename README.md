@@ -33,8 +33,42 @@ for its bounded scope. The live checkpoint contains the exact release evidence.
 It is a command-line tool that Codex can operate with you. Resume tailoring means
 selecting and ordering approved text; it does not write new factual prose.
 Matching retrieves evidence and gaps without claiming fit or predicting hiring.
-No model calls, live job fetching, discovery, browser fill, or external submission
-are implemented. Input is plain text; PDF output uses a local TeX installation.
+Public job discovery now reads configured Greenhouse, Ashby and Lever boards,
+plus bounded Netflix sitemap and structured-posting reads,
+reports source coverage, and captures immutable snapshots for the existing
+assessment/material workflow. See [job discovery](docs/JOB_DISCOVERY.md).
+[Batch preparation](docs/BATCH_PREPARATION.md) adds shared evidence selection,
+per-job checkpoints, isolated blockers and one draft review queue for saved jobs.
+[Saved searches](docs/SEARCH_RUNS.md) connect configured discovery to that queue:
+agree the sources and evidence selection once, then run or resume the combined
+workflow. Current unchanged drafts and recorded submissions are skipped before
+the preparation limit. Version-2 scopes can exclude titles and filter published
+location text before spending preparation slots, while retaining missing
+locations for review by default. Netflix saved searches advance through bounded
+detail windows across runs. New runs rotate automatic boards and prioritize
+unattempted postings so repeated blockers do not always take the available slots.
+[Daily searches](docs/DAILY_SEARCHES.md) add saved timing,
+bounded recovery, pause/resume and quiet notification delivery. An authorized
+wake-up mechanism must invoke the CLI; it installs no background process.
+For the user-facing setup and daily review, see
+[Set up daily discovery with Codex](docs/DAILY_QUICKSTART.md).
+One-folder review export is available: `searches export --run-id ID
+--output-dir /absolute/private/new-review` gathers the run's current PDFs,
+answers, job links and blockers. See [saved-search review](docs/SEARCH_RUNS.md)
+and the live checkpoint for status and limits.
+Model calls and browser fill remain unfinished. Final application submission
+remains a human action. Resume input is plain text; PDF output uses local TeX.
+
+For a public-feed preview without profile storage:
+
+```bash
+./scripts/gapply jobs discover --preset major-tech --title-contains research --dry-run --json
+```
+
+This preset has feed routes for Anthropic and OpenAI, bounded partial Netflix
+discovery, and visible coverage gaps for Google, Apple, Amazon and Meta. A partial result exits with code 2
+and preserves usable results plus per-source status; it is not an empty-success
+signal. Omit `--dry-run` to capture into an already initialized private runtime.
 
 The pilot includes encrypted whole-database backup, confirmed restore into a new
 private home, fixed-schema support export, audited claim withdrawal/replacement,
@@ -50,6 +84,13 @@ issues, and the next exact task. The longer-term scope in
 [`GROUNDED_APPLY_DESIGN.md`](GROUNDED_APPLY_DESIGN.md) and
 [`docs/ROADMAP.md`](docs/ROADMAP.md) is planned unless the checkpoint says it is
 implemented and verified.
+
+Daily package storage remains bounded by the 16 MiB database snapshot limit.
+`./scripts/gapply doctor --json` reports file usage and headroom, with a warning
+from ninety percent. This does not guarantee space for the next run or validate
+a backup; automatic retention and a larger storage lifecycle remain unfinished.
+When a run reaches a storage reserve after preparing some drafts, its report and
+notification retain those drafts and identify the capacity stop.
 
 ## Start the local pilot
 
@@ -364,7 +405,11 @@ Manifest version 1, request-identity versions 1–3, result-manifest versions 1�
 content-policy version 1, and the former public `CreateImportProposal` shape are
 intentionally unsupported. Current imports use manifest 2, request identity 4,
 result manifest 3, record digest 1, content policy 2, restricted taxonomy 1, and
-database schema 4. Migration 002 upgrades the schema but deliberately does not
+database schema 7. Migration 005 adds durable preparation queues; migration 006
+adds verified saved-search records. Migration 007 adds verified daily schedules,
+occurrences and notification acknowledgments. Existing homes
+upgrade through `profile init`; version-4 through version-6 backups restore without implicit
+migration and can then be upgraded explicitly. Migration 002 deliberately does not
 invent review associations or record digests for earlier imports. Regenerate
 manifest-v1 input; for an earlier manifest-v2 workflow, use a fresh opaque
 idempotency key in disposable synthetic state. There is no automatic policy
@@ -381,7 +426,8 @@ The accepted architecture is a local-first Python modular monolith with:
   and persistence;
 - language models only at language-heavy edges, behind structured adapters;
 - SQLite by default and private artifacts outside the public repository;
-- optional local web, model, job-source, document, and browser adapters later.
+- public job-source adapters, with additional sources and optional local web,
+  model, document, and browser adapters later.
 
 The intended workflow is:
 
@@ -390,8 +436,9 @@ approved evidence -> claims -> job requirements -> claim packet
                   -> verified prose -> rendered artifact -> human review
 ```
 
-Job discovery and browser-assisted safe-fill remain roadmap work. Resume/PDF
-generation and manual application tracking are part of the local pilot.
+Broader discovery coverage and browser-assisted safe-fill remain
+roadmap work. Resume/PDF generation and manual application tracking are part of
+the local pilot.
 Future browser automation will stop at authentication,
 CAPTCHA, sensitive or legal questions, ambiguous fields, signatures, and final
 submission.
@@ -417,6 +464,7 @@ Repository agents and contributors must follow the complete rules in
 
 ## Documentation
 
+- [Set up daily discovery with Codex](docs/DAILY_QUICKSTART.md) — one setup and one daily review
 - [`GROUNDED_APPLY_DESIGN.md`](GROUNDED_APPLY_DESIGN.md) — full product design
 - [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md) — live resume point
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — delivery phases and acceptance gates

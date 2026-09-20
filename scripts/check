@@ -14,6 +14,11 @@ fi
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply profile decide --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply brief --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply jobs discover --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply batches prepare --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply searches configure --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply searches export --help >/dev/null
+PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply schedules configure --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply backup --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 ./scripts/gapply restore --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 GROUNDED_APPLY_HOME="$CHECK_RUNTIME_ROOT" \

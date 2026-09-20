@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 from uuid import uuid4
 
-from grounded_apply.domain import Resolved, to_jsonable
+from grounded_apply.domain import Resolved, resolve_claims, to_jsonable
 from grounded_apply.repositories import RepositoryError, SQLiteRepository
 from grounded_apply.services.jobs import JobService
 from grounded_apply.services.matching import job_policy, terms
@@ -16,7 +17,7 @@ from grounded_apply.services.material_models import (
     HEADING_TYPES, TRANSFORMATIONS, FactualUnit, MaterialValidationError, RenderedResume,
     ResumeRenderer, ResumeStructure, validate_layout,
 )
-from grounded_apply.services.profile import ProfileService
+from grounded_apply.services.profile import ProfileService, resolve_selected_claim
 from grounded_apply.services.questionnaires import QuestionnaireService, validate_question_specs
 from grounded_apply.services.workflow import (
     digest, existing_workflow, finish_workflow, hash_bytes, opaque, request_input,
@@ -30,6 +31,28 @@ class MaterialBlocked(MaterialValidationError):
     def __init__(self, outcomes: list[Any]) -> None:
         super().__init__("Material requires information or claim review before it can be used")
         self.outcomes = outcomes
+
+
+class MaterialCapacityError(MaterialValidationError):
+    """A bounded material operation cannot fit inside its storage allowance."""
+
+
+class MaterialRenderError(MaterialValidationError):
+    """New output failed rendering; no material was persisted by this attempt."""
+
+    def __init__(self, reason: str = "render_failed") -> None:
+        messages = {
+            "render_failed": "New material could not pass rendering and PDF validation",
+            "layout_overflow": "Resume layout overflows; review the selected content or presentation",
+            "unsupported_text": "PDF cannot preserve the selected text; review unsupported characters or local TeX packages",
+            "render_timeout": "Local PDF rendering failed or exceeded its time limit",
+        }
+        self.reason = reason if reason in messages else "render_failed"
+        super().__init__(messages[self.reason])
+
+
+class MaterialDependencyError(MaterialValidationError):
+    """The shared PDF environment is unavailable, rather than one bad job."""
 
 
 def _missing(intent: str, question: str) -> dict[str, str]:
@@ -67,21 +90,21 @@ class MaterialService:
         with self._repository.read_transaction():
             job = JobService(self._repository).get(job_id)
             profile = ProfileService(self._repository)
-            claims, _ = profile.validated_profile()
+            claims, evidence = profile.validated_profile()
             by_id = {c.id: c for c in claims}
             policy = job_policy(job_id)
             selected = list(claim_ids)
             issues: list[Any] = []
             for kind in ("candidate_name", "contact_email"):
                 if not any(by_id[i].claim_type == kind for i in selected if i in by_id):
-                    outcome = profile.resolve(intent=kind, policy=policy)
+                    outcome = resolve_claims(claims, intent=kind, policy=policy, evidence=evidence)
                     if isinstance(outcome, Resolved):
                         selected.append(outcome.packet.claim_ids[0])
                     else:
                         issues.append(to_jsonable(outcome))
             units = []
-            for claim_id in selected:
-                outcome = profile.packet_for_claim(claim_id, policy=policy)
+            outcomes = tuple(resolve_selected_claim(claim_id, claims, evidence, policy) for claim_id in selected)
+            for claim_id, outcome in zip(selected, outcomes, strict=True):
                 if not isinstance(outcome, Resolved):
                     issues.append(to_jsonable(outcome))
                     continue
@@ -114,9 +137,21 @@ class MaterialService:
             return ResumeStructure(job_id, tuple(units), transformation=transformation)
 
     def build(self, job_id: str, claim_ids: tuple[str, ...], *, idempotency_key: str, dry_run: bool = False,
-              questions: object = (), layout: object = None) -> dict[str, Any]:
+              questions: object = (), layout: object = None,
+              max_database_bytes: int | None = None,
+              commit_guard: Callable[[], None] | None = None,
+              expected_plan_sha256: str | None = None) -> dict[str, Any]:
         if type(dry_run) is not bool:
             raise ValueError("Dry run must be boolean")
+        if commit_guard is not None and not callable(commit_guard):
+            raise ValueError("Material commit guard must be callable")
+        if expected_plan_sha256 is not None and (type(expected_plan_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", expected_plan_sha256) is None):
+            raise ValueError("Expected material plan must be a SHA-256 digest")
+        if max_database_bytes is not None:
+            from grounded_apply.services.backup import MAX_SNAPSHOT_BYTES
+            if type(max_database_bytes) is not int or not 1 <= max_database_bytes <= MAX_SNAPSHOT_BYTES:
+                raise ValueError("Material storage limit must fit the supported database bound")
         styles = validate_layout(layout, claim_ids)
         transformation = CURRENT_TRANSFORMATION
         # A retry retains its original registered transformation, including v1.
@@ -132,6 +167,10 @@ class MaterialService:
         structure = self.plan(job_id, claim_ids, layout=layout, transformation=transformation)
         question_specs = validate_question_specs(questions)
         answers = QuestionnaireService(self._repository).prepare(job_id, question_specs)
+        if expected_plan_sha256 is not None and expected_plan_sha256 != digest({"structure": asdict(structure), "answers": answers}):
+            raise MaterialBlocked([{"kind": "need_info", "intent": "batch_preparation",
+                "reason": "preparation_inputs_changed",
+                "question": "Approved preparation inputs changed. Create a new batch to prepare a fresh version."}])
         payload = request_input(idempotency_key, {"job_id": job_id, "selected_claim_ids": list(claim_ids),
             "structure_sha256": digest(asdict(structure)), "transformation": structure.transformation,
             "question_specs_sha256": digest(question_specs), "answers_sha256": digest(answers)})
@@ -148,9 +187,28 @@ class MaterialService:
                         "dry_run": dry_run, "ready": self.is_approved(ids[0])}
         if dry_run:
             return {"dry_run": True, "structure": asdict(structure), "answers": answers, "ready": False, "requires_approval": True}
-        rendered = self._renderer.render(structure)
-        self._renderer.validate(structure, rendered)
+        try:
+            rendered = self._renderer.render(structure)
+            self._renderer.validate(structure, rendered)
+        except MaterialValidationError as error:
+            message = str(error)
+            dependencies = {
+                "PDF generation requires a local pdflatex installation",
+                "PDF verification requires the optional grounded-apply[materials] dependency",
+            }
+            if message in dependencies:
+                raise MaterialDependencyError(message) from None
+            reasons = {
+                "Resume layout overflows; shorten the selected content": "layout_overflow",
+                "PDF extraction failed or resume exceeds two pages": "layout_overflow",
+                "LaTeX could not render the selected text; check unsupported characters or missing TeX packages": "unsupported_text",
+                "PDF is missing a critical factual unit or contains unsupported glyphs": "unsupported_text",
+                "Local PDF rendering failed or exceeded its time limit": "render_timeout",
+            }
+            raise MaterialRenderError(reasons.get(message, "render_failed")) from None
         with self._repository.transaction():
+            if commit_guard is not None:
+                commit_guard()
             # Prevent a fact retired or changed while the compiler ran from
             # entering a new material version.
             if self.plan(job_id, claim_ids, layout=layout, transformation=transformation) != structure:
@@ -185,6 +243,10 @@ class MaterialService:
                     | {i for a in answers for u in a["factual_units"] for i in u["claim_ids"]})))
             finish_workflow(self._repository, workflow["id"], [material_id], at)
             self.get(material_id)
+            if max_database_bytes is not None and self._repository.database_size_bytes() > max_database_bytes:
+                raise MaterialCapacityError("Material storage allowance reached; no new material was added")
+            if commit_guard is not None:
+                commit_guard()
             return {"material_id": material_id, "bundle_sha256": bundle, "replayed": False, "dry_run": False,
                     "ready": False, "requires_approval": True, "page_count": rendered.page_count}
 
@@ -244,8 +306,6 @@ class MaterialService:
 
     def is_approved(self, material_id: str, *, require_current: bool = True) -> bool:
         material = self.get(material_id, require_current=require_current)
-        if any(a["required"] and a["status"] != "draft" for a in material["manifest"]["answers"]):
-            return False
         approval = self._repository.get_material_approval(material_id)
         if approval is None:
             return False
@@ -258,7 +318,7 @@ class MaterialService:
         if (approval["bundle_sha256"] != material["bundle_sha256"] or approval["approved_at"] != workflow["created_at"]
             or json.loads(workflow["generated_artifacts_json"]) != [material_id]):
             raise MaterialValidationError("Material approval does not match this version")
-        return True
+        return not any(a["required"] and a["status"] != "draft" for a in material["manifest"]["answers"])
 
     def list(self, job_id: str | None = None) -> tuple[dict[str, Any], ...]:
         """Find saved versions without promoting historical facts to current use."""

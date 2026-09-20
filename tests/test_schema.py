@@ -249,7 +249,9 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertEqual(
                 applied,
                 [(1, "001_initial.sql"), (2, "002_profile_import_review_items.sql"),
-                 (3, "003_claim_retirements.sql"), (4, "004_application_pilot.sql")],
+                 (3, "003_claim_retirements.sql"), (4, "004_application_pilot.sql"),
+                 (5, "005_preparation_batches.sql"), (6, "006_saved_searches.sql"),
+                 (7, "007_daily_schedules.sql")],
             )
 
 

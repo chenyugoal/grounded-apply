@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
-LATEST_SCHEMA_VERSION = 4
+LATEST_SCHEMA_VERSION = 7
 
 _MIGRATION_NAME = re.compile(
     r"^(?P<version>[0-9]{3})_(?P<description>[a-z][a-z0-9_]*)\.sql$"
@@ -126,8 +126,19 @@ def read_schema_version(connection: sqlite3.Connection) -> int:
 def initialize_schema(
     connection: sqlite3.Connection,
     migrations_directory: Path,
+    *,
+    target_version: int | None = None,
+    max_database_bytes: int | None = None,
 ) -> int:
     """Validate and migrate a database, returning its current version.
+
+    The optional target builds a trusted historical reference for snapshot
+    validation. It never permits downgrades. Normal repository opens use the
+    current version.
+
+    An optional allocation bound is checked inside each migration transaction;
+    an oversized migration rolls back without making its prior version
+    unrestorable. Earlier successful migration versions remain committed.
 
     Each schema migration, migration-ledger insert, and ``user_version`` update
     commits as one transaction.  A future or internally inconsistent schema is
@@ -138,9 +149,16 @@ def initialize_schema(
         raise MigrationError("Cannot initialize the schema inside an active transaction")
 
     migrations = load_migrations(migrations_directory)
+    target = LATEST_SCHEMA_VERSION if target_version is None else target_version
+    if type(target) is not int or not 1 <= target <= LATEST_SCHEMA_VERSION:
+        raise MigrationError("Unsupported target schema version")
+    if max_database_bytes is not None and (type(max_database_bytes) is not int or max_database_bytes <= 0):
+        raise MigrationError("Migration storage limit must be a positive integer")
     current = _validate_schema_state(connection, migrations)
+    if current > target:
+        raise MigrationError("Schema migration cannot downgrade an existing database")
 
-    for migration in migrations[current:]:
+    for migration in migrations[current:target]:
         try:
             connection.execute("BEGIN IMMEDIATE")
             locked_version = _validate_schema_state(connection, migrations)
@@ -171,6 +189,11 @@ def initialize_schema(
                 ),
             )
             connection.execute(f"PRAGMA user_version = {migration.version}")
+            if max_database_bytes is not None:
+                allocated = (connection.execute("PRAGMA page_count").fetchone()[0]
+                             * connection.execute("PRAGMA page_size").fetchone()[0])
+                if allocated > max_database_bytes:
+                    raise MigrationError("Migration exceeds the supported profile storage limit; prior schema retained")
             connection.execute("COMMIT")
         except (OSError, sqlite3.Error, SchemaError) as exc:
             if connection.in_transaction:

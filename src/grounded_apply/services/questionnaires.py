@@ -72,8 +72,8 @@ class QuestionnaireService:
                     issues.append({"kind": "need_info", "reason": "missing_evidence",
                         "question": "Select approved career facts that answer this question."})
                 else:
-                    for claim_id in q["claim_ids"]:
-                        outcome = service.packet_for_claim(claim_id, policy=policy)
+                    outcomes = service.packets_for_claims(tuple(q["claim_ids"]), policy=policy)
+                    for claim_id, outcome in zip(q["claim_ids"], outcomes, strict=True):
                         if not isinstance(outcome, Resolved):
                             issues.append(to_jsonable(outcome))
                         elif by_id[claim_id].claim_type.startswith("contact_") or by_id[claim_id].claim_type == "candidate_name":

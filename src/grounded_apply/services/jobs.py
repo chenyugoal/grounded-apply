@@ -1,4 +1,4 @@
-"""Immutable user-supplied job snapshots and quoted requirements."""
+"""Immutable manual and public-feed job snapshots with quoted requirements."""
 
 from __future__ import annotations
 
@@ -9,12 +9,15 @@ from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from grounded_apply.repositories import RepositoryError, SQLiteRepository
+from grounded_apply.services.backup import MAX_SNAPSHOT_BYTES
+from grounded_apply.services.discovery import DiscoveredJob, validate_discovered_job
 from grounded_apply.services.workflow import (
     digest, existing_workflow, finish_workflow, hash_bytes, opaque, request_input,
     start_workflow, timestamp, validate_workflow,
 )
 
 EXTRACTOR = "grounded-apply.job-text@1"
+DISCOVERY_CAPTURE = "job_discovery_capture"
 _HEADINGS = {"requirements": "required", "required qualifications": "required",
     "minimum qualifications": "required", "preferred qualifications": "preferred",
     "preferred": "preferred", "nice to have": "preferred", "responsibilities": "responsibility",
@@ -46,6 +49,15 @@ class JobSnapshot:
     capture_method: str = "user_supplied_text"
     content_trust: str = "untrusted"
     live_page_verified: bool = False
+    discovery: dict[str, str | None] | None = None
+
+
+class DiscoveryCapacityError(ValueError):
+    """Adding a discovered snapshot would exceed the supported private DB cap."""
+
+
+class DiscoveryRecordError(ValueError):
+    """A valid feed record exceeds the supported local snapshot/extractor format."""
 
 
 def validate_job_input(url: str, source: str) -> None:
@@ -111,8 +123,34 @@ class JobService:
         if dry_run:
             requirements, suspicious = extract_requirements("preview", source)
             return {"dry_run": True, "requirement_count": len(requirements), "suspicious_lines": suspicious}
+        return self._capture(url, source, payload, "job_capture")
+
+    def capture_discovered(self, job: DiscoveredJob) -> dict[str, object]:
+        """Capture one validated feed version; unchanged versions reuse identity.
+
+        The source registry is versioned in the operation audit. No candidate
+        profile is read. Repeating discovery does not rewrite the first capture
+        time or imply that the live application form was inspected.
+        """
+        validate_discovered_job(job)
+        validate_job_input(job.source_url, job.source_text)
+        try:
+            extract_requirements("preview", job.source_text)
+        except ValueError:
+            raise DiscoveryRecordError("Discovered job exceeds the snapshot requirement limit") from None
+        metadata = asdict(job)
+        metadata.pop("source_url")
+        metadata.pop("source_text")
+        fields = {"source_sha256": hash_bytes(job.source_text.encode()),
+            "url_sha256": hash_bytes(job.source_url.encode()), "extractor": EXTRACTOR,
+            "discovery": metadata}
+        payload = request_input("discovery-v1." + digest(fields), fields)
+        return self._capture(job.source_url, job.source_text, payload, DISCOVERY_CAPTURE)
+
+    def _capture(self, url: str, source: str, payload: dict[str, object],
+                 kind: str) -> dict[str, object]:
         with self._repository.transaction():
-            existing = existing_workflow(self._repository, "job_capture", payload)
+            existing = existing_workflow(self._repository, kind, payload)
             if existing is not None:
                 ids = json.loads(existing["generated_artifacts_json"])
                 if not isinstance(ids, list) or len(ids) != 1:
@@ -120,10 +158,12 @@ class JobService:
                 job = self.get(ids[0])
                 if job.source_url != url or job.source_text != source:
                     raise RepositoryError("Job replay does not match the snapshot")
+                if kind == DISCOVERY_CAPTURE and job.discovery != payload["discovery"]:
+                    raise RepositoryError("Job replay does not match discovery provenance")
                 return {"job_id": job.id, "source_sha256": job.source_sha256, "replayed": True, "dry_run": False}
             at, job_id = timestamp(), str(uuid4())
             requirements, _ = extract_requirements(job_id, source)
-            workflow = start_workflow(self._repository, "job_capture", payload, at)
+            workflow = start_workflow(self._repository, kind, payload, at)
             self._repository.insert_job_snapshot(job_id=job_id, source_url=url, source_text=source,
                 source_sha256=payload["source_sha256"], extractor_version=EXTRACTOR, captured_at=at,
                 workflow_run_id=workflow["id"])
@@ -133,6 +173,8 @@ class JobService:
                     category=r.category, classification_basis=r.classification_basis)
             finish_workflow(self._repository, workflow["id"], [job_id], at)
             self.get(job_id)
+            if kind == DISCOVERY_CAPTURE and self._repository.database_size_bytes() > MAX_SNAPSHOT_BYTES:
+                raise DiscoveryCapacityError("Discovery storage capacity reached; no snapshot was added")
             return {"job_id": job_id, "source_sha256": payload["source_sha256"], "replayed": False, "dry_run": False}
 
     def get(self, job_id: str) -> JobSnapshot:
@@ -140,6 +182,7 @@ class JobService:
         record = self._repository.get_job_snapshot(job_id)
         if record is None:
             raise ValueError("Job snapshot does not exist")
+        discovery = None
         try:
             validate_job_input(record["source_url"], record["source_text"])
             if record["source_sha256"] != hash_bytes(record["source_text"].encode()) or record["extractor_version"] != EXTRACTOR:
@@ -157,12 +200,34 @@ class JobService:
             payload = {"version": 1, "source_sha256": record["source_sha256"],
                 "url_sha256": hash_bytes(record["source_url"].encode()), "extractor": EXTRACTOR,
                 "idempotency_sha256": workflow["idempotency_key"]}
-            validate_workflow(workflow, "job_capture", payload)
+            kind = workflow["workflow_type"]
+            if kind == DISCOVERY_CAPTURE:
+                discovery = json.loads(workflow["input_json"])["discovery"]
+                if type(discovery) is not dict or set(discovery) != {
+                    "provider", "board", "external_id", "title", "location",
+                    "content_sha256", "normalizer_version",
+                }:
+                    raise ValueError
+                discovered = DiscoveredJob(**discovery, source_url=record["source_url"],
+                                          source_text=record["source_text"])
+                validate_discovered_job(discovered)
+                payload["discovery"] = discovery
+                identity_fields = {key: value for key, value in payload.items()
+                                   if key not in {"version", "idempotency_sha256"}}
+                expected_key = hash_bytes(("discovery-v1." + digest(identity_fields)).encode())
+                if workflow["idempotency_key"] != expected_key:
+                    raise ValueError
+            elif kind != "job_capture":
+                raise ValueError
+            validate_workflow(workflow, kind, payload)
             if json.loads(workflow["generated_artifacts_json"]) != [job_id] or workflow["created_at"] != record["captured_at"]:
                 raise ValueError
         except (ValueError, KeyError, TypeError):
             raise RepositoryError("Job snapshot failed integrity checks") from None
-        return JobSnapshot(job_id, record["source_url"], record["source_text"], record["source_sha256"], record["captured_at"], requirements, suspicious)
+        return JobSnapshot(job_id, record["source_url"], record["source_text"], record["source_sha256"], record["captured_at"], requirements, suspicious,
+            capture_method=("public_careers_jsonld" if discovery is not None and discovery["provider"] == "netflix"
+                            else "public_ats_feed" if discovery is not None else "user_supplied_text"),
+            discovery=discovery)
 
     def list(self) -> tuple[JobSnapshot, ...]:
         return tuple(self.get(r["id"]) for r in self._repository.list_job_snapshots())

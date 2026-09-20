@@ -38,7 +38,7 @@ PDFs/answers, explicit material approval, and manual application history. Broade
 semantic contradiction handling, novel-obfuscation classification, registered
 derivations, automatic retention, and Phases 2–5 remain planned or in progress.
 
-## Current milestone — Codex-guided application preparation
+## Delivered milestone — Codex-guided application preparation
 
 **Status: Implemented and locally verified** (ADR 0007, September 18, 2026).
 The milestone is committed in `3fc3251`; see SESSION_HANDOFF.md for subsequent
@@ -62,6 +62,43 @@ browser filling, email/calendar integrations, or a GUI. These remain subsequent
 upgrades on the same services, facts and history. Success means useful reviewed
 application preparation, not a promise of interviews or offers.
 
+## Next milestone — Daily discovery plus prepared application packages
+
+**Status: In progress** (prioritized September 19, 2026;
+[ADR 0009](adr/0009-daily-discovery-and-draft-queue.md)). The first multi-source
+discovery and durable saved-job batch increments are implemented and locally
+verified. Integrated discovery-to-draft runs and daily execution are implemented
+locally; active-user-time evaluation and broader employer coverage remain open.
+
+The delivered pilot demonstrates verified artifacts and reuse, but has not
+demonstrated lower active user time. Repeated job input, per-job preparation and
+manual application handoffs can negate that benefit. The next outcome is one
+bounded search/preparation scope followed by one review queue of new jobs,
+prepared drafts and grouped questions. Independent jobs continue when another
+needs information. Measure active user minutes and handoffs per accepted draft,
+separately from elapsed agent time; a long run alone is not success.
+
+| Increment | Status | Required outcome |
+|---|---|---|
+| Durable batch preparation for saved jobs | Implemented | CLI, schema 005 checkpoints, fenced leases, shared evidence, isolated blockers, replay/recovery and real-PDF synthetic gate pass; 490-test full gate and fresh installed batch pilot pass |
+| Multi-source watchlist discovery | Implemented for configured boards | Greenhouse, Ashby, Lever/global and EU; Netflix published-sitemap sampling plus advancing saved-search windows pass the 659-test checkpoint, installed gate and nine-PDF/restore gate. Immutable capture/replay, title filtering, source limits/failures and unsupported-employer gaps are explicit. Full market coverage, broader provider cursors and independent source monitoring remain unfinished |
+| Discovery-to-draft workflow | Implemented | Saved source/evidence scope, durable source checkpoints, applied/excluded/unchanged selection, resumed child batch and combined review; 539-test checkpoint and fresh installed configured-search gate pass, with sixteen real PDFs and encrypted restoration |
+| Daily trigger over the same workflow | Implemented locally | Durable occurrences, timezone policy, fenced recovery, bounded catch-up, pause/resume and semantic notification acknowledgment; 659-test checkpoint and fresh installed eleven-PDF/encrypted-restore daily gate pass. External wake-up setup and personal schedule selection remain separate |
+| Preparation preferences and repeated-blocker fairness | Implemented locally | V2 literal title/location filters and stable ordering reach unattempted jobs before repeated blockers; original v1 scope/history compatibility retained. The 693-test checkpoint, fresh install and two-PDF/restore gate pass |
+| Fairness across automatic sources | Implemented locally | Durable rotation shares fetch/quota and final selection priority, preserving retries and started legacy runs; 715 tests, fresh installed and three-day/two-PDF/restore gates pass |
+| Sustained daily workload | In progress | Twenty synthetic daily runs/200 PDFs and encrypted restore pass; the next run safely refuses before work at 16,023,552 bytes. Historical validation optimization retains every PDF check and reduces the same-history tick from 67.254 to 28.330s; 743 tests and fresh install pass. Mid-run capacity reporting now preserves partial drafts and passes the 753-test/full-installed checkpoint; larger storage lifecycle remains open |
+| One-folder run review | Implemented locally | Current validated PDFs/answers, job links, source gaps and grouped blockers; stale files omitted, partial questions explicit, exact private-copy replay. 781 tests and fresh installed search/export/restore gates pass |
+| Active-time evaluation | In progress | Synthetic ten-job one-kickoff/one-review batch passed with two isolated blockers and real PDFs. Local validation-call timing improved; a same-workload user active-time comparison remains unmeasured |
+| Larger material storage lifecycle | Planned | [Proposed ADR 0010](adr/0010-content-addressed-material-storage.md) evaluates exact-byte sharing and explicit conversion into a new private home; no migration or conversion command exists |
+
+This milestone advances Phase 2 while composing the existing Phase 1 services.
+The first implementation slice was changed to multi-source discovery in response
+to the requested employer coverage. Initial discovery covers configured company
+boards, not all openings on the internet. Browser safe-fill remains a later upgrade;
+package and fact approvals, sensitive answers and final submission retain their
+existing boundaries. Creating a scheduled chat is not evidence that this
+source-to-package pipeline exists.
+
 ## Phase 0 — Repository and truth layer
 
 **Status: In progress**
@@ -82,7 +119,7 @@ facts and provenance without placing private data in the repository.
 | Resume import, extraction proposal, and human review | Implemented for UTF-8 pilot | Exact line extraction and hash-bound selected onboarding retain source spans; explicit name/contact vocabulary 2 retains vocabulary 1 replay. Pending records require per-item audited approval. Retirement/replacement resolves selected corrections without rewriting history. PDF/DOCX input and broader semantic conflict assistance remain planned |
 | Content-free diagnostic logging | Implemented | Opt-in fixed-schema JSONL excludes caller content; failure, interruption, ambiguous-commit recovery, and broken-sink tests pass; no file logs or telemetry |
 | Backup, export, deletion, and retention | Implemented for bounded pilot; broader lifecycle planned | Encrypted complete-database backup/restore includes job/material/application state. Fixed-schema support export and confirmed whole-portable-home deletion pass the CLI lifecycle gate. External source files/exports/backups remain caller-owned. Full filesystem backup, per-record deletion and automatic retention remain planned |
-| Installed-package verification | Implemented | Source/wheel install, bundled migrations 001–004, both optional extras, and the complete synthetic pilot pass in a fresh offline environment on local Python 3.13.1 |
+| Installed-package verification | Implemented locally | Source/wheel install, bundled migrations 001–007, both optional extras, full pilot and batch/search/daily/window gates pass in a fresh offline environment on local Python 3.13.1 |
 | CI interpreter/OS matrix | In progress | User-reported results after the workflow fix: macOS 15/Python 3.12 and 3.13 plus Ubuntu 24.04/Python 3.13 pass; Ubuntu/Python 3.12 exposed a concurrent schema-validation race. The local correction still needs a full hosted run |
 | Synthetic candidate/job fixtures and adversarial corpus | In progress | One synthetic profile plus adversarial schema, all nine taxonomy-category positives, explicit lexical false-positive controls, secret, percent-encoding, fragmentation, whole-source, padding, mutation, and no-write import cases exist; broader candidate/job corpus remains |
 
@@ -95,7 +132,7 @@ data is unnecessary, and the truth/privacy invariants have automated coverage.
 
 | Deliverable | Status | Evidence / limits |
 |---|---|---|
-| Immutable job text and URL | Implemented | User-supplied text, digest, capture time and source spans; no live fetch/verification |
+| Immutable job text and URL | Implemented for manual and supported feed capture | User-supplied text plus versioned public-feed captures, digest, capture time and source spans; feed observation does not verify current application-page availability |
 | Requirement extraction | Implemented for recognized text headings | Exact quotes, classification basis and ambiguity labels; no semantic hiring hypotheses |
 | Evidence matrix and gaps | Implemented | Approved-packet retrieval, shared terms, structured unknowns; fit and hiring probability stay unresolved |
 | Structured resume, LaTeX, PDF, text and manifest | Implemented | Version-2 clean typography, source-aware bullets and role/education headings, closed presentation overrides, exact approved text/mappings, extraction and overflow gates; version-1 validation/replay/approvals preserved (ADR 0008) |
@@ -110,7 +147,7 @@ wheel installation. `scripts/check_materials.py` refuses optional-provider skips
 See the handoff for exact final counts, interpreter, visual QA and limitations.
 The command-line quickstart is in `docs/QUICKSTART.md`.
 
-Richer input formats, semantic tailoring, live job fetching, broader platforms,
+Richer input formats, semantic tailoring, generic page fetching, broader platforms,
 ATS compatibility validation, and a graphical interface remain unfinished.
 
 Phase 1 exits when every factual artifact unit maps to approved claim IDs, every
@@ -119,12 +156,20 @@ extraction, and the complete workflow runs on synthetic fixtures.
 
 ## Phase 2 — Job discovery
 
-**Status: Planned**
+**Status: In progress**
 
-- official Greenhouse, Lever, and Ashby adapters;
+- official Greenhouse, Lever/global and EU, and Ashby adapters plus CLI capture
+  are implemented and locally verified; see [JOB_DISCOVERY.md](JOB_DISCOVERY.md);
+- the public major-tech catalog has feed routes for Anthropic/OpenAI, a bounded
+  Netflix sitemap route, and explicit manual gaps for Google/Apple/Amazon/Meta;
+  further company connectors,
+  authorized alert ingestion and supplemental search remain planned;
 - generic JSON-LD and compliant company-page ingestion;
-- watchlists, source cursors, bounded sync, health, and freshness reports;
-- conservative deduplication that preserves source aliases and versions;
+- manifests, durable saved scopes, bounded reads, per-run coverage and daily runs
+  and Netflix traversal are implemented. Broader source cursors and
+  a source-health history remain planned;
+- stable per-source content identities preserve versions; cross-source aliases
+  and conservative cross-source deduplication remain planned;
 - explainable ranking with hard constraints, evidence strength, and uncertainty.
 
 Unauthorized LinkedIn or Indeed scraping/auto-apply code is not a roadmap item.

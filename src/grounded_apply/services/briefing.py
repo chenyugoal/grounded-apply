@@ -71,6 +71,7 @@ class BriefingService:
                     rows.append({
                         "job_id": job.id, "source_url": job.source_url,
                         "captured_at": job.captured_at, "live_page_verified": False,
+                        "capture_method": job.capture_method,
                         "application_id": None if application is None else application["application_id"],
                         "application_material_id": None if application is None else next(
                             (e["payload"]["material_id"] for e in reversed(application["events"])
@@ -100,7 +101,7 @@ class BriefingService:
                     "Action order reflects recorded workflow stage, not fit, hiring probability, deadlines, or job quality.",
                     "Retrieved evidence counts are keyword retrieval only; they do not prove that a requirement is met.",
                     "Response checks are on-demand suggestions, not scheduled reminders or messages.",
-                    "Job pages and employer responses are not fetched. Review saved text and verify the live opening yourself.",
+                    "This briefing does not fetch job pages or employer responses. Feed captures are historical observations; verify current availability before applying.",
                     "Approved claim counts do not establish current scope, freshness, or permission for a particular use.",
                 ],
             }

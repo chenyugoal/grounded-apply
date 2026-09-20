@@ -15,7 +15,8 @@ def check() -> int:
     from grounded_apply.repositories.backup_crypto import FernetBackupCipher
 
     FernetBackupCipher()  # Fail before tests if the optional provider is missing.
-    suite = unittest.defaultTestLoader.loadTestsFromName("tests.test_backup")
+    suite = unittest.defaultTestLoader.loadTestsFromNames(
+        ["tests.test_backup", "tests.test_backup_schema_compatibility"])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() and not result.skipped else 1
 

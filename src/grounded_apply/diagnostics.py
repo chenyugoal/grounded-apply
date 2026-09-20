@@ -27,6 +27,25 @@ class DiagnosticCommand(StrEnum):
     JOBS_LIST = "jobs.list"
     JOBS_SHOW = "jobs.show"
     JOBS_ASSESS = "jobs.assess"
+    JOBS_DISCOVER = "jobs.discover"
+    BATCHES_PREPARE = "batches.prepare"
+    BATCHES_RESUME = "batches.resume"
+    BATCHES_SHOW = "batches.show"
+    BATCHES_LIST = "batches.list"
+    SEARCHES_CONFIGURE = "searches.configure"
+    SEARCHES_RUN = "searches.run"
+    SEARCHES_RESUME = "searches.resume"
+    SEARCHES_SHOW = "searches.show"
+    SEARCHES_LIST = "searches.list"
+    SEARCHES_SCOPES = "searches.scopes"
+    SEARCHES_EXPORT = "searches.export"
+    SCHEDULES_CONFIGURE = "schedules.configure"
+    SCHEDULES_TICK = "schedules.tick"
+    SCHEDULES_SHOW = "schedules.show"
+    SCHEDULES_LIST = "schedules.list"
+    SCHEDULES_PAUSE = "schedules.pause"
+    SCHEDULES_RESUME = "schedules.resume"
+    SCHEDULES_ACK = "schedules.ack"
     MATERIALS_BUILD = "materials.build"
     MATERIALS_LIST = "materials.list"
     MATERIALS_SHOW = "materials.show"
@@ -56,6 +75,9 @@ class DiagnosticOutcome(StrEnum):
     DECISION_OUTCOME_UNKNOWN = "decision_outcome_unknown"
     BACKUP_OUTCOME_UNKNOWN = "backup_outcome_unknown"
     DELETION_OUTCOME_UNKNOWN = "deletion_outcome_unknown"
+    BATCH_OUTCOME_UNKNOWN = "batch_outcome_unknown"
+    SEARCH_OUTCOME_UNKNOWN = "search_outcome_unknown"
+    SCHEDULE_OUTCOME_UNKNOWN = "schedule_outcome_unknown"
 
 
 class CommandDiagnostics:
@@ -70,6 +92,27 @@ class CommandDiagnostics:
         self._decision_outcome_unknown = False
         self._backup_outcome_unknown = False
         self._deletion_outcome_unknown = False
+        self._batch_outcome_unknown = False
+        self._search_outcome_unknown = False
+        self._schedule_outcome_unknown = False
+
+    def require_schedule_recovery(self) -> None:
+        if self._command not in {DiagnosticCommand.SCHEDULES_CONFIGURE, DiagnosticCommand.SCHEDULES_TICK,
+                                 DiagnosticCommand.SCHEDULES_PAUSE, DiagnosticCommand.SCHEDULES_RESUME,
+                                 DiagnosticCommand.SCHEDULES_ACK}:
+            raise TypeError("Schedule recovery applies only to daily schedule mutations")
+        self._schedule_outcome_unknown = True
+
+    def require_search_recovery(self) -> None:
+        if self._command not in {DiagnosticCommand.SEARCHES_CONFIGURE,
+                                 DiagnosticCommand.SEARCHES_RUN, DiagnosticCommand.SEARCHES_RESUME}:
+            raise TypeError("Search recovery applies only to search configuration or execution")
+        self._search_outcome_unknown = True
+
+    def require_batch_recovery(self) -> None:
+        if self._command not in {DiagnosticCommand.BATCHES_PREPARE, DiagnosticCommand.BATCHES_RESUME}:
+            raise TypeError("Batch recovery applies only to batch preparation or resumption")
+        self._batch_outcome_unknown = True
 
     def require_deletion_recovery(self) -> None:
         if self._command != DiagnosticCommand.DELETE:
@@ -99,6 +142,12 @@ class CommandDiagnostics:
             outcome = DiagnosticOutcome.BACKUP_OUTCOME_UNKNOWN
         if outcome != DiagnosticOutcome.STARTED and self._deletion_outcome_unknown:
             outcome = DiagnosticOutcome.DELETION_OUTCOME_UNKNOWN
+        if outcome != DiagnosticOutcome.STARTED and self._batch_outcome_unknown:
+            outcome = DiagnosticOutcome.BATCH_OUTCOME_UNKNOWN
+        if outcome != DiagnosticOutcome.STARTED and self._search_outcome_unknown:
+            outcome = DiagnosticOutcome.SEARCH_OUTCOME_UNKNOWN
+        if outcome != DiagnosticOutcome.STARTED and self._schedule_outcome_unknown:
+            outcome = DiagnosticOutcome.SCHEDULE_OUTCOME_UNKNOWN
         try:
             record = {
                 "schema_version": 1,
@@ -116,7 +165,17 @@ class CommandDiagnostics:
                     if outcome == DiagnosticOutcome.BACKUP_OUTCOME_UNKNOWN else
                     "Deletion may be incomplete or complete. Inspect the external receipt and target; "
                     "do not reuse a partial operation."
-                    if outcome == DiagnosticOutcome.DELETION_OUTCOME_UNKNOWN else None
+                    if outcome == DiagnosticOutcome.DELETION_OUTCOME_UNKNOWN else
+                    "Batch progress may already be saved. Retry preparation with the same spec and "
+                    "idempotency key, or resume the same batch ID. Saved drafts still require review."
+                    if outcome == DiagnosticOutcome.BATCH_OUTCOME_UNKNOWN else
+                    "Search configuration or run progress may already be saved. Retry the same "
+                    "request and idempotency key, or resume the saved run ID. Inspect searches scopes/list."
+                    if outcome == DiagnosticOutcome.SEARCH_OUTCOME_UNKNOWN else
+                    "Daily schedule state or run progress may already be saved. Inspect schedules show/list; "
+                    "retry configuration or changes with the same key, and tick the same schedule. "
+                    "Reuse the same notification ID when acknowledging delivery."
+                    if outcome == DiagnosticOutcome.SCHEDULE_OUTCOME_UNKNOWN else None
                 ),
             }
             self._sink.write(json.dumps(record, sort_keys=True) + "\n")

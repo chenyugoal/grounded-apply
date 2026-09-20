@@ -35,14 +35,16 @@ class MatchingService:
             policy = job_policy(job_id)
             eligible = []
             blocked = []
-            for claim in claims:
-                if claim.claim_type.startswith("contact_") or claim.claim_type == "candidate_name":
-                    continue
-                outcome = profile.packet_for_claim(claim.id, policy=policy)
-                if isinstance(outcome, Resolved):
-                    eligible.append(claim)
-                else:
-                    blocked.append({"claim_id": claim.id, "outcome": to_jsonable(outcome)})
+            selected = [c for c in claims if not c.claim_type.startswith("contact_")
+                        and c.claim_type != "candidate_name"]
+            for start in range(0, len(selected), 500):
+                group = selected[start:start + 500]
+                outcomes = profile.packets_for_claims(tuple(c.id for c in group), policy=policy)
+                for claim, outcome in zip(group, outcomes, strict=True):
+                    if isinstance(outcome, Resolved):
+                        eligible.append(claim)
+                    else:
+                        blocked.append({"claim_id": claim.id, "outcome": to_jsonable(outcome)})
             rows = []
             for requirement in job.requirements:
                 query = terms(requirement.quote)
