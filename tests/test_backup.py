@@ -16,12 +16,17 @@ from unittest.mock import patch
 from grounded_apply.cli import main
 from grounded_apply.config import resolve_runtime_paths
 from grounded_apply.repositories import SQLiteRepository
-from grounded_apply.repositories.backup_crypto import FernetBackupCipher, _MAGIC, _SCOPE
+from grounded_apply.repositories.backup_crypto import (
+    FernetBackupCipher, _MAGIC, _SCOPE, _validate_canonical_token,
+)
 from grounded_apply.repositories.backup_files import (
     LocalBackupStorage, read_private_file, write_private_file,
 )
 from grounded_apply.repositories.snapshots import validate_profile_snapshot
-from grounded_apply.services.backup import BackupError, BackupService, validate_passphrase
+from grounded_apply.services.backup import (
+    BackupError, BackupService, MAX_SNAPSHOT_BYTES, SNAPSHOT_WORK_SECONDS, validate_passphrase,
+)
+from grounded_apply.services.jobs import JobService
 
 
 HAS_CRYPTO = importlib.util.find_spec("cryptography") is not None
@@ -40,7 +45,7 @@ class SnapshotTests(unittest.TestCase):
 
     def image(self) -> bytes:
         with SQLiteRepository(self.database, read_only=True) as repository:
-            return repository.snapshot_bytes(max_bytes=16 * 1024 * 1024)
+            return repository.snapshot_bytes(max_bytes=MAX_SNAPSHOT_BYTES)
 
     def changed_image(self, sql: str) -> bytes:
         with closing(sqlite3.connect(":memory:", isolation_level=None)) as connection:
@@ -67,10 +72,52 @@ class SnapshotTests(unittest.TestCase):
     def test_snapshot_deadline_rolls_back_and_keeps_repository_usable(self) -> None:
         image = self.image()
         with SQLiteRepository(self.database, read_only=True) as repository:
-            with patch("grounded_apply.repositories.sqlite.time.monotonic", side_effect=[0.0, 10.0]):
+            with patch("grounded_apply.repositories.sqlite.time.monotonic",
+                       side_effect=[0.0, SNAPSHOT_WORK_SECONDS + 1]):
                 with self.assertRaisesRegex(RuntimeError, "time budget"):
                     repository.snapshot_bytes(max_bytes=len(image))
             self.assertEqual(repository.snapshot_bytes(max_bytes=len(image)), image)
+
+    def test_snapshot_validation_deadline_fails_closed_without_mutation(self) -> None:
+        image = self.image()
+        with patch("grounded_apply.repositories.snapshots.time.monotonic",
+                   side_effect=[0.0, *([SNAPSHOT_WORK_SECONDS + 1] * 1000)]):
+            with self.assertRaises(BackupError):
+                validate_profile_snapshot(image)
+        validate_profile_snapshot(image)
+        self.assertEqual(self.image(), image)
+
+    def test_snapshot_expiration_after_serialization_releases_read_transaction(self) -> None:
+        image = self.image()
+        now = [0.0]
+        connect = sqlite3.connect
+
+        class SlowSerialization(sqlite3.Connection):
+            def serialize(self, *, name: str = "main") -> bytes:
+                result = super().serialize(name=name)
+                now[0] = SNAPSHOT_WORK_SECONDS + 1
+                return result
+
+        with SQLiteRepository(self.database, read_only=True) as repository:
+            with patch("grounded_apply.repositories.sqlite.sqlite3.connect",
+                       side_effect=lambda *args, **kwargs: connect(*args, **kwargs, factory=SlowSerialization)), patch(
+                "grounded_apply.repositories.sqlite.time.monotonic", side_effect=lambda: now[0],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "time budget"):
+                    repository.snapshot_bytes(max_bytes=len(image))
+            self.assertEqual(repository.snapshot_bytes(max_bytes=len(image)), image)
+
+    def test_canonical_archive_encoding_preserves_checks_across_chunk_boundaries(self) -> None:
+        prefix = b"AAAA" * 16384
+        for valid in (prefix, prefix + b"ZA==", prefix + b"_w==", prefix + b"AAA="):
+            _validate_canonical_token(valid)
+        for invalid in (
+            prefix[:-4] + b"ZA==" + b"AAAA", prefix + b"ZB==",
+            prefix + b"/w==", prefix + b"_w===", prefix + b"ZA==\n",
+            prefix + b"A", prefix + b"AA A", prefix + b"ZA==AAAA",
+        ):
+            with self.subTest(tail=invalid[-12:]), self.assertRaises(ValueError):
+                _validate_canonical_token(invalid)
 
     def test_snapshot_refuses_unknown_schema_and_modified_ledger(self) -> None:
         for sql in (
@@ -357,6 +404,23 @@ class EncryptedBackupTests(unittest.TestCase):
         with self.assertRaises(BackupError):
             self.service.create(self.archive, b"synthetic-wrong-passphrase")
         self.assertEqual(self.archive.read_bytes(), bytes_before)
+
+    def test_profile_above_former_capacity_restores_exactly_without_migration(self) -> None:
+        with SQLiteRepository(self.paths.database, existing_only=True) as repository:
+            jobs = JobService(repository)
+            for index in range(18):
+                jobs.add(f"https://example.com/fictional-capacity-{index}",
+                    "Fictional capacity fixture. " * 36000,
+                    idempotency_key=f"fictional-capacity-{index}")
+        snapshot = self.storage.capture_profile()
+        self.assertGreater(len(snapshot), 16 * 1024 * 1024)
+        created = self.service.create(self.archive, PASSPHRASE)
+        target = self.root / "fictional-large-restored"
+        restored = self.service.restore(self.archive, target, PASSPHRASE,
+            confirm=True, expected_archive_sha256=created.archive_sha256)
+        self.assertEqual(restored.snapshot_sha256, created.snapshot_sha256)
+        self.assertEqual((target / "data" / "grounded_apply.db").read_bytes(), snapshot)
+        self.assertEqual(self.storage.capture_profile(), snapshot)
 
     def test_changed_source_cannot_overwrite_named_archive(self) -> None:
         self.service.create(self.archive, PASSPHRASE)

@@ -251,7 +251,7 @@ remains available.
 
 Use `backup --encrypt /absolute/private/backup.gapply` regularly; it prompts for a
 passphrase. Keep the passphrase separately. Backup covers the complete pilot
-database, including PDFs and application history, up to 16 MiB. Original files,
+database, including PDFs and application history, up to 256 MiB. Original files,
 exports, config, caches, and external backups are excluded. Restore previews a
 new home; confirmation requires its archive hash. See the README for commands.
 

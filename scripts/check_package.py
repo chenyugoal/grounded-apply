@@ -261,6 +261,7 @@ print(json.dumps({"job_id": first["job_id"]}))
             from check_source_window import check_source_window
             from check_search_filters import check_search_filters
             from check_source_rotation import check_source_rotation
+            from check_storage_capacity import check_storage_capacity
             pilot = workspace / "pilot"
             pilot.mkdir(mode=0o700)
             check_pilot([str(command)], pilot)
@@ -282,6 +283,10 @@ print(json.dumps({"job_id": first["job_id"]}))
             rotation_workspace = workspace / "source-rotation-pilot"
             rotation_workspace.mkdir(mode=0o700)
             check_source_rotation([str(command)], rotation_workspace, include_backup=True)
+            capacity_workspace = workspace / "storage-capacity-pilot"
+            capacity_workspace.mkdir(mode=0o700)
+            check_storage_capacity(str(executable), capacity_workspace,
+                source_path=None, maximum_probe=False)
     print("PASS — source archive, wheel contents, isolated install, CLI, migrations, and synthetic workflow")
 
 

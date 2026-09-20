@@ -7,13 +7,17 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from grounded_apply.repositories import SQLiteRepository
 from grounded_apply.repositories._schema import (
     MigrationError, default_migrations_directory, initialize_schema,
 )
 from grounded_apply.repositories.snapshots import validate_profile_snapshot
-from grounded_apply.services.backup import MAX_SNAPSHOT_BYTES
+
+# Keep rollback fixtures small; the optional storage gate exercises real
+# production capacity without making every base-suite run allocate hundreds of MiB.
+TEST_CAPACITY_BYTES = 16 * 1024 * 1024
 
 
 class MigrationCapacityTests(unittest.TestCase):
@@ -25,7 +29,7 @@ class MigrationCapacityTests(unittest.TestCase):
     def check_near_full_upgrade(self, version: int) -> None:
         with closing(sqlite3.connect(":memory:", isolation_level=None)) as source:
             initialize_schema(source, default_migrations_directory(), target_version=version)
-            padding = MAX_SNAPSHOT_BYTES - len(source.serialize()) - 64000
+            padding = TEST_CAPACITY_BYTES - len(source.serialize()) - 64000
             # Conspicuously fictional queued metadata exercises allocated-page
             # growth without private data or a nonregistered SQL table.
             source.execute(
@@ -35,13 +39,15 @@ class MigrationCapacityTests(unittest.TestCase):
                  "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
             )
             image = source.serialize()
-        self.assertLessEqual(len(image), MAX_SNAPSHOT_BYTES)
+        self.assertLessEqual(len(image), TEST_CAPACITY_BYTES)
         validate_profile_snapshot(image)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fictional-near-full.db"
             path.write_bytes(image)
             os.chmod(path, 0o600)
-            with closing(SQLiteRepository(path)) as repository:
+            with closing(SQLiteRepository(path)) as repository, patch(
+                "grounded_apply.services.backup.MAX_SNAPSHOT_BYTES", TEST_CAPACITY_BYTES,
+            ):
                 with self.assertRaisesRegex(MigrationError, "storage limit"):
                     repository.initialize()
                 self.assertEqual(repository.schema_version, version)

@@ -38,8 +38,8 @@ profile, material and submission approval contracts continue to apply.
    growth, and model calls/cost where applicable. Persist progress when a limit
    is reached. Use bounded retries and backoff, and prevent overlapping runs for
    the same search. Reserve capacity before writes so supported backup/deletion
-   bounds remain usable; the current database limit is 16 MiB and automatic
-   retention is unfinished. Capacity exhaustion is a visible blocker, not
+   bounds remain usable; the supported database limit is 256 MiB (ADR 0011).
+   Automatic retention is unfinished. Capacity exhaustion is a visible blocker, not
    permission to delete history or silently disable backup.
 3. Discover through narrow read-only source adapters. Begin with official
    Greenhouse, Ashby and Lever public feeds over explicit company boards. This is coverage

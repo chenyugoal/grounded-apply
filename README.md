@@ -85,12 +85,17 @@ issues, and the next exact task. The longer-term scope in
 [`docs/ROADMAP.md`](docs/ROADMAP.md) is planned unless the checkpoint says it is
 implemented and verified.
 
-Daily package storage remains bounded by the 16 MiB database snapshot limit.
+Daily package storage uses a 256 MiB supported database snapshot limit.
 `./scripts/gapply doctor --json` reports file usage and headroom, with a warning
 from ninety percent. This does not guarantee space for the next run or validate
-a backup; automatic retention and a larger storage lifecycle remain unfinished.
+a backup; document deduplication and automatic retention remain unfinished.
 When a run reaches a storage reserve after preparing some drafts, its report and
 notification retain those drafts and identify the capacity stop.
+Existing profiles gain the larger allowance without conversion. A synthetic
+255 MiB profile passed daily preparation and exact encrypted restore; backup and
+restore peaked around 2.3 GiB of process memory on the tested host because the
+archive implementation works in memory. This verifies byte capacity, not a fixed
+number of applications or months of history. See [ADR 0011](docs/adr/0011-supported-profile-capacity.md).
 
 ## Start the local pilot
 
@@ -161,8 +166,9 @@ supported. No environment default selects the deletion target. The receipt must
 be a new file under a private directory outside the target.
 
 The command refuses changed previews, unknown files, links, unsafe permissions,
-SQLite sidecars, files over the supported 16 MiB inventory limit, and nonempty
-artifact/cache/output directories. An external
+SQLite sidecars, databases over 256 MiB, config/restore receipts over 16 MiB,
+and nonempty artifact/cache/output directories. Inventory hashing reads bounded
+chunks instead of loading whole files. An external
 receipt records start and completion without personal content. An incomplete
 operation is refused on retry and requires inspection. External backups and
 source files remain; this is logical deletion, not secure erasure. Retention is
@@ -194,7 +200,7 @@ it. Automation can supply bounded UTF-8 stdin with `--passphrase-stdin`. There i
 no inline-secret, environment-variable, or passphrase-file option. The optional
 provider uses Fernet with Argon2id; `.gapply` archives are not age files.
 
-The archive contains one consistent database, up to 16 MiB, including approved
+The archive contains one consistent database, up to 256 MiB, including approved
 facts, job snapshots, generated PDF/LaTeX/text, answers, and application history.
 It excludes original documents, exported copies, browser state, config, caches, and logs;
 non-digest artifact references fail closed. Restore validates authentication,

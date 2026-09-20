@@ -2,245 +2,160 @@
 
 This is the single live checkpoint. Scope and feature status live in
 [ROADMAP.md](ROADMAP.md); accepted architecture decisions live in `docs/adr/`.
-Preserve all existing tracked and untracked work.
 
 ## Checkpoint
 
-- **Updated:** September 20, 2026, 01:57 UTC / September 19, 20:57 CDT.
-- **Branch / HEAD:** `codex/phase-0-truth-layer`, `dda08b2`. Origin matched at
-  session start. Changes are local and uncommitted; no push, PR or hosted CI run.
-- **Working tree:** 22 tracked modifications and 66 untracked text files across
-  discovery, batches, searches, daily schedules, review exports, tests and docs.
-  No generated/private runtime artifacts belong in the checkout.
-- **Current schema:** 7. Exact registered schemas 4–7 remain restorable; restore
-  does not migrate. `profile init` explicitly upgrades before current execution.
-- **Latest complete full gate:** 781 tests/zero skips in 464.252s on the final
-  compact-index production snapshot. Fresh installed acceptance, required PDF
-  and encryption gates also pass. No production increment is unfinished and no
-  known local failure remains.
-- **Milestone:** daily discovery/preparation is implemented locally. Broader
-  employer coverage, larger storage lifecycle and actual user-time evaluation
-  remain unfinished. No personal search, schedule or candidate runtime was used.
-- **Development window completed:** the user's four-hour window ended September
-  20 at 01:57 UTC / September 19 at 20:57 CDT. The automation tool confirmed
-  `grounded-apply-development-window` is **PAUSED** at the deadline. No development
-  continuation or personal job-search wake-up remains active from this task.
+- **Updated:** September 20, 2026, 05:37 UTC / September 20, 00:37 CDT.
+- **Branch / HEAD:** `codex/phase-0-truth-layer`, `bde1758`. The previous daily
+  workflow milestone was committed before this session; the starting tree was
+  clean. This capacity increment has 24 tracked modifications and two untracked
+  text files (ADR 0011 and the capacity script), all local and uncommitted. No
+  push or PR; generated/private runtime artifacts remain outside the checkout.
+- **Current scope:** user accepted raising supported capacity after the earlier
+  four-hour window. Increase supported snapshots/automated storage from 16 MiB
+  to 256 MiB, verify resource costs, and retain backup/restore/deletion and safe
+  partial progress. Deduplication remains a separate schema-conversion proposal.
+- **Current status:** implemented and locally verified. All 791 regression
+  tests pass with zero skips, as do full-size capacity, fresh installed-pilot,
+  required PDF and encryption gates. No known local failure remains.
+- **Current schema:** 7, unchanged. Archive format 1 and exact registered schema
+  4–7 restoration remain unchanged. No conversion is needed for the increase.
+- No personal runtime was accessed; all generated data is fictional and outside
+  the repository. No personal search/schedule was created or activated.
+- The earlier development window ended September 20 at 01:57 UTC. Its temporary
+  `grounded-apply-development-window` heartbeat remains PAUSED; this request did
+  not restart it. No future development continuation was scheduled.
 
-## Implemented behavior
+## Current increment
 
-- **Public discovery:** configured Greenhouse, Ashby, Lever/global and Lever EU
-  boards; bounded Netflix robots/sitemap/JobPosting reads. Immutable capture,
-  replay and per-source failures/limits are explicit. The major-tech preset has
-  Anthropic/OpenAI feed routes, partial Netflix and manual Google/Apple/Amazon/
-  Meta gaps. It does not cover most companies or every opening. See
-  [JOB_DISCOVERY.md](JOB_DISCOVERY.md).
-- **Batch preparation:** one approved-evidence selection across 1–50 saved jobs,
-  per-item overrides, isolated blockers, durable leases/checkpoints and bounded
-  resume. Preparation makes drafts, never fact/material approvals or submissions.
-  See [BATCH_PREPARATION.md](BATCH_PREPARATION.md).
-- **Saved searches:** immutable source/evidence scope, bounded requests/bytes,
-  source-atomic capture, frozen round-robin selection and a child batch. Applied,
-  excluded and unchanged current drafts skip before the preparation limit.
-  Network reads occur with runtime closed; rendering is outside write
-  transactions. Parent leases fence child progress. See
-  [SEARCH_RUNS.md](SEARCH_RUNS.md).
-- **Preferences and fairness:** v2 literal title/location filters preserve v1
-  scope/history bytes. Unknown locations stay explicit and default to included;
-  no geographic or eligibility inference. Least-attempted exact posting versions
-  precede repeated blockers. `source_rotation@1` rotates automatic boards using
-  one durable reservation; retries retain order and started legacy runs remain
-  unchanged. Manual gaps follow automatic sources.
-- **Netflix windows:** `netflix_head1_tail6@1` refreshes one newest advertised
-  posting and traverses up to six later entries per saved-search round. Cursor
-  custody is versioned; isolated failed details advance, while restrictions or
-  refused pre-GET budgets stop without advancing. Standalone discovery keeps its
-  first bounded sample. Neither mode promises complete coverage.
-- **Daily policy:** timezone/local-day occurrences, bounded catch-up and retry,
-  pause/resume, parent fences and exact child recovery. Pending notification IDs
-  are acknowledged only after reviewing their exact run, which may be older than
-  the latest child. Unchanged rotation stays quiet; deferred sources preserve
-  last observed notification health while current reports retain coverage gaps.
-  There is no installed daemon or personal wake-up. See
-  [DAILY_SEARCHES.md](DAILY_SEARCHES.md).
-- **Current-fact performance:** one fresh validated profile snapshot per material
-  plan. Search history still audits every historical PDF/bundle/binding/approval;
-  current facts resolve only for exact incoming versions eligible for reuse.
-  No authority cache persists across calls, rendering or commits. Corruption
-  fails closed, including an invalid approval on a partial/stale bundle.
-- **Capacity handling:** doctor reports guarded file usage/headroom with an
-  advisory from 90% of the 16 MiB snapshot cap. This is not a backup-validity or
-  next-operation-fit guarantee. A shared capacity exception preserves actual
-  partial drafts and notifications at a mid-run reserve; it does not bypass
-  lease, pause, expiry or clock checks. No retention or cap increase was added.
-- **Review export:** `searches export --run-id ID --output-dir ABSOLUTE_DIR
-  [--dry-run]` gathers one validated read snapshot into a private Markdown/JSON
-  index, hash receipt and UUID job folders with existing material files. Current
-  partial bundles retain blockers; stale files are omitted. Approval state is
-  observed without granting approval. Exact old-run identity is retained; lease
-  expiry alone does not change export bytes. Corrupt history fails closed.
-  All output is bounded before writing: 50 packages/403 files/32 MiB total,
-  8 MiB per index and 2 MiB per material file. All runtime roots and Git worktrees
-  are excluded. Exact replay compares every file; extra, changed or incomplete
-  contents are never overwritten or repaired. The compact index exposes direct
-  PDF/answer/job links with escaped titles, locations and source IDs.
-- **Operator workflow:** [DAILY_QUICKSTART.md](DAILY_QUICKSTART.md), the repository
-  skill and [CODEX_WORKFLOW.md](CODEX_WORKFLOW.md) explain setup once, unattended
-  bounded execution and one consolidated review. Browser filling and final
-  external submission are not automated; final submission remains human.
+[ADR 0011](adr/0011-supported-profile-capacity.md) supersedes the original
+lifecycle bounds: 256 MiB database snapshots/automated writes, 384 MiB encrypted
+archives, thirty-second cooperative capture and validation budgets. Existing
+256/512/768 KiB checkpoint reserves and the ninety-percent advisory remain.
+Profile input, HTTP response, PDF and export limits are independent and unchanged.
+
+Snapshot capture checks the deadline after serialization; validation measures
+reference-schema construction and deserialization and checks completion. Native
+operations are not forcibly preempted. Encryption uses the existing Argon2id and
+Fernet recipe. Canonical Base64 checks use aligned 64 KiB chunks rather than a
+second retained full decoded archive. Existing format/authentication rules hold.
+
+Deletion hashes in 64 KiB chunks with no-follow/private/single-link and sampled
+identity checks. The database bound is 256 MiB; config and restore receipts each
+retain 16 MiB, with 288 MiB aggregate inventory. Preview confirmation, exact
+replay, receipt audit and refusal of partial/changed targets remain intact.
+
+The limit is supported backup/automated-workflow capacity, not a universal write
+quota. Older manual job capture and standalone material build paths can exceed
+it; doctor reports exceeded capacity. No automatic retention or history deletion
+was added. Larger archives are unsupported by older executables retaining the
+16/24 MiB limits. Same-UID TOCTOU, sidecar/WAL and private-output rules remain.
 
 ## Verification
 
-Repository Python is 3.12.14: use `sh scripts/python`, not system Python 3.9.
-Build tools use Python 3.13.1. No dependency versions changed.
-
-Final compact-index verification commands:
+Repository Python is 3.12.14 (`sh scripts/python`), build tools Python 3.13.1.
+No dependency versions changed. Startup protocol found the previous checkpoint's
+uncommitted-state description stale and verified clean HEAD `bde1758` instead.
 
 ```text
-./scripts/check
-PASS — 781 tests, zero skips, 464.252s; /private/tmp/gapply-review-index-final-full-20260920.log
-PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python scripts/check_package.py --pilot-wheelhouse /private/tmp/grounded-apply-milestone-wheels-20260918
-PASS — fresh offline wheel, full pilot, batch/search/daily/window/filter/rotation acceptance, both extras, encrypted restoration and review-folder replay
-PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_materials.py
-PASS — 15 tests, zero skips, 16.760s
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_search_review_exports tests.test_review_files tests.test_search_cli -v
+PASS — 40 tests, 52.924s; /private/tmp/gapply-capacity-session-start.log
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_backup tests.test_backup_schema_compatibility tests.test_migration_capacity tests.test_storage_capacity tests.test_schedule_capacity tests.test_deletion -v
+PASS — 67 tests, 33.196s; /private/tmp/gapply-capacity-final-focused.log
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_storage_capacity.py --workspace /private/tmp/gapply-storage-capacity-full-20260920
+PASS — 59.300s; /private/tmp/gapply-storage-capacity-full-20260920.log
 PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_backup.py
-PASS — 34 tests, zero skips, 10.277s
+PASS — 38 tests, zero skips, 11.807s; /private/tmp/gapply-capacity-final-backup.log
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_materials.py
+PASS — 15 tests, zero skips, 17.599s; /private/tmp/gapply-capacity-final-materials.log
+./scripts/check
+PASS — 791 tests, zero skips, 483.974s; /private/tmp/gapply-capacity-final-full.log
+PYTHONDONTWRITEBYTECODE=1 /private/tmp/grounded-apply-milestone-tools-20260918/bin/python scripts/check_package.py --pilot-wheelhouse /private/tmp/grounded-apply-milestone-wheels-20260918
+PASS — fresh offline wheel, all existing real-PDF pilot/search/daily/window/filter/rotation gates, and new >16 MiB preparation/restore smoke; /private/tmp/gapply-capacity-final-package.log
 ```
 
-Final logs are `/private/tmp/gapply-review-index-final-{full,package,materials,backup}-20260920.log`.
-Before the full gate, `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python
--W error -m unittest tests.test_review_files tests.test_search_review_exports
-tests.test_search_cli -v` passed 40 tests/51.430s. After the final escaped source
-cell addition, `tests.test_review_files` passed 16/1.030s. Independent review
-found no remaining blocker and exercised adversarial Markdown/HTML/control text,
-all package states, link targets, private paths, interruption and exact replay.
-Initial export diagnostics missed the new command classification and the first
-URL helper rejected Netflix query links; both were fixed before full verification.
+The first focused run exposed two tests whose oversized-material fixtures assumed
+16 MiB. They were corrected to inject small allowances and retain actual partial
+progress/rollback assertions. Production behavior was not changed to accommodate
+those fixtures. Migration and reporting tests likewise retain small explicit
+allowances. Larger-profile tests separately exercise the real production limit.
+Independent review found no actionable defect in production or the capacity gate.
+`/private/tmp/gapply-actionlint-1.7.12 -shellcheck= -pyflakes= .github/workflows/check.yml`
+and `git diff --check` pass. Final file review covered 26 text
+files and 86 valid local Markdown links, with no generated/private artifacts or
+credential-pattern hits. Source/test files remained frozen during final gates.
 
-Final tracked/untracked-file audit covered 88 text files, found no binary or
-generated/private artifacts, and resolved all 95 local Markdown links. Four
-credential-pattern matches were inspected synthetic invalid-URL/proxy fixtures,
-not real secrets. Complete changed code was reviewed across the root and bounded
-independent agents; source and test changes stayed frozen during the final gates.
+### Capacity and memory evidence
 
-Additional required checks passed:
+The reproducible external capacity gate creates fictional jobs through validated
+services and real PDFs through the actual daily CLI. At 18,976,768 database bytes
+it prepares two PDFs across three daily dates, with quiet unchanged runs. It then
+uses 252 further bounded job inputs to approach the new limit and prepares a
+third PDF. Final database size is **267,415,552 bytes** (about 255 MiB); encrypted
+archive size is **356,554,263 bytes**. Source bytes, approved profile, material
+identities and schema remain unchanged across exact encrypted restore/replay.
+There are zero live network requests and no material approvals or submissions.
 
-```text
-/private/tmp/gapply-actionlint-1.7.12 -shellcheck= -pyflakes= .github/workflows/check.yml
-/private/tmp/grounded-apply-milestone-tools-20260918/bin/python /Users/chenyu/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/grounded-apply
-git diff --check
-```
+At that size, measured wall times were 2.618s for the new daily draft, 2.411s for
+backup, 2.985s for restore preview, 3.138s for confirmed restore and 3.058s for
+exact replay. Peak RSS was 2,471,247,872 bytes for backup and 2,437,218,304 bytes
+for restore: about 2.3 GiB. Operations ran sequentially in separate processes.
+These are tested-host observations, not latency/memory guarantees. Encryption
+remains in memory; streaming lifecycle operations are still future work.
 
-The configured-search gate renders sixteen real PDFs across initial, later,
-changed and resumed runs. It exports eight initial drafts plus two isolated
-blockers, preserves source gaps and unknown questionnaire coverage, makes no
-new GET/render on export, leaves runtime bytes unchanged and reconstructs the
-same review tree after encrypted restore. Final compact Markdown was inspected
-at `/private/tmp/gapply-overview-review-vw0f0oz6/review-final/review.md`; its
-`final-verification.json` records ten four-column rows, sixteen local file links,
-ten HTTPS job links and grouped blockers. The preview was queued in Codex.
+Evidence: `/private/tmp/gapply-storage-capacity-full-20260920/capacity-summary.json`.
+The fixture primarily measures byte capacity with large job text and three PDFs;
+it does not establish thousands-of-material history performance or a guaranteed
+retention duration. The installed gate now includes the >16 MiB smoke workflow;
+its near-limit probe remains a separate command to control memory cost.
 
-Earlier checkpoint history (all had fresh installed acceptance):
+## Preserved daily milestone and known limits
 
-| Increment | Full tests / elapsed |
-|---|---|
-| Discovery/batches | 490 / 235.447s |
-| Saved search | 539 / 411.767s |
-| Daily execution | 610 / 539.836s |
-| Netflix windows/material-plan snapshot | 659 / 321.107s |
-| Preparation filters/fairness | 693 / 355.950s |
-| Source rotation | 715 / 378.077s |
-| Historical validation/quiet notifications/headroom | 743 / 408.714s |
-| Capacity reporting | 753 / 431.501s |
-| Review export before compact table | 781 / 465.682s |
+Committed `bde1758` supplies configured Greenhouse/Ashby/Lever feeds, bounded
+Netflix discovery/windows, durable batch/search/daily orchestration, source
+rotation, literal preferences, blocker isolation, quiet notices and private
+one-folder review export. See [DAILY_QUICKSTART.md](DAILY_QUICKSTART.md),
+[JOB_DISCOVERY.md](JOB_DISCOVERY.md), [SEARCH_RUNS.md](SEARCH_RUNS.md) and
+[DAILY_SEARCHES.md](DAILY_SEARCHES.md). The earlier final full gate passed 781
+checks and fresh installed/PDF/encryption gates before this increment.
 
-Earlier logs use `/private/tmp/gapply-{window,filter,rotation,history,capacity,export}-final-*-20260920.log`.
-Batch nine, search sixteen, daily eleven, window nine, filter two and rotation
-two PDF pages passed visual review in their respective synthetic gates. The
-mandatory session-start discovery/jobs/briefing command passed 67/39.334s.
+The major-tech catalog has Anthropic/OpenAI routes and partial Netflix; Google,
+Apple, Amazon and Meta remain manual gaps. No most-company/all-opening coverage
+promise. No semantic rewriting, browser fill, external messaging or automatic
+submission was added. Personal daily setup remains a separate user workflow.
 
-## Sustained synthetic workload and remaining storage work
+Earlier synthetic history reached 20 days/200 real PDFs at 16,023,552 bytes,
+stopping before day 21 under the former cap. It is historical evidence, not the
+new capacity boundary. Its same-history optimization reduced one ten-PDF tick
+from 67.254s to 28.330s while retaining all 350 historical PDF checks. That does
+not measure user active time. Earlier artifacts are under
+`/private/tmp/gapply-synthetic-daily-capacity-zr0kddk2`.
 
-A fictional seven-claim workload reached twenty completed daily runs/200 PDFs,
-201 jobs and 16,023,552 allocated database bytes. Day 21 refused before a new
-occurrence, GET or write because 753,664 bytes remaining were below the 768 KiB
-schedule reserve. All material validation, unchanged profile, pending notices,
-read-only review and encrypted restore passed. These are one fixture's results,
-not a twenty-day capacity guarantee.
+[ADR 0010](adr/0010-content-addressed-material-storage.md) remains Proposed. Its
+isolated duplicate-heavy experiment reconstructed 200 materials exactly and
+reduced allocation by 70.63%; no production sharing, conversion or migration
+exists. The proposal now references ADR 0011's independent capacity policy.
 
-A preserved 170-material checkpoint supported a same-history timing comparison:
-optimized day 18 took 28.330s versus 67.254s, still produced ten PDFs and retained
-all 350 historical PDF checks. Historical current-plan/question calls fell from
-350 to ten each. Earlier small-fixture plan/build improvements also passed, but
-none of these timings measure the user's five-minute cycle or active-user time.
-
-All 200 fixture PDFs have identical bytes, SHA-256
-`37ee1b1e44ed874d231e18434cdc44d048cb5f9e8b131882cbedf3bd6a274b8e`.
-The representative one-page PDF passed 150dpi visual inspection at
-`/private/tmp/gapply-capacity-qa-20260920-4d0sawg7/page-1.png`; exact dates and
-contributor wording remain intact. Source baseline, checkpoint and findings are
-under `/private/tmp/gapply-synthetic-daily-capacity-zr0kddk2`; the optimized
-continuation is `optimized-profiled-copy`, and `capacity-limit-restored` verifies
-exact restored state. Original baseline/archive were preserved.
-
-Actual CLI list/show/preview/export/replay at near-capacity produced ten PDFs and
-83 files, with exact stored PDF bytes and an unchanged database. HTTP, DNS and
-rendering were prohibited and had zero attempts. Evidence is
-`/private/tmp/gapply-capacity-review-export-pwj7t9ir/result.json` and its review
-folder. Two harness-only mistakes (an overly strict raw SQLite-header comparison
-and wrong diagnostic event-name expectations) were corrected; authenticated
-snapshot equality and the complete probes then passed. No product failure was
-concealed by those corrections.
-
-[ADR 0010](adr/0010-content-addressed-material-storage.md) is **Proposed**, not
-accepted or implemented. An isolated in-memory experiment reconstructed all 200
-materials exactly and retained all 34 other tables. Sharing three identical
-payloads and compacting yielded 4,706,304 bytes, 70.63% below the source in this
-duplicate-heavy fixture. The scratch schema was correctly refused by product
-snapshot validation. There is no supported conversion command or capacity change.
-
-## Coverage and known limits
-
-September 19 public read-only observations: Anthropic 611 postings/34 title
-matches; OpenAI 818/14, with a response around 13.6 MB near its 16 MiB response
-cap. Netflix had 482 advertised entries, seven inspected and 475 unread in the
-bounded check. Lever has synthetic verification only. These are dated observations,
-not future coverage promises. September 20 Google/DeepMind and Amazon follow-ups
-found no newly verified permitted enumeration route; official pages/policies
-and the exact gaps are recorded in JOB_DISCOVERY.md. No postings were saved by
-these live checks, and no undocumented API or login controls were bypassed.
-
-Hosted CI was not inspected. Previously reported macOS15/Python3.12/3.13 and
-Ubuntu24.04/Python3.13 results do not establish the whole matrix; the corrected
-Ubuntu/Python3.12 schema-race check remains unverified remotely. No current local
-failure is known. Semantic rewriting, PDF/DOCX ingestion, browser fill, messaging,
-per-record deletion and automatic retention remain unfinished.
-
-Real candidate data was never accessed in this development window. Preserve
-read-only sidecar/WAL refusal, sampled same-UID TOCTOU limits, external-copy
-ownership and the absence of secure-erasure or exactly-once delivery promises.
-Exported copies do not synchronize later fact/approval changes and are outside
+Hosted CI was not inspected; no claim of the full OS/interpreter matrix. The
+previously corrected Ubuntu/Python 3.12 schema-race check still lacks new hosted
+verification. External review copies remain independent snapshots outside
 runtime backup/deletion. Keep private stdout separate from fixed diagnostics.
 
 ## Next exact task
 
 Start with `sed -n '1,300p' docs/adr/0010-content-addressed-material-storage.md`.
-Review its concrete boundary map before accepting the proposal. The smallest
-proposed code slice is an isolated exact-byte payload primitive in
-`repositories/material_payloads.py` with synthetic in-memory tests in
-`tests/test_material_artifact_storage.py`; normal runtime behavior stays at
-schema 7. Do not merely add migration 008 or bump the latest version: migration
-loading requires a complete version range and writable initialization would
-activate an in-place rewrite before safe new-home conversion exists.
-
-Later work needs conversion-only registration, guarded legacy capture, an
-isolated-copy adapter, complete historical custody audit, its own receipt and
-publisher, and old/new encrypted-restore gates. The payload primitive alone is
-not a storage release. Personal daily setup remains a separate user workflow
-requiring scope, evidence and timing choices. Do not silently configure it,
-publish, submit or continue development beyond the authorized window.
+The next material-storage slice is an isolated exact-byte payload helper in
+`repositories/material_payloads.py` and in-memory corruption/rollback tests in
+`tests/test_material_artifact_storage.py`. Review its conversion boundary before
+acceptance; the helper alone must not be presented as available deduplication.
+Keep production schema 7 until a separately gated new-home conversion can
+preserve every historical material, approval, submission and workflow identity.
+No implicit rewrite, personal migration or automation activation is authorized.
+A separate streaming-backup proposal should be assessed if peak lifecycle memory
+becomes a practical constraint. Do not implement bespoke encryption primitives.
 
 ## First command
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_search_review_exports tests.test_review_files tests.test_search_cli -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_backup tests.test_backup_schema_compatibility tests.test_migration_capacity tests.test_storage_capacity tests.test_schedule_capacity tests.test_deletion -v
 ```

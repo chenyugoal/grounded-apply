@@ -257,7 +257,7 @@ saved before dispatch; unused byte reservations are refunded after success.
 A failed request or crash conservatively consumes its full byte reservation
 because the transport cannot prove how much was received. Invocation
 time and draft-attempt limits are cooperative; an in-flight render or DNS lookup
-is not hard-preempted. Storage remains within the existing 16 MiB database cap
+is not hard-preempted. Storage remains within the 256 MiB supported database cap
 with checkpoint headroom. Limits do not authorize automatic deletion.
 Migration 006 adds saved-search records. An upgrade that cannot fit under the
 storage cap rolls back that migration and retains a restorable prior schema.

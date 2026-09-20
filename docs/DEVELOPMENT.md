@@ -80,6 +80,7 @@ assumed. No dependencies are installed by the launcher.
 | Advancing-source gate | `python -W error scripts/check_source_window.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Actual CLI and Netflix parsers over fictional public responses; later-window matches, exact replay, changed head posting, nine real PDFs and encrypted cursor restoration |
 | Preparation-filter gate | `python -W error scripts/check_search_filters.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Actual CLI, filters before preparation cap, explicit missing-location choice, two real PDFs, exact replay and encrypted restoration |
 | Source-rotation gate | `python -W error scripts/check_source_rotation.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Three daily runs reach three automatic boards under one-request/one-job limits; isolated blocker, two real PDFs, stable replay and encrypted priority restoration |
+| Storage-capacity gate | `python -W error scripts/check_storage_capacity.py [--workspace NEW_EXTERNAL_DIR]` | Both extras + TeX; daily preparation above 16 MiB, near-256 MiB byte capacity, exact encrypted CLI restore/replay and per-process memory/time measurements |
 | Complete synthetic pilot | `python -W error scripts/check_pilot.py [--demo-output NEW_EXTERNAL_DIR]` | Both extras + TeX required; includes recovery and deletion |
 | Installed pilot gate | `python scripts/check_package.py --pilot-wheelhouse ABSOLUTE_PATH` | Fresh offline install of both extras + full pilot; TeX required |
 | Workflow expression validation | `actionlint -shellcheck= -pyflakes= .github/workflows/check.yml` | Supported with actionlint 1.7.12 installed; separate from application tests |
@@ -188,6 +189,11 @@ runtime. Optional-provider skips in the base suite are not pilot release evidenc
 With `--pilot-wheelhouse`, the installed gate also runs the real-PDF batch,
 configured-search, daily-search, advancing-source, preparation-filter and
 source-rotation flows.
+It also exercises the larger-profile smoke gate above 16 MiB against the fresh
+wheel. Run `scripts/check_storage_capacity.py` separately for the near-256 MiB
+resource probe; `--skip-maximum-probe` is explicitly only a smoke check. The
+capacity script accepts `--python PATH --installed` for another fresh installed
+interpreter. Run large probes sequentially to keep memory measurements useful.
 Search fixtures inject their transport from an external
 temporary test module, prohibit real network access, and verify imports resolve
 to the intended source tree or installed wheel. There is no product test mode.
@@ -200,7 +206,7 @@ for exact provenance replay.
 Schema 006 adds verified saved search scopes, run events, search leases and
 child-batch links. Schema 007 adds daily schedules, occurrences, lifecycle events,
 parent leases, child links and notification acknowledgments. Each public migration checks the
-16 MiB allocation bound inside its transaction. An oversized migration rolls
+256 MiB allocation bound inside its transaction. An oversized migration rolls
 back, leaving its prior version restorable; earlier successful migrations may
 remain committed. No history is deleted to make an upgrade fit.
 Current use must go through `ProfileService.validated_profile`, `packet_for_claim`
@@ -241,7 +247,7 @@ Rendering runs outside write transactions. Lease fences and a bound expected
 material plan are rechecked before child writes; current evidence is rechecked
 inside the material commit. A stale owner or changed evidence cannot commit a
 child under an earlier preparation identity. Material writes reserve 256 KiB
-for checkpoint progress under the existing 16 MiB database limit.
+for checkpoint progress under the 256 MiB supported database limit.
 
 The ten-job real-PDF gate requires eight drafts and two isolated blockers, keeps
 a useful partial resume when a required answer is missing, verifies exact replay
@@ -365,7 +371,7 @@ states, network bounds and capture semantics. The source/normalizer registry and
 the `job_discovery_capture` workflow type reuse schema-4 snapshot/audit tables;
 no schema migration or legacy `job_capture` rewrite is involved. New captures
 store source identity and per-job content hash, revalidate them on reads, and
-roll back additions above the existing 16 MiB database bound. A stable internally
+roll back additions above the 256 MiB supported database bound. A stable internally
 derived child key recovers a committed capture after interrupted output. This
 is per-posting replay, not a persisted multi-stage search runner or historical
 source-health service. Changed postings keep separate immutable versions.
@@ -415,8 +421,11 @@ unchanged retries, and preserved import/decision provenance.
 The version-1 archive is a bounded database snapshot encrypted by Fernet using
 Argon2id (64 MiB, 3 iterations, 4 lanes, random 16-byte salt). It is an application
 format, not age. The consistent SQLite backup and encryption stay in memory;
-there is no plaintext backup staging file. The archive cap is 24 MiB, the database
-cap 16 MiB, and capture/validation have five-second work budgets. Unknown schemas,
+there is no plaintext backup staging file. The archive cap is 384 MiB, the supported database
+cap 256 MiB, and capture/validation each have a thirty-second cooperative work
+budget. These checks do not hard-preempt a blocking SQLite/C operation. Whole
+snapshot encryption remains in memory; larger databases increase peak memory.
+Canonical Base64 validation uses aligned 64 KiB chunks and preserves format 1. Unknown schemas,
 SQL objects differing from local migrations, corrupt databases, broken foreign
 keys, and non-digest filesystem artifact references fail closed.
 
@@ -458,6 +467,9 @@ that inventory and requires `--preview-token TOKEN --confirm`. Only known runtim
 directories, the current profile database/config, and an optional restore receipt
 are recognized. Unknown files, links, unsafe permissions, journals/WAL, and
 changed state fail closed. Output/cache/artifact directories must be empty.
+Database inventory permits the supported 256 MiB; config/restore receipts each
+retain a 16 MiB bound. The aggregate is bounded at 288 MiB. Hashing uses 64 KiB
+chunks with before/open/after/path identity checks and retains no whole-file copy.
 
 The adapter uses directory descriptors and individual unlink/rmdir operations;
 there is no recursive deletion. A private external JSONL receipt is fsynced before

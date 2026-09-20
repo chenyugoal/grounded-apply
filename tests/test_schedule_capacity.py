@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 from grounded_apply.repositories import SQLiteRepository
 from grounded_apply.repositories.snapshots import validate_profile_snapshot
-from grounded_apply.services.backup import MAX_SNAPSHOT_BYTES
 from grounded_apply.services.batches import BatchCapacityError, BatchService
 from grounded_apply.services.material_models import MaterialValidationError
 from grounded_apply.services.schedules import ScheduleCapacityError, ScheduleExecutionError, ScheduleLeaseLostError, ScheduleService
@@ -20,6 +19,11 @@ from grounded_apply.services.storage_limits import StorageCapacityError
 from tests.test_discovery import ASHBY, GREENHOUSE, ashby_job, encoded, greenhouse_job
 from tests.test_materials import SyntheticRenderer, approved_fixture
 from tests.test_searches import SearchTransport
+
+
+# Exercise real allocation failures with a small injected allowance. The
+# production-capacity gate covers larger profiles without inflating this suite.
+TEST_CAPACITY_BYTES = 16 * 1024 * 1024
 
 
 class SizedRenderer:
@@ -92,11 +96,12 @@ class ScheduleCapacityTests(unittest.TestCase):
         self.assertEqual(result["notification"]["delta"]["run_health_change"]["current"]["status"], "capacity_reached")
         self.assertFalse(result["application_ready"])
         self.assertFalse(result["approvals_recorded"])
-        self.assertLessEqual(self.database.stat().st_size, MAX_SNAPSHOT_BYTES)
+        self.assertLessEqual(self.database.stat().st_size, TEST_CAPACITY_BYTES)
         validate_profile_snapshot(self.database.read_bytes())
 
+    @patch("grounded_apply.services.schedules.MAX_SNAPSHOT_BYTES", TEST_CAPACITY_BYTES)
     def test_schedule_reserve_mid_material_keeps_partial_draft_notice_and_bounded_retries(self):
-        self.renderer.sizes = (14 * 1024 * 1024, 1024 * 1024)
+        self.renderer.sizes = (TEST_CAPACITY_BYTES - 2 * 1024 * 1024, 1024 * 1024)
         _, schedule_id = self.configure()
         first = self.schedules.tick(schedule_id)
         self.assert_capacity_partial(first)
@@ -120,11 +125,12 @@ class ScheduleCapacityTests(unittest.TestCase):
         self.assertFalse(self.schedules.tick(schedule_id)["executed"])
         self.assertEqual(len(self.renderer.built), builds)
         self.assertEqual(len(self.transport.calls), calls)
-        self.assertLessEqual(self.database.stat().st_size, MAX_SNAPSHOT_BYTES)
+        self.assertLessEqual(self.database.stat().st_size, TEST_CAPACITY_BYTES)
         validate_profile_snapshot(self.database.read_bytes())
 
+    @patch("grounded_apply.services.batches.MAX_SNAPSHOT_BYTES", TEST_CAPACITY_BYTES)
     def test_material_allowance_mid_run_rolls_back_only_later_artifact(self):
-        self.renderer.sizes = (0, 17 * 1024 * 1024)
+        self.renderer.sizes = (0, TEST_CAPACITY_BYTES + 1024 * 1024)
         _, schedule_id = self.configure()
         result = self.schedules.tick(schedule_id)
         self.assert_capacity_partial(result)
@@ -221,8 +227,9 @@ class ScheduleCapacityTests(unittest.TestCase):
     def test_settlement_capacity_retains_charged_request_and_preserves_retry(self):
         self._assert_accounting_capacity("request_settled", 1)
 
+    @patch("grounded_apply.services.schedules.MAX_SNAPSHOT_BYTES", TEST_CAPACITY_BYTES)
     def test_pause_and_reenable_fences_old_owner_before_oversized_commit(self):
-        self.renderer.sizes = (14 * 1024 * 1024, 1024 * 1024)
+        self.renderer.sizes = (TEST_CAPACITY_BYTES - 2 * 1024 * 1024, 1024 * 1024)
         _, schedule_id = self.configure()
         def revoke(structure):
             if len(self.renderer.built) == 2:
@@ -241,7 +248,7 @@ class ScheduleCapacityTests(unittest.TestCase):
         shown = self.schedules.get(schedule_id)
         self.assertNotEqual(shown["stop_reason"], "capacity_reached")
         self.assertFalse(shown["child"]["lease_active"])
-        self.assertLessEqual(self.database.stat().st_size, MAX_SNAPSHOT_BYTES)
+        self.assertLessEqual(self.database.stat().st_size, TEST_CAPACITY_BYTES)
 
 
 if __name__ == "__main__":

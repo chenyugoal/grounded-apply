@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -15,10 +14,16 @@ from grounded_apply.repositories import SQLiteRepository
 from grounded_apply.repositories.backup_files import (
     _identity, _private_directory, _private_file, _safe_path, read_private_file,
 )
+from grounded_apply.services.backup import MAX_SNAPSHOT_BYTES
 from grounded_apply.services.deletion import (
     RECOVERY, DeletionError, DeletionInventory, DeletionOutcomeUnknownError,
     DeletionResult, InventoryEntry,
 )
+
+
+_MAX_AUXILIARY_BYTES = 16 * 1024 * 1024
+_MAX_INVENTORY_BYTES = MAX_SNAPSHOT_BYTES + 2 * _MAX_AUXILIARY_BYTES
+_HASH_CHUNK_BYTES = 64 * 1024
 
 
 def _paths(target: Path, receipt: Path) -> tuple[Path, Path]:
@@ -37,16 +42,54 @@ def _target_digest(target: Path, receipt: Path) -> str:
     return sha256(json.dumps([str(target), str(receipt)]).encode()).hexdigest()
 
 
-def _entry(path: Path, root: Path, kind: str) -> InventoryEntry:
+def _file_digest(path: Path, *, limit: int) -> tuple[str, os.stat_result]:
+    """Hash bounded private input without retaining its content in memory."""
+
+    _safe_path(path)
+    before = path.lstat()
+    _private_file(before)
+    if before.st_size > limit:
+        raise DeletionError("Deletion input exceeds its size limit")
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_NONBLOCK"):
+        raise DeletionError("Platform does not support safe deletion file opens")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        opened = os.fstat(descriptor)
+        _private_file(opened)
+        if _identity(before) != _identity(opened):
+            raise DeletionError("Deletion input changed while opening")
+        digest = sha256()
+        size = 0
+        while size <= limit:
+            block = os.read(descriptor, min(_HASH_CHUNK_BYTES, limit + 1 - size))
+            if not block:
+                break
+            size += len(block)
+            digest.update(block)
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        _private_file(after)
+        _private_file(current)
+        _safe_path(path)
+        if (
+            size != before.st_size or size > limit
+            or _identity(before) != _identity(after) or _identity(after) != _identity(current)
+        ):
+            raise DeletionError("Deletion input changed during inventory")
+        return digest.hexdigest(), after
+    finally:
+        os.close(descriptor)
+
+
+def _entry(
+    path: Path, root: Path, kind: str, *, max_bytes: int = _MAX_AUXILIARY_BYTES,
+) -> InventoryEntry:
     if kind == "directory":
         _private_directory(path)
         digest = None
+        metadata = path.lstat()
     else:
-        content = read_private_file(path, limit=16 * 1024 * 1024)
-        if content is None:
-            raise DeletionError("The deletion inventory is incomplete")
-        digest = sha256(content).hexdigest()
-    metadata = path.lstat()
+        digest, metadata = _file_digest(path, limit=max_bytes)
     identity = (*_identity(metadata), metadata.st_mode, metadata.st_uid, metadata.st_nlink)
     return InventoryEntry(str(path.relative_to(root)), kind, identity, digest)
 
@@ -96,6 +139,7 @@ class LocalDeletionStorage:
         restore_receipt = target / "restore-receipt.json"
         if restore_receipt.exists() or restore_receipt.is_symlink():
             files.add(restore_receipt)
+        limits = {path: MAX_SNAPSHOT_BYTES if path == paths.database else _MAX_AUXILIARY_BYTES for path in files}
         expected = directories | files
         entries: list[InventoryEntry] = []
         for directory in sorted(directories):
@@ -103,13 +147,16 @@ class LocalDeletionStorage:
             if set(directory.iterdir()) != {p for p in expected if p.parent == directory}:
                 raise DeletionError("Unknown or missing runtime entries prevent deletion")
         for path in sorted(files):
-            entries.append(_entry(path, target, "file"))
+            entries.append(_entry(path, target, "file", max_bytes=limits[path]))
+        if sum(entry.identity[2] for entry in entries if entry.kind == "file") > _MAX_INVENTORY_BYTES:
+            raise DeletionError("Deletion inventory exceeds its size limit")
         # The normal public adapter verifies the current schema and read-only
         # SQLite safety. No database is opened by the destructive operation.
         with SQLiteRepository(paths.database, read_only=True):
             pass
         for entry in entries:
-            if _entry(target / entry.relative_path, target, entry.kind) != entry:
+            path = target / entry.relative_path
+            if _entry(path, target, entry.kind, max_bytes=limits.get(path, _MAX_AUXILIARY_BYTES)) != entry:
                 raise DeletionError("The target changed during inventory")
         return DeletionInventory(str(target), str(receipt), tuple(entries))
 
@@ -119,6 +166,7 @@ class LocalDeletionStorage:
         target, receipt = Path(inventory.target), Path(inventory.receipt)
         if self.inventory(target, receipt) != inventory:
             raise DeletionError("Target changed after preview")
+        database = resolve_runtime_paths({"GROUNDED_APPLY_HOME": str(target)}).database
         if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
             raise DeletionError("Platform lacks safe directory descriptors")
         descriptors: dict[str, int] = {}
@@ -165,7 +213,9 @@ class LocalDeletionStorage:
                 os.close(parent_fd)
             for entry in (e for e in inventory.entries if e.kind == "file"):
                 self._verify_directories(target, dirs, descriptors)
-                if _entry(target / entry.relative_path, target, "file") != entry:
+                path = target / entry.relative_path
+                maximum = MAX_SNAPSHOT_BYTES if path == database else _MAX_AUXILIARY_BYTES
+                if _entry(path, target, "file", max_bytes=maximum) != entry:
                     raise DeletionError("File identity changed during removal")
                 relative = Path(entry.relative_path)
                 parent_fd = descriptors[str(relative.parent)]

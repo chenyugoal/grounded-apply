@@ -44,8 +44,9 @@ runtime dependency; the future acceptance gate must generate its own fixtures.
 
 ## Constraints retained by this proposal
 
-- The database snapshot limit stays 16 MiB and the encrypted archive limit stays
-  24 MiB. Current material, search and schedule reserves are 256, 512 and 768 KiB.
+- Capacity is governed separately by [ADR 0011](0011-supported-profile-capacity.md):
+  256 MiB database snapshots and 384 MiB encrypted archives. Current material,
+  search and schedule reserves are 256, 512 and 768 KiB.
   File headroom remains different from capacity for a particular next operation.
 - Backup remains one complete SQLite database, encrypted through the existing
   format and provider. External exports, source documents, config and logs retain
@@ -119,8 +120,9 @@ does not silently compact, deduplicate or migrate it.
    Preview creates no target or receipt and changes no source bytes.
 4. Confirmation binds the reviewed source snapshot, target, transformation version
    and preview result. Recapture and revalidate before publishing; changed input
-   requires a new preview. Bound source/result snapshots by 16 MiB and specify
-   finite working-memory, time and page-count budgets before implementation.
+   requires a new preview. Bound source/result snapshots by the supported
+   capacity policy and specify finite working-memory, time and page-count budgets
+   before implementation.
    Refuse an output that exceeds existing capacity or fails validation.
 5. Create the new home using restore-style private, exclusive, no-follow writes,
    safe default config and fsync ordering. A separate versioned conversion receipt
@@ -184,7 +186,7 @@ conversion. In particular:
   `LATEST_SCHEMA_VERSION`. Adding 008 while leaving the latest version at 7
   makes ordinary opens fail; raising it to 8 makes writable initialization
   attempt an in-place upgrade. `initialize_schema` executes SQL statements and
-  checks the 16 MiB allocation bound before each migration commits, before any
+  checks the supported allocation bound before each migration commits, before any
   later compaction. It has no registered Python data-transformation stage.
   A conversion copy needs its own finite temporary-allocation budget; this must
   not weaken the live-runtime or final-snapshot cap.

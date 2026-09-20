@@ -9,7 +9,7 @@ from contextlib import closing
 from grounded_apply.repositories._schema import (
     LATEST_SCHEMA_VERSION, default_migrations_directory, initialize_schema, validate_schema,
 )
-from grounded_apply.services.backup import BackupError, MAX_SNAPSHOT_BYTES
+from grounded_apply.services.backup import BackupError, MAX_SNAPSHOT_BYTES, SNAPSHOT_WORK_SECONDS
 
 
 _SCHEMA_QUERY = "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"
@@ -40,6 +40,7 @@ def validate_profile_snapshot(snapshot: bytes) -> None:
         or schema_version > LATEST_SCHEMA_VERSION
     ):
         raise BackupError("Unsupported profile database size or schema version")
+    deadline = time.monotonic() + SNAPSHOT_WORK_SECONDS
     try:
         with closing(sqlite3.connect(":memory:", isolation_level=None)) as reference:
             reference.execute("PRAGMA temp_store = MEMORY")
@@ -51,7 +52,6 @@ def validate_profile_snapshot(snapshot: bytes) -> None:
             database.execute("PRAGMA temp_store = MEMORY")
             database.deserialize(snapshot)
             database.execute("PRAGMA query_only = ON")
-            deadline = time.monotonic() + 5.0
             database.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
             if database.execute(_SCHEMA_QUERY).fetchall() != expected:
                 raise BackupError("Snapshot SQL schema does not match registered migrations")
@@ -70,6 +70,8 @@ def validate_profile_snapshot(snapshot: bytes) -> None:
             ).fetchone()
             if unsupported is not None:
                 raise BackupError("Profile backup cannot omit referenced filesystem artifacts")
+            if time.monotonic() > deadline:
+                raise BackupError("Profile snapshot validation exceeded its time budget")
     except BackupError:
         raise
     except Exception:

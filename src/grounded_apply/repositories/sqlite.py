@@ -207,6 +207,8 @@ class SQLiteRepository:
         on the same database revision. Busy retries have a fixed deadline.
         """
 
+        from grounded_apply.services.backup import SNAPSHOT_WORK_SECONDS
+
         self._require_initialized()
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("Snapshot size limit must be a positive integer")
@@ -214,7 +216,7 @@ class SQLiteRepository:
             raise RepositoryError("Snapshots require an idle read-only repository")
         self._validate_storage()
         destination = sqlite3.connect(":memory:", isolation_level=None)
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + SNAPSHOT_WORK_SECONDS
 
         def progress(status: int, remaining: int, total: int) -> None:
             del status, remaining
@@ -233,6 +235,8 @@ class SQLiteRepository:
             snapshot = destination.serialize()
             if len(snapshot) > max_bytes:
                 raise RepositoryError("Snapshot exceeds its supported size")
+            if time.monotonic() > deadline:
+                raise RepositoryError("Snapshot exceeded its size or time budget")
             self._validate_storage()
             return snapshot
         finally:

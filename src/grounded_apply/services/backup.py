@@ -8,8 +8,11 @@ from pathlib import Path
 from typing import Protocol
 
 
-MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
-MAX_ARCHIVE_BYTES = 24 * 1024 * 1024
+# Supported profile capacity. Keep archive headroom for the format-1 envelope
+# and Fernet's base64 expansion; neither value changes ingress/HTTP limits.
+MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 384 * 1024 * 1024
+SNAPSHOT_WORK_SECONDS = 30.0
 
 
 class BackupError(RuntimeError):

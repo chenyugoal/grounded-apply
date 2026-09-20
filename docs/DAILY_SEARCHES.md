@@ -141,7 +141,7 @@ limitation; a daily policy is not a promise that a powered-off computer will run
 The temporary development heartbeat in this task is separate from a user's
 personal job-search schedule.
 
-Storage remains bounded at 16 MiB. Notification state and event limits stop
+Automated storage remains bounded at 256 MiB. Notification state and event limits stop
 visibly when full; they do not authorize deleting history. Broader job coverage,
 automatic retention, semantic rewriting and browser filling remain separate work.
 `gapply doctor --json` reports the current database file size and remaining

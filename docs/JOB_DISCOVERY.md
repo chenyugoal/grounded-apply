@@ -186,7 +186,7 @@ resolution lacks a portable hard deadline, so this is not an absolute wall-time
 guarantee. The transport uses fixed HTTPS GET endpoints, no credentials, proxies
 or redirects, and sends no candidate facts. DNS screening is sampled, not pinned.
 
-A new discovery capture that would grow the database beyond 16 MiB rolls back
+A new discovery capture that would grow the database beyond 256 MiB rolls back
 that capture and stops further saves. This is a capture guard, not global
 retention or automatic deletion. Stdout is private; `--log-events` uses fixed,
 content-free diagnostic events on stderr, not raw job text or remote errors.

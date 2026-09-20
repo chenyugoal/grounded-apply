@@ -66,10 +66,10 @@ Google, Apple, Amazon and Meta remain visible manual gaps. This is not complete
 coverage of most companies or all jobs at a supported employer. See the
 [coverage table](JOB_DISCOVERY.md#coverage-of-the-major-tech-preset).
 
-The current database snapshot limit is 16 MiB. Diagnostics show headroom and
-capacity stops preserve completed drafts; automatic retention and larger storage
-remain planned. Exported review folders are caller-owned copies outside runtime
-backup and deletion.
+The supported database snapshot limit is 256 MiB. Diagnostics show headroom
+and capacity stops preserve completed drafts. Document deduplication and
+automatic retention remain planned. Exported review folders are caller-owned
+copies outside runtime backup and deletion.
 
 Details: [saved searches](SEARCH_RUNS.md), [daily policy](DAILY_SEARCHES.md),
 [full conversational workflow](CODEX_WORKFLOW.md), and

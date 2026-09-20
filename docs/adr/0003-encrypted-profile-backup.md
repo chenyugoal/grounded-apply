@@ -6,6 +6,11 @@
 
 ## Decision
 
+The original size/time bounds below are superseded by
+[ADR 0011](0011-supported-profile-capacity.md): 256 MiB snapshots, 384 MiB
+archives and thirty-second cooperative capture/validation budgets. The archive
+format, encryption, privacy and exact-restore contracts are unchanged.
+
 The first lifecycle slice is an encrypted **profile database** backup and restore,
 not a filesystem vault or support export. Capture a consistent SQLite backup into
 memory through the guarded read-only adapter. Refuse recovery journals, WAL,

@@ -15,6 +15,24 @@ _MAGIC = b"GAPPLY-BACKUP\x00\x01"
 _SCOPE = b"profile_database\x00"
 
 
+def _validate_canonical_token(token: bytes) -> None:
+    """Validate the existing encoding without retaining another full archive.
+
+    Four-character-aligned chunks preserve base64 groups. Padding is permitted
+    only in the last chunk; round trips reject alternate alphabets/padding bits.
+    Fernet still authenticates and decrypts the complete token itself.
+    """
+
+    chunk_size = 65536
+    for offset in range(0, len(token), chunk_size):
+        chunk = token[offset:offset + chunk_size]
+        if offset + len(chunk) < len(token) and b"=" in chunk:
+            raise ValueError("noncanonical encoding")
+        raw = base64.b64decode(chunk, altchars=b"-_", validate=True)
+        if base64.urlsafe_b64encode(raw) != chunk:
+            raise ValueError("noncanonical encoding")
+
+
 class FernetBackupCipher:
     """Format 1: Argon2id with fixed bounded parameters and Fernet."""
 
@@ -53,9 +71,7 @@ class FernetBackupCipher:
         header_size = len(_MAGIC) + 16
         header, token = archive[:header_size], archive[header_size:]
         try:
-            raw = base64.b64decode(token, altchars=b"-_", validate=True)
-            if base64.urlsafe_b64encode(raw) != token:
-                raise ValueError("noncanonical encoding")
+            _validate_canonical_token(token)
             payload = self._fernet(self._key(passphrase, header[len(_MAGIC):])).decrypt(token)
         except (self._invalid_token, ValueError, binascii.Error):
             raise BackupError("Archive authentication failed or passphrase is incorrect") from None

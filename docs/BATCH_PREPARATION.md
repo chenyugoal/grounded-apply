@@ -135,7 +135,7 @@ The default invocation attempts at most 20 items with a 900-second budget.
 Allowed invocation bounds are 1–50 items and 1–3600 seconds. An item stops after
 100 attempts and requires a new reviewed batch request for further preparation.
 Time is checked between items; an in-flight render/validation is not preempted.
-Storage is bounded by the existing 16 MiB database limit, with 256 KiB reserved
+Storage is bounded by the 256 MiB supported database limit, with 256 KiB reserved
 for parent checkpoints before a material write. Capacity failure retains earlier
 work. It does not authorize deleting history or raising backup/deletion limits.
 

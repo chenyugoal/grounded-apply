@@ -33,7 +33,12 @@ class StorageCapacityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gapply-fictional-storage-") as directory:
             home = Path(directory) / "fictional-home"
             database = home / "data" / "grounded_apply.db"
-            with patch.dict(os.environ, {"GROUNDED_APPLY_HOME": str(home)}):
+            # Exercise reporting boundaries with a small fixture; production
+            # capacity and a profile above the old cap have separate coverage.
+            fixture_limit = 16 * 1024 * 1024
+            with patch.dict(os.environ, {"GROUNDED_APPLY_HOME": str(home)}), patch(
+                "grounded_apply.services.storage_capacity.MAX_SNAPSHOT_BYTES", fixture_limit,
+            ):
                 def invoke(*args: str) -> tuple[int, dict, str]:
                     output, errors = io.StringIO(), io.StringIO()
                     with redirect_stdout(output), redirect_stderr(errors):
@@ -57,8 +62,8 @@ class StorageCapacityTests(unittest.TestCase):
                         capacity = payload["data"]["checks"]["database"]["storage"]
                         self.assertEqual((code, capacity["status"]), (expected_code, status))
                         self.assertEqual(capacity["database_file_bytes"], len(before))
-                        self.assertEqual(capacity["snapshot_limit_bytes"], MAX_SNAPSHOT_BYTES)
-                        self.assertEqual(capacity["remaining_bytes"], max(0, MAX_SNAPSHOT_BYTES - len(before)))
+                        self.assertEqual(capacity["snapshot_limit_bytes"], fixture_limit)
+                        self.assertEqual(capacity["remaining_bytes"], max(0, fixture_limit - len(before)))
                         self.assertEqual(database.read_bytes(), before)
                         self.assertEqual(database.stat().st_mtime_ns, metadata.st_mtime_ns)
                         self.assertFalse(Path(str(database) + "-journal").exists())
