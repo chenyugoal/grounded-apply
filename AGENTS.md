@@ -217,7 +217,7 @@ documentation in the same change.
 
 The optional installed-package gate is `python scripts/check_package.py` from a
 disposable environment with `requirements-build.txt` installed. It is verified
-on Python 3.13.1 and adds no base application runtime dependency. It builds and
+locally on Python 3.12.14 and adds no base application runtime dependency. It builds and
 tests outside the checkout; see `docs/DEVELOPMENT.md` for the exact setup commands.
 The repository launcher and `scripts/check` select `GAPPLY_PYTHON`, then a local
 `.venv/bin/python3`, then `python3` on PATH; Python 3.12+ is mandatory. The same

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -18,6 +19,10 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from grounded_apply.domain import to_jsonable
 from grounded_apply.repositories import Record, RepositoryError, SQLiteRepository
 from grounded_apply.services.backup import MAX_SNAPSHOT_BYTES
+from grounded_apply.services.batch_history import (
+    parse_batch_event, parse_batch_item, parse_batch_lease, parse_batch_record,
+    validate_batch_workflow,
+)
 from grounded_apply.services.storage_limits import StorageCapacityError
 from grounded_apply.services.jobs import JobService
 from grounded_apply.services.material_models import MaterialValidationError, validate_layout
@@ -317,8 +322,10 @@ class BatchService:
         if self._repository.database_size_bytes() > maximum:
             raise BatchCapacityError("Batch storage capacity reached; the current checkpoint was not added")
 
-    def _lease(self, batch_id: str) -> Record:
+    def _lease(self, batch_id: str, *, historical: bool = False) -> Record:
         lease = self._repository.get_preparation_lease(batch_id)
+        if historical:
+            parse_batch_lease(lease, batch_id)
         try:
             if (lease is None or lease["batch_id"] != batch_id or type(lease["epoch"]) is not int
                 or lease["epoch"] < 0 or lease["stop_reason"] not in _STOP_REASONS
@@ -372,7 +379,8 @@ class BatchService:
                 raise BatchIntegrityError("Batch material history was replaced")
         return state
 
-    def _item_state(self, item_id: str) -> tuple[dict[str, Any], list[Record]]:
+    def _item_state(self, item_id: str, *, checkpoints: list[dict[str, Any]] | None = None
+                    ) -> tuple[dict[str, Any], list[Record]]:
         events = self._repository.list_preparation_events(item_id)
         if not events:
             raise BatchIntegrityError("Batch item checkpoints are missing")
@@ -381,7 +389,8 @@ class BatchService:
         previous_at = None
         try:
             for position, event in enumerate(events):
-                state = json.loads(event["state_json"])
+                parsed = None if checkpoints is None else parse_batch_event(event)
+                state = json.loads(event["state_json"]) if parsed is None else parsed["state"]
                 expected = _event_payload(item_id, position, event["at"], state, previous_hash)
                 if (event["item_id"] != item_id or event["position"] != position
                     or event["id"] != str(uuid5(NAMESPACE_URL, f"{item_id}/event/{position}"))
@@ -390,6 +399,9 @@ class BatchService:
                     raise ValueError
                 previous_state = self._validate_state(state, previous_state)
                 previous_hash, previous_at = event["event_sha256"], event["at"]
+                if checkpoints is not None:
+                    assert parsed is not None
+                    checkpoints.append(parsed)
         except (ValueError, TypeError, KeyError):
             raise BatchIntegrityError("Batch checkpoint chain failed integrity checks") from None
         assert previous_state is not None
@@ -412,21 +424,30 @@ class BatchService:
             item_id=item_id, position=position, at=moment, state=state,
             previous_sha256=previous, event_sha256=digest(payload))
 
-    def _validated(self, batch_id: str) -> tuple[Record, list[tuple[Record, dict[str, Any], dict[str, Any]]], Record]:
+    def _validated(self, batch_id: str, *, historical_events: dict[str, list[dict[str, Any]]] | None = None
+                   ) -> tuple[Record, list[tuple[Record, dict[str, Any], dict[str, Any]]], Record]:
         opaque(batch_id)
         batch = self._repository.get_preparation_batch(batch_id)
         if batch is None:
             raise ValueError("Preparation batch does not exist")
         try:
-            manifest = json.loads(batch["manifest_json"])
-            if validate_batch_manifest(manifest) != manifest or digest(manifest) != batch["manifest_sha256"] or not _valid_at(batch["created_at"]):
+            historical = historical_events is not None
+            manifest = (parse_batch_record(batch, batch_id)["manifest"] if historical
+                else json.loads(batch["manifest_json"]))
+            normalized = validate_batch_manifest(manifest)
+            if ((canonical(normalized) != canonical(manifest) if historical else normalized != manifest)
+                or digest(manifest) != batch["manifest_sha256"] or not _valid_at(batch["created_at"])):
                 raise ValueError
             workflow = self._repository.get_workflow_run(batch["workflow_run_id"])
             if workflow is None:
                 raise ValueError
             payload = {"version": 1, "manifest_sha256": digest(manifest), "batch_schema_version": 1,
                 "idempotency_sha256": workflow["idempotency_key"]}
-            validate_workflow(workflow, "batch_create", payload)
+            if historical:
+                validate_batch_workflow(workflow, payload, batch_id=batch_id,
+                    created_at=batch["created_at"], workflow_run_id=batch["workflow_run_id"])
+            else:
+                validate_workflow(workflow, "batch_create", payload)
             if (batch_id != str(uuid5(NAMESPACE_URL, "grounded-apply.batch@1/" + workflow["idempotency_key"]))
                 or workflow["created_at"] != batch["created_at"] or json.loads(workflow["generated_artifacts_json"]) != [batch_id]):
                 raise ValueError
@@ -435,26 +456,135 @@ class BatchService:
                 raise ValueError
             items = []
             for position, (record, spec) in enumerate(zip(rows, manifest["jobs"], strict=True)):
+                recorded_spec = (parse_batch_item(record)["spec"] if historical
+                    else json.loads(record["spec_json"]))
                 if (record["batch_id"] != batch_id or record["position"] != position or record["job_id"] != spec["job_id"]
                     or record["id"] != str(uuid5(NAMESPACE_URL, f"{batch_id}/item/{position}/{spec['job_id']}"))
-                    or json.loads(record["spec_json"]) != spec or record["spec_sha256"] != digest(spec)):
+                    or (canonical(recorded_spec) != canonical(spec) if historical else recorded_spec != spec)
+                    or record["spec_sha256"] != digest(spec)):
                     raise ValueError
                 job = JobService(self._repository).get(spec["job_id"])
-                state, events = self._item_state(record["id"])
+                checkpoints: list[dict[str, Any]] | None = [] if historical else None
+                state, events = self._item_state(record["id"], checkpoints=checkpoints)
                 if events[0]["at"] != batch["created_at"]:
                     raise ValueError
                 question_context = {question["id"]: (question["text"].strip()[:256],
                     hash_bytes(question["text"].encode("utf-8"))) for question in spec["questions"]}
-                for event in events:
-                    for blocker in json.loads(event["state_json"])["blockers"]:
+                states = ((event["state"] for event in checkpoints) if checkpoints is not None
+                    else (json.loads(event["state_json"]) for event in events))
+                for checkpoint_state in states:
+                    for blocker in checkpoint_state["blockers"]:
                         if "question_id" in blocker and question_context.get(blocker["question_id"]) != (
                             blocker["question_label"], blocker["question_sha256"]):
                             raise ValueError
+                if historical_events is not None:
+                    assert checkpoints is not None
+                    historical_events[record["id"]] = checkpoints
                 items.append(({**record, "source_url": job.source_url,
                     "title": None if job.discovery is None else job.discovery["title"]}, spec, state))
         except (ValueError, TypeError, KeyError):
             raise BatchIntegrityError("Batch request failed integrity checks") from None
-        return batch, items, self._lease(batch_id)
+        return batch, items, self._lease(batch_id, historical=historical_events is not None)
+
+    def validate_historical_materials(self, batch_id: str) -> None:
+        """Audit every checkpoint and distinct material without current reuse.
+
+        Valid partial and later-retired drafts retain their creation history.
+        This checks one batch, not aggregate inventory or active-lease admission.
+        """
+        try:
+            with self._repository.read_transaction():
+                self._validated_historical_materials(batch_id)
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise BatchIntegrityError("Batch historical materials failed integrity checks") from None
+
+    def _validated_historical_materials(self, batch_id: str) -> dict[str, tuple[Record, ...]]:
+        """Audit one batch in the caller's snapshot and return checked ownership."""
+        from grounded_apply.services.material_approval_history import validate_approval_record
+
+        checkpoints: dict[str, list[dict[str, Any]]] = {}
+        batch, records, lease = self._validated(batch_id, historical_events=checkpoints)
+        materials: dict[str, tuple[dict[str, Any], datetime]] = {}
+        for record, spec, _ in records:
+            for event in checkpoints[record["id"]]:
+                state = event["state"]
+                material_id = state["material_id"]
+                if material_id is None:
+                    continue
+                if material_id not in materials:
+                    material = self._materials.get(material_id, require_current=False)
+                    if material["id"] != material_id:
+                        raise ValueError
+                    self._binding(material, spec, state)
+                    self._materials._validate_historical_fact_snapshot(material)
+                    approval = self._repository.get_material_approval(material_id)
+                    if approval is not None:
+                        workflow = self._repository.get_workflow_run(approval["workflow_run_id"])
+                        validate_approval_record(material, approval, workflow)
+                    created_at = datetime.fromisoformat(material["created_at"])
+                    if created_at.tzinfo is None or created_at.utcoffset() is None:
+                        raise ValueError
+                    materials[material_id] = material, created_at
+                else:
+                    material, created_at = materials[material_id]
+                    self._binding(material, spec, state)
+                if datetime.fromisoformat(event["at"]) < created_at:
+                    raise ValueError
+                if state["stage"] == "draft" and any(
+                    answer["required"] and answer["status"] != "draft"
+                    for answer in material["manifest"]["answers"]
+                ):
+                    raise ValueError
+        return {
+            "batches": ({"id": batch["id"], "workflow_run_id": batch["workflow_run_id"]},),
+            "items": tuple({"id": record["id"], "batch_id": record["batch_id"]} for record, _, _ in records),
+            "events": tuple({"id": event["id"], "item_id": event["item_id"]}
+                for events in checkpoints.values() for event in events),
+            "leases": ({"batch_id": lease["batch_id"]},),
+            "workflows": ({"id": batch["workflow_run_id"], "workflow_type": "batch_create"},),
+        }
+
+    def validate_historical_inventory(self) -> None:
+        """Audit all batches and account for every component record and workflow.
+
+        This covers lease membership and shape, not active-lease admission,
+        uncheckpointed materials or other workflow components.
+        """
+        columns = {
+            "batches": ("id", "workflow_run_id"),
+            "items": ("id", "batch_id"),
+            "events": ("id", "item_id"),
+            "leases": ("batch_id",),
+            "workflows": ("id", "workflow_type"),
+        }
+        try:
+            with self._repository.read_transaction():
+                inventory = self._repository.batch_history_inventory()
+                if type(inventory) is not dict or set(inventory) != set(columns):
+                    raise ValueError
+                actual: dict[str, tuple[tuple[str, ...], ...]] = {}
+                for kind, fields in columns.items():
+                    rows = inventory[kind]
+                    if type(rows) is not tuple:
+                        raise ValueError
+                    values = []
+                    for row in rows:
+                        if type(row) is not dict or set(row) != set(fields):
+                            raise ValueError
+                        values.append(tuple(opaque(row[field]) for field in fields))
+                    if len({row[0] for row in values}) != len(values):
+                        raise ValueError
+                    actual[kind] = tuple(sorted(values))
+
+                expected: dict[str, list[tuple[str, ...]]] = {kind: [] for kind in columns}
+                for batch_id, _ in actual["batches"]:
+                    checked = self._validated_historical_materials(batch_id)
+                    for kind, fields in columns.items():
+                        expected[kind].extend(tuple(row[field] for field in fields) for row in checked[kind])
+                if any(actual[kind] != tuple(sorted(expected[kind])) for kind in columns):
+                    raise ValueError
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise BatchIntegrityError("Batch historical inventory failed integrity checks") from None
 
     def _binding(self, material: dict[str, Any], spec: dict[str, Any], state: dict[str, Any]) -> None:
         fingerprint = _material_fingerprint(spec, material["structure"], material["manifest"]["answers"])

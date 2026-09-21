@@ -97,6 +97,45 @@ restore peaked around 2.3 GiB of process memory on the tested host because the
 archive implementation works in memory. This verifies byte capacity, not a fixed
 number of applications or months of history. See [ADR 0011](docs/adr/0011-supported-profile-capacity.md).
 
+Development has started on an isolated helper for exact-byte document sharing;
+it is not used by current profiles. Its tests and conversion boundaries are in
+the [development guide](docs/DEVELOPMENT.md#isolated-material-payload-preparation).
+Migration policy now separates registered storage formats from ordinary profile
+upgrades, preventing future conversion-only steps from running during routine
+initialization. A guarded internal adapter can capture explicitly selected
+schema-4–7 profiles without upgrading or changing their files. Historical
+validation can inspect a current-schema capture through an owned read-only
+in-memory repository. An internal per-material audit checks saved factual text
+and questionnaire drafts against their recorded packets at creation time,
+with strict saved build records, workflow metadata and timestamp bindings;
+later retirement does not authorize current reuse. A separate internal audit
+checks saved approval records against their exact bundles and completed
+workflows, without granting readiness or proving approval-time fact eligibility.
+An additional audit checks emitted facts at both creation and saved approval,
+retaining the original packets and creation-time evidence requirements. It leaves
+unanswered questions untouched and does not establish a valid approval decision.
+The combined internal check also rejects saved approvals with unanswered required
+questions, while preserving optional unanswered questions and unapproved history.
+Ordinary approval/readiness checks use the same strict record validation in one
+read transaction; records must pass before a material can appear ready.
+An explicit application-history audit also checks recorded facts and required
+answers at every readiness and submission event, preserving later-retired history.
+It grants no current readiness or approval.
+Ordinary application reads and the explicit audit also enforce exact record types,
+completed-workflow metadata and replay links, while preserving valid stored JSON formatting.
+An internal inventory audit checks every application and accounts for all of its
+events, submissions and workflows, including otherwise-unreferenced records.
+An explicit batch-history audit checks every saved checkpoint and each distinct
+material's creation facts, preserving unapproved, partial and later-retired drafts.
+Its inventory check accounts for every batch, item, checkpoint, lease and batch
+creation workflow, including otherwise-unreferenced workflows.
+Material inventory separately checks every saved material, claim link, approval
+and build/approval workflow, including material left by interrupted preparation.
+Saved search configurations and run origins also require strict workflow records,
+typed JSON, exact identity bindings and consistent creation/update timestamps.
+Full historical custody, conversion and document sharing remain unfinished;
+current profiles use schema 7.
+
 ## Start the local pilot
 
 Prerequisite: Python 3.12 or newer. The repository launcher uses `GAPPLY_PYTHON`
@@ -235,7 +274,10 @@ The checked-in proposal manifest and resume are conspicuously fictional. Use
 these fixtures for development. The end-to-end synthetic gate is
 `python -W error scripts/check_pilot.py` with both optional extras and TeX installed.
 It never reads a personal runtime and exercises the full lifecycle, including
-backup/restore and deletion. The older structured-import example is:
+backup/restore and deletion. Questionnaire checks require a human answer for
+explicit requests to sign, including when career facts are selected; ordinary
+certification, single sign-on and sign-language career questions remain usable.
+The older structured-import example is:
 
 ```bash
 GROUNDED_APPLY_HOME=/tmp/grounded-apply-synthetic-demo \

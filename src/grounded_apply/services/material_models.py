@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Protocol
+
+from grounded_apply.domain import Claim, ClaimPacket
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +49,27 @@ class MaterialValidationError(ValueError):
 
 TRANSFORMATIONS = {"approved_text_selection@1", "approved_text_selection@2"}
 HEADING_TYPES = {"employment_description", "employment_title", "education", "education_degree", "portfolio_item"}
+
+
+def selected_presentation(claim: Claim, packet: ClaimPacket, transformation: str,
+                          styles: dict[str, str]) -> str:
+    """Registered presentation rule shared by preparation and historical audit."""
+    if transformation not in TRANSFORMATIONS:
+        raise MaterialValidationError("Unsupported material transformation")
+    presentation = "bullet" if any(re.match(r"^\s*[-*•]\s+", e.source_text or "") for e in packet.evidence) else "paragraph"
+    if transformation == "approved_text_selection@1":
+        if styles:
+            raise MaterialValidationError("Legacy materials cannot change presentation on replay")
+        return presentation
+    if any(re.match(r"^\s*\\resumeItem\s*\{", e.source_text or "") for e in packet.evidence):
+        presentation = "bullet"
+    if claim.claim_type in HEADING_TYPES and any(re.match(r"^\s*\\resumeSubheading\b", e.source_text or "") for e in packet.evidence):
+        presentation = "heading"
+    presentation = styles.get(claim.id, presentation)
+    if ((claim.claim_type == "candidate_name" or claim.claim_type.startswith("contact_")) and claim.id in styles
+        or presentation == "heading" and claim.claim_type not in HEADING_TYPES):
+        raise MaterialValidationError("Presentation is incompatible with the selected claim type")
+    return presentation
 
 
 def validate_layout(layout: object, claim_ids: tuple[str, ...]) -> dict[str, str]:

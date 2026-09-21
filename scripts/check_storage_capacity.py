@@ -83,26 +83,94 @@ class CapacityCLI(ScheduleCLI):
         assert resource["peak_rss_bytes"] > 0
         self.measurements.append(resource)
 
-    def fill(self, target_bytes: int) -> dict[str, Any]:
-        operation = f"fill_{target_bytes // MIB}_mib"
+    def worker(self, operation: str, *arguments: str) -> dict[str, Any]:
         self.environment["GAPPLY_CAPACITY_OPERATION"] = operation
         previous = len(self.events())
         started = time.monotonic()
         process = subprocess.run(
-            [self.command[0], str(Path(__file__).resolve()), "--worker-fill",
-             str(self.workspace), str(target_bytes)],
+            [self.command[0], str(Path(__file__).resolve()), *arguments],
             cwd=self.workspace, env=self.environment, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=min(300, self.deadline - started),
         )
         if process.returncode or process.stderr:
-            raise RuntimeError(f"Synthetic capacity filler failed: {process.stdout}{process.stderr}")
+            raise RuntimeError(f"Synthetic capacity worker failed: {process.stdout}{process.stderr}")
         self.record_resources(operation, previous, time.monotonic() - started)
         assert any(event["event"] == "hook_loaded" for event in self.events()[previous:])
-        result = json.loads(process.stdout)
+        return json.loads(process.stdout)
+
+    def fill(self, target_bytes: int) -> dict[str, Any]:
+        result = self.worker(f"fill_{target_bytes // MIB}_mib", "--worker-fill",
+                             str(self.workspace), str(target_bytes))
         assert target_bytes - 64 * 1024 <= result["database_bytes"] < target_bytes + 64 * 1024
         assert result["snapshot_limit_bytes"] == EXPECTED_LIMIT
         assert result["schema_version"] == 7
         return result
+
+
+def _snapshot_worker(workspace: Path) -> None:
+    """Compare guarded source and isolated snapshot reads without new writes."""
+    from grounded_apply.config import require_initialized_profile_storage, resolve_runtime_paths
+    from grounded_apply.domain import to_jsonable
+    from grounded_apply.repositories import RepositoryError, SQLiteRepository
+    from grounded_apply.repositories.snapshot_capture import capture_registered_profile_snapshot
+    from grounded_apply.services.jobs import JobService
+    from grounded_apply.services.materials import MaterialService
+    from grounded_apply.services.profile import ProfileService
+    from grounded_apply.repositories.latex_renderer import LatexResumeRenderer
+    from grounded_apply.services.workflow import digest
+
+    workspace = workspace.resolve()
+    paths = resolve_runtime_paths()
+    assert not workspace.is_relative_to(Path(__file__).resolve().parents[1])
+    assert paths.portable_root == workspace / "runtime"
+    assert (workspace / "synthetic-capacity-marker.txt").read_text(encoding="utf-8") == _SYNTHETIC_MARKER
+    require_initialized_profile_storage(paths, read_only=True)
+
+    def source_identity() -> tuple[str, int, tuple[str, ...]]:
+        return (_file_digest(paths.database), paths.database.stat().st_mtime_ns,
+                tuple(sorted(str(path.relative_to(workspace)) for path in paths.portable_root.rglob("*"))))
+
+    def inventory(repository: SQLiteRepository) -> dict[str, Any]:
+        assert repository.schema_version == 7
+        profile = ProfileService(repository)
+        original = digest(to_jsonable(profile.validated_profile(apply_retirements=False)))
+        assert original == digest(to_jsonable(profile.validated_profile()))
+        jobs = [(row["id"], digest(to_jsonable(JobService(repository).get(row["id"]))))
+                for row in repository.list_job_snapshots()]
+        materials = [(identifier, digest({key: hashlib.sha256(value).hexdigest()
+                      if type(value) is bytes else value
+                      for key, value in repository.get_material_version(identifier).items()}))
+                     for identifier in repository.list_material_ids()]
+        approvals = [(identifier, repository.get_material_approval(identifier)) for identifier, _ in materials]
+        return {"profile_sha256": original, "jobs_sha256": digest(jobs), "materials_sha256": digest(materials),
+                "approvals_sha256": digest(approvals), "approval_count": sum(row is not None for _, row in approvals),
+                "job_count": len(jobs), "material_count": len(materials)}
+
+    before = source_identity()
+    with SQLiteRepository(paths.database, read_only=True) as repository, repository.read_transaction():
+        expected = inventory(repository)
+    snapshot = capture_registered_profile_snapshot(paths, allowed_source_versions=frozenset({7}))
+    assert 16 * MIB < len(snapshot) <= EXPECTED_LIMIT
+    with SQLiteRepository.from_snapshot(snapshot) as repository:
+        assert inventory(repository) == expected
+        service = MaterialService(repository, LatexResumeRenderer())
+        audited = repository.list_material_ids()
+        assert service.validate_historical_inventory() is None
+        assert 0 < expected["approval_count"] < len(audited)
+        try:
+            with repository.transaction():
+                raise AssertionError("Snapshot accepted mutation")
+        except RepositoryError as error:
+            assert "read-only" in str(error)
+    assert source_identity() == before
+    # These counts describe material and present/absent approval coverage in
+    # the aggregate audit, not separate public-audit method invocations.
+    print(json.dumps({**expected, "schema_version": 7, "snapshot_bytes": len(snapshot),
+        "exact_snapshot_reads": True, "historical_inventory_checked": True,
+        "historical_materials_checked": len(audited),
+        "historical_approval_records_checked": len(audited),
+        "historical_approval_eligibility_checked": len(audited),
+        "mutation_blocked": True, "unchanged_source": True}))
 
 
 def _fill_worker(workspace: Path, target_bytes: int) -> None:
@@ -162,7 +230,7 @@ def _set_posting(cli: CapacityCLI, revision: int) -> None:
 
 
 def _round_trip(cli: CapacityCLI, name: str, profile: dict[str, Any],
-                schedule_id: str, expected_materials: set[str]) -> dict[str, Any]:
+                schedule_id: str, expected_materials: set[str], expected_approvals: set[str]) -> dict[str, Any]:
     """Measure actual encrypted commands; prove exact snapshot and quiet custody."""
     source_home = cli.environment["GROUNDED_APPLY_HOME"]
     database = Path(source_home) / "data" / "grounded_apply.db"
@@ -170,6 +238,13 @@ def _round_trip(cli: CapacityCLI, name: str, profile: dict[str, Any],
     archive, restored = cli.workspace / f"{name}.gapply", cli.workspace / f"{name}-restored"
     passphrase = "synthetic-capacity-only-passphrase\n"
     requests, renders = cli.fetch_count(), cli.renders()
+    snapshot_reads = cli.worker(f"{name}_snapshot_reads", "--worker-snapshot", str(cli.workspace))
+    assert snapshot_reads["material_count"] == len(expected_materials)
+    assert snapshot_reads["historical_inventory_checked"] is True
+    assert snapshot_reads["historical_materials_checked"] == len(expected_materials)
+    assert snapshot_reads["historical_approval_records_checked"] == len(expected_materials)
+    assert snapshot_reads["historical_approval_eligibility_checked"] == len(expected_materials)
+    assert snapshot_reads["approval_count"] == len(expected_approvals) > 0
     backup = cli.measured(f"{name}_backup", "backup", "--encrypt", str(archive),
         "--passphrase-stdin", input_data=passphrase)
     assert backup["snapshot_bytes"] == database.stat().st_size
@@ -193,9 +268,10 @@ def _round_trip(cli: CapacityCLI, name: str, profile: dict[str, Any],
         assert cli("profile", "show") == profile
         materials = cli("materials", "list")["materials"]
         assert {item["material_id"] for item in materials} == expected_materials
+        assert {item["material_id"] for item in materials if item["status"] == "approved"} == expected_approvals
         for identifier in sorted(expected_materials):
             item = cli("materials", "show", "--material-id", identifier)
-            assert item["validation"]["valid"] and item["ready"] is False
+            assert item["validation"]["valid"] and item["ready"] is (identifier in expected_approvals)
             assert item["validation"]["unsupported_factual_units"] == 0
         before = _file_digest(restored / "data" / "grounded_apply.db")
         same_day = cli("schedules", "tick", "--schedule-id", schedule_id)
@@ -209,7 +285,7 @@ def _round_trip(cli: CapacityCLI, name: str, profile: dict[str, Any],
     return {"database_bytes": backup["snapshot_bytes"], "archive_bytes": archive.stat().st_size,
         "snapshot_sha256": backup["snapshot_sha256"], "archive_sha256": backup["archive_sha256"],
         "material_count": len(expected_materials), "exact_snapshot_restore": True,
-        "unchanged_source": True, "quiet_restored_replay": True}
+        "unchanged_source": True, "quiet_restored_replay": True, "snapshot_reads": snapshot_reads}
 
 
 def check_storage_capacity(python: str, workspace: Path, *, source_path: Path | None,
@@ -267,13 +343,20 @@ def check_storage_capacity(python: str, workspace: Path, *, source_path: Path | 
     fills = [cli.fill(18 * MIB)]
     _set_posting(cli, 1)
     tick(20, new_material=True)
+    first_material, = cli("materials", "list")["materials"]
+    approval_args = ("materials", "approve", "--material-id", first_material["material_id"],
+        "--bundle-sha256", first_material["bundle_sha256"], "--actor-id", "synthetic-reviewer",
+        "--idempotency-key", "synthetic-capacity-material-approval")
+    assert cli(*approval_args)["ready"] is False
+    assert cli.measured("approve_first_material", *approval_args, "--confirm")["ready"] is True
+    approvals = {first_material["material_id"]}
     tick(21, new_material=False)
     _set_posting(cli, 2)
     tick(22, new_material=True)
     assert cli.renders() == 2
     materials = {item["material_id"] for item in cli("materials", "list")["materials"]}
     assert len(materials) == 2
-    rounds = {"beyond_old_cap": _round_trip(cli, "beyond-old-cap", profile, schedule_id, materials)}
+    rounds = {"beyond_old_cap": _round_trip(cli, "beyond-old-cap", profile, schedule_id, materials, approvals)}
     if maximum_probe:
         print("Storage gate: sequential near-256 MiB daily/backup/restore resource probe...", flush=True)
         fills.append(cli.fill(255 * MIB))
@@ -282,7 +365,7 @@ def check_storage_capacity(python: str, workspace: Path, *, source_path: Path | 
         assert cli.renders() == 3
         materials = {item["material_id"] for item in cli("materials", "list")["materials"]}
         assert len(materials) == 3
-        rounds["near_capacity"] = _round_trip(cli, "near-capacity", profile, schedule_id, materials)
+        rounds["near_capacity"] = _round_trip(cli, "near-capacity", profile, schedule_id, materials, approvals)
         assert rounds["near_capacity"]["database_bytes"] >= 255 * MIB - 64 * 1024
     assert all(event["event"] not in {"unexpected_url", "unexpected_network"} for event in cli.events())
     summary = {"schema_version": 1, "passed": True, "database_schema_version": 7,
@@ -301,6 +384,9 @@ def check_storage_capacity(python: str, workspace: Path, *, source_path: Path | 
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--worker-snapshot":
+        _snapshot_worker(Path(sys.argv[2]))
+        return
     if len(sys.argv) == 4 and sys.argv[1] == "--worker-fill":
         _fill_worker(Path(sys.argv[2]), int(sys.argv[3]))
         return

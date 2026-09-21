@@ -1,6 +1,8 @@
 # ADR 0010: Exact-byte material storage and conversion into a new home
 
-- **Status:** Proposed; planned, not accepted or implemented
+- **Status:** Conversion release proposed; preparatory storage work authorized
+  by the September 20 ten-hour development request, with verification recorded
+  in SESSION_HANDOFF.md. Production conversion and deduplication remain planned.
 - **Date:** 2026-09-20
 - **Related:** [ADR 0003](0003-encrypted-profile-backup.md),
   [ADR 0004](0004-portable-data-deletion.md),
@@ -183,29 +185,43 @@ The existing adapters supply some guards, but do not yet implement this
 conversion. In particular:
 
 - `_schema.load_migrations` requires exactly migrations 001 through
-  `LATEST_SCHEMA_VERSION`. Adding 008 while leaving the latest version at 7
-  makes ordinary opens fail; raising it to 8 makes writable initialization
-  attempt an in-place upgrade. `initialize_schema` executes SQL statements and
+  `REGISTERED_SCHEMA_VERSION`, plus an immutable, complete execution-policy
+  map. `LATEST_SCHEMA_VERSION` independently bounds ordinary initialization and
+  validation; both constants remain 7. Ordinary initialization preflights its
+  entire pending range and rejects any conversion-only step before earlier
+  migrations write, including explicit target requests. Trusted reference-schema
+  construction owns a new in-memory database and returns only a SQL inventory;
+  it never accepts a profile or returns a writable connection. This preparation
+  registers no schema 008 and does not expand the restore allowlist.
+  `initialize_schema` executes SQL statements and
   checks the supported allocation bound before each migration commits, before any
   later compaction. It has no registered Python data-transformation stage.
   A conversion copy needs its own finite temporary-allocation budget; this must
   not weaken the live-runtime or final-snapshot cap.
-  Registration and activation therefore require a tested conversion-only
-  policy first. Existing-file initialization must not enter this rewrite; do
-  not ship a version bump before the safe conversion path is available.
+  Registration and activation must retain this conversion-only policy.
+  Existing-file initialization must not enter this rewrite; do not ship a
+  version bump before the safe conversion path is available. Fresh profile
+  creation at a future conversion-only target also remains refused by ordinary
+  initialization until a separately gated construction path is implemented.
 - `SQLiteRepository.initialize`, `_require_initialized` and `__enter__` require
   the current schema. `LocalBackupStorage.capture_profile` uses that public
-  adapter, so it cannot become the legacy capture path merely by accepting a
-  version argument at the service layer. Add a dedicated guarded capture path
-  for explicitly supported source versions, retaining identity, sidecar/WAL,
-  snapshot-size and timeout checks. Normal opens must stay strict.
+  adapter and remains current-schema-only. `snapshot_capture.py` adds a separate
+  guarded capture path for explicit runtime paths and an explicit subset of
+  supported source versions 4–7. It retains identity, runtime containment and source privacy,
+  sidecar/WAL, size and cumulative timeout checks; validates the captured SQL
+  before application records; and closes its read-only source and in-memory
+  destination on failure. It grants no conversion admission or historical
+  factual custody. Normal opens remain strict.
 - `validate_profile_snapshot` compares exact registered SQL, migration history,
   integrity and foreign keys. It does **not** validate full profile provenance,
   material PDFs, bundle bindings or approvals. Its defensive connection is
-  closed on return, and no public validated in-memory repository constructor
-  currently exists. Conversion needs a deliberate isolated-copy adapter and
-  complete historical audit; ordinary current-readiness checks would wrongly
-  reject legitimate retired facts. The generic `artifacts` table is restricted
+  closed on return. `SQLiteRepository.from_snapshot` now separately validates
+  immutable bytes and exposes an owned, read-only current-schema memory
+  repository to existing services. It creates no staging file and accepts no
+  writable bypass; historical 4–6 images are still refused by this constructor.
+  Conversion needs a writable transformation adapter and complete historical
+  audit; ordinary current-readiness checks would wrongly reject legitimate
+  retired facts. The generic `artifacts` table is restricted
   to profile-import digest records by snapshot validation, so payloads belong
   in a dedicated table, not that existing artifact registry.
 - `restore_profile` and `_verify_restored_target` bind exact snapshot bytes to
@@ -261,8 +277,7 @@ provider. The bounded gate must demonstrate:
    its own material and resumes existing queue semantics. No external submission,
    new approval, automatic deletion or personal schedule setup occurs.
 
-The next bounded task, **after this proposal is accepted**, is an isolated
-exact-byte payload primitive in a new
+The first bounded task is an isolated exact-byte payload primitive in
 `src/grounded_apply/repositories/material_payloads.py`, with synthetic
 in-memory table fixtures in `tests/test_material_artifact_storage.py`. It should
 intern and reconstruct PDF/LaTeX/text payloads with kind, length, digest and byte
@@ -270,6 +285,24 @@ equality checks, and prove rollback and corruption behavior. Keep production
 schema 7, the migration directory, normal repository reads/writes, filesystem
 publication and CLI unchanged in this first slice. This is a preparatory internal
 primitive, not an available conversion or a storage-capacity release.
+
+The helper's explicit allowance is 2 MiB per payload kind, including UTF-8 bytes
+for LaTeX and extracted text. Empty values and exact Unicode/line endings are
+storage values, not evidence of a semantically valid PDF or resume. Existing
+schema-7 text does not have this same explicit bound, so eventual conversion must
+inspect historical values and refuse unsupported ones without changing them;
+the helper does not establish that every existing profile can convert.
+
+The caller owns the validated connection/schema and material transaction. The
+helper creates no schema, commits no transaction and performs no filesystem
+access. Three-value reconstruction requires an active caller read transaction.
+Insertion validates the whole input set before writing; later storage/material
+failures require the caller to roll back its transaction. Every read revalidates
+the bounded payload and metadata, with SQL guards before returning potentially
+oversized values to Python. Storage errors retain a fatal integrity category for
+future integration, not an ordinary job-preparation blocker. Correct same-kind
+references to another material require the existing manifest and workflow
+bindings to detect; a payload digest alone cannot establish those bindings.
 
 Begin with these exact inspections and existing boundary regressions:
 
@@ -279,9 +312,72 @@ rg -n 'insert_material|get_material_version|load_migrations|initialize_schema|sn
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_schema tests.test_backup_schema_compatibility tests.test_migration_capacity -v
 ```
 
-After that primitive is verified, design and test conversion-only registration
-and guarded legacy capture, then integrate the explicit conversion and target
-publisher. Add migration 008 and activate its default only as part of the gated
-release that can preserve and convert existing profiles safely. The external
-experiment establishes feasibility of byte interning and compaction; it is not
-that release evidence.
+The payload primitive, migration execution policy, guarded legacy capture,
+owned read-only snapshot repository and explicit per-material historical factual
+audit now have code; their verification results live in SESSION_HANDOFF.md.
+The factual audit uses recorded packets and original approved records at material
+creation time without rerunning automatic selection. Its linked build-record
+check closes material/workflow fields, recursive raw JSON, completed metadata,
+identity/artifact bindings and raw creation/start/finish timestamps, with aware
+update ordering. Legacy/modern presentation formats, harmless encoding and valid
+later updates remain intact; ordinary reads and approval-record-only semantics
+are unchanged. This linked check does not inventory orphan build workflows.
+It preserves later retirement
+and unanswered questionnaire blockers, whose closed shape does not reconstruct
+every past resolver decision. It grants neither current reuse nor conversion
+admission. A separate approval-record audit binds optional saved approvals to
+their bundles, actors, timestamps and completed workflow records. It grants no
+readiness. A separate emitted-fact audit additionally checks creation and approval
+policy, every recorded member's retirement, and the peer context at both instants,
+while keeping original claim/evidence/link authority bounded by creation. Saved
+NeedInfo remains unanswered; this does not prove a valid historical approval
+decision, reconstruct later generic edits or authenticate an actor. A combined
+eligibility audit adds recorded required-answer completeness to the record and
+two-clock factual checks in one snapshot. Required NeedInfo refuses admission;
+optional unanswered questions and unapproved history remain intact. This checks
+the registered questionnaire contract, not unknown employer requirements.
+Ordinary approval reads share this strict record validator inside one read
+transaction, preserving current-fact blockers and refusing corrupt records as
+fatal storage failures. This closes an ordinary-read consistency gap; unknown
+historical states and full aggregate custody remain separate gates.
+An explicit application-use audit adds the event clock to creation/approval
+policy checks, covers every recorded ready/applied event and verifies its existing
+submission snapshot within one read transaction. Later retirement can remain
+valid history. Ordinary application reads and this audit now share strict closed
+origin/event/workflow/submission records, recursive JSON type/duplicate checks,
+exact timestamp bindings and linked replay identity. Harmless encoding changes
+and later workflow updates remain valid. An explicit application-component
+inventory audit visits every application and compares exact event, submission
+and workflow ownership against four metadata-only queries in one snapshot,
+refusing unvisited application workflows and rows without granting readiness.
+An explicit per-batch material audit checks strict records/workflow bindings and
+every checkpoint, including earlier drafts concealed by later blocked states.
+Each distinct material retains one PDF/creation-fact/optional-approval-record
+check; no current preparation or approval eligibility is inferred. Materials may
+predate newer batches through reuse, but must exist by each carrying checkpoint.
+Valid partial, unapproved, interrupted and later-retired histories remain intact.
+Batch inventory now accounts for all batch, item, checkpoint, lease and creation
+workflow ownership, including complete and incomplete orphan workflows, against
+the records already checked by each batch audit. Lease membership and shape do
+not establish active-lease admission. Material inventory now checks every saved
+material, including uncheckpointed interrupted output, and accounts for all claim
+links, approvals and material build/approval workflows against four metadata-only
+projections. Composite claim-link identity preserves multi-claim output. Each
+material retains one PDF/profile walk; present approvals require historical
+eligibility, while unapproved partial and later-retired output remain history.
+Saved-search configuration reads now check strict origin/workflow records,
+recursive raw JSON, typed manifest agreement, identity/digest/artifact ownership
+and completed metadata in one snapshot. Canonical creation and raw start/finish
+bindings remain intact; update ordering uses aware instants. Both manifest
+versions retain input version 1. Search-run origins and their linked creation
+workflows now receive the same strict identity/JSON/metadata and timestamp checks
+before existing checkpoint traversal, within one owned or borrowed snapshot.
+Full search checkpoint and schedule history, and other component inventories,
+remain unfinished.
+Unknown mutable history, other workflow inventories, active leases and aggregate
+custody remain separate admission gates.
+Full custody validation, explicit conversion and target
+publication remain unfinished. Add migration 008 and activate its default only as part
+of the gated release that can preserve and convert existing profiles safely.
+The external experiment establishes feasibility of byte interning and
+compaction; it is not that release evidence.

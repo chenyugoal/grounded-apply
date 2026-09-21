@@ -41,7 +41,7 @@ assumed. No dependencies are installed by the launcher.
 | Pending profile review | `./scripts/gapply profile review [--json]` | Supported, read-only |
 | One profile review decision | `./scripts/gapply profile decide --claim-id CLAIM_ID --review-token TOKEN --decision approve\|reject --actor-id ACTOR_ID --idempotency-key KEY [--confirm] [--json]` | Supported; storage-free syntax preview unless confirmed |
 | Full test suite | `PYTHONPATH=src python3 -m unittest discover -s tests -v` | Supported now |
-| Installed-package gate | `python scripts/check_package.py` | Supported with optional build tools; verified on Python 3.13.1 |
+| Installed-package gate | `python scripts/check_package.py` | Supported with optional build tools; latest local gate verified on Python 3.12.14 |
 | Encrypted profile backup | `gapply backup --encrypt ABSOLUTE_PATH [--dry-run] [--passphrase-stdin] [--json]` | Optional backup extra |
 | New-home restore | `gapply restore --archive ABSOLUTE_PATH --target-home NEW_ABSOLUTE_PATH [--archive-sha256 HASH --confirm] [--passphrase-stdin] [--json]` | Write-free inspection unless explicitly confirmed |
 | Required encryption gate | `python -W error scripts/check_backup.py` | Optional provider required; skipped tests fail the gate |
@@ -80,7 +80,7 @@ assumed. No dependencies are installed by the launcher.
 | Advancing-source gate | `python -W error scripts/check_source_window.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Actual CLI and Netflix parsers over fictional public responses; later-window matches, exact replay, changed head posting, nine real PDFs and encrypted cursor restoration |
 | Preparation-filter gate | `python -W error scripts/check_search_filters.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Actual CLI, filters before preparation cap, explicit missing-location choice, two real PDFs, exact replay and encrypted restoration |
 | Source-rotation gate | `python -W error scripts/check_source_rotation.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Three daily runs reach three automatic boards under one-request/one-job limits; isolated blocker, two real PDFs, stable replay and encrypted priority restoration |
-| Storage-capacity gate | `python -W error scripts/check_storage_capacity.py [--workspace NEW_EXTERNAL_DIR]` | Both extras + TeX; daily preparation above 16 MiB, near-256 MiB byte capacity, exact encrypted CLI restore/replay and per-process memory/time measurements |
+| Storage-capacity gate | `python -W error scripts/check_storage_capacity.py [--workspace NEW_EXTERNAL_DIR]` | Both extras + TeX; daily preparation and read-only snapshot-repository checks above 16 MiB and near 256 MiB, exact encrypted CLI restore/replay and per-process memory/time measurements |
 | Complete synthetic pilot | `python -W error scripts/check_pilot.py [--demo-output NEW_EXTERNAL_DIR]` | Both extras + TeX required; includes recovery and deletion |
 | Installed pilot gate | `python scripts/check_package.py --pilot-wheelhouse ABSOLUTE_PATH` | Fresh offline install of both extras + full pilot; TeX required |
 | Workflow expression validation | `actionlint -shellcheck= -pyflakes= .github/workflows/check.yml` | Supported with actionlint 1.7.12 installed; separate from application tests |
@@ -237,6 +237,45 @@ implemented. Public-feed fetching is available through `jobs discover`, and
 wake-up mechanism remains separate; arbitrary page fetching is unfinished.
 Current snapshots keep immutable historical bytes after
 retirement, while current material inspection/export/readiness fails closed.
+Application history validates every event timestamp as timezone-aware, including
+its first event, and compares event order by instant rather than string order.
+Saved approval must be at or before both ready-for-review and applied events;
+the submission snapshot follows the same comparison. Equal instants with different
+offsets are valid. Raw timestamp strings remain unchanged in event/workflow and
+submission bindings and hashes. Invalid confirmed transitions roll back; reads
+never repair stored records. This validates chronology, not factual eligibility
+at every past application event or actor authentication.
+Focused chronology gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_application_chronology tests.test_applications tests.test_briefing -v`.
+
+Questionnaires stop at explicit requests to sign, e-sign or attest, including
+questions containing career words and selected approved facts. They return
+`human_answer_required`, no answer or factual mappings, and no external action.
+Compact career noun phrases such as single sign-on, sign-on integrations and
+sign language remain eligible; they do not exempt another sign request in the
+same question. This is a bounded deterministic classifier, not general intent
+recognition. The standalone `answers` command writes no runtime state. Required
+unanswered signature questions block material approval. Both repository and
+fresh installed pilot gates cover the signature and benign career cases.
+
+### Isolated material-payload preparation
+
+`repositories/material_payloads.py` is a preparatory adapter helper tested only
+against in-memory payload tables. Normal schema-7 repository reads/writes, the
+migration directory, CLI and archive format do not use it. It interns exact
+PDF/LaTeX/text bytes by kind/digest, verifies length, digest and byte equality,
+and preserves strict UTF-8 without normalization. Its 2 MiB per-kind bound is
+an internal allowance, not a new guarantee that all historical text can convert.
+Caller-owned transactions retain material rollback and coherent reconstruction;
+the helper opens no file and creates no schema. Corruption remains a fatal
+storage-integrity error. Fact, bundle and approval validation remain separate.
+See [ADR 0010](adr/0010-content-addressed-material-storage.md) for the proposed
+conversion release and its remaining gates.
+
+Focused gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_material_artifact_storage -v`.
+The tests use synthetic in-memory DDL rather than an unregistered production
+migration. Full repository and fresh installed-package gates still apply.
 
 ### Saved-job batch verification
 
@@ -290,7 +329,34 @@ the frozen selection; a new run skips currently valid unchanged drafts before
 its preparation cap. Validated historical submissions and explicit exclusions
 are checked before preparation and material commit.
 
+Saved configuration reads validate the closed origin and configuration-workflow
+records in one owned or borrowed read transaction. Recursive raw JSON rejects
+duplicate keys, nonfinite numbers and scalar type aliases; normalized manifests,
+identifiers, digests and artifact ownership must agree. Both manifest versions
+retain workflow input version 1. Completed workflow metadata and exact original
+creation/start/finish strings are required; creation stays canonical UTC with
+microseconds, while update ordering compares aware instants. Valid later or
+equivalent-offset updates and harmless JSON formatting remain compatible.
+Expected stored-record failures use the fixed SearchIntegrityError; missing
+searches, invalid caller IDs, interruptions and caller-owned work retain their
+existing contracts. These checks add no network, profile or PDF work and do not
+establish full search-run/checkpoint/schedule custody or conversion admission.
+
+Search-run reads also validate the closed four-field origin before consulting
+its parent scope, then check the exact linked search_run_create workflow before
+checkpoint traversal. Strict JSON, literal input version 1, parent/manifest and
+deterministic run identity, single-artifact ownership, completed metadata and
+raw creation/start/finish bindings must agree; update ordering is timezone-aware.
+The existing canonical creation format remains required. One read snapshot is
+owned or borrowed across origin, parent and the existing history checks. Missing
+run/caller errors, parent-scope integrity errors and current-material behavior
+retain their boundaries. SQLite transaction failures use a fixed run-integrity
+error. This adds no parent/run chronology, checkpoint policy, lease or scheduler
+rule; partial and legacy run histories remain subject to their existing checks.
+
 ```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_search_run_record tests.test_search_run_history -v
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_search_scope_record tests.test_search_scope_history -v
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_searches tests.test_search_policy tests.test_search_cli tests.test_migration_capacity -v
 PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_search.py --with-backup
 ```
@@ -877,6 +943,352 @@ revisions. It releases its own read snapshot before migration locking and leaves
 caller-owned transactions untouched. Each migration still revalidates under
 `BEGIN IMMEDIATE` and atomically commits its schema, ledger, and version update.
 Future, unversioned, and inconsistent databases still fail closed.
+Registered migration availability and ordinary schema support have separate
+version bounds, both currently 7. Every SQL file needs an explicit immutable
+execution policy. Ordinary initialization rejects a pending conversion-only
+step before applying any earlier migration in that requested range, even with
+an explicit target. A concurrent initializer advancing beyond an explicit
+target is refused instead of silently returning a different version.
+Snapshot validation obtains trusted SQL structure from a separate function that
+constructs and closes its own empty in-memory database and returns only schema
+rows. It cannot operate on an existing profile. This adds no schema 8, conversion
+command or restore version; ordinary schema-4–6 upgrades to 7 remain available.
+Focused policy gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_migration_policy tests.test_schema tests.test_backup_schema_compatibility tests.test_migration_capacity -v`.
+
+`repositories/snapshot_capture.py` supplies a separate internal historical
+capture adapter. It requires explicit absolute runtime paths and a nonempty
+exact frozenset of source versions within 4–7 before filesystem access. It opens
+read-only, checks runtime containment, source privacy and database identity, uses defensive/query-only
+SQLite settings, and captures a pinned size-bounded image. Exact registered SQL,
+ledger, integrity, foreign-key and artifact validation precede acceptance of the
+captured version. A cumulative thirty-second cooperative deadline covers capture
+and validation; native operations are not forcibly interrupted. All owned
+connections close on failure, and cleanup preserves original interruptions.
+Normal `SQLiteRepository` and backup entry points still require the current
+schema. Their snapshot method reuses only the bounded copying helper. Capture
+does not audit full historical factual/material custody, refuse active leases,
+grant conversion admission or publish a new profile. Repeated filesystem checks
+retain the documented same-UID TOCTOU limitation. The installed-package gate
+exercises capture of all four historical schemas without changing their files.
+Focused capture gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_snapshot_capture tests.test_backup.SnapshotTests tests.test_backup_schema_compatibility tests.test_storage_safety tests.test_migration_policy -v`.
+
+`SQLiteRepository.from_snapshot(snapshot)` always validates the supplied bytes
+and requires current schema 7, even though historical 4–6 images remain
+restorable and capturable. It creates an owned defensive in-memory connection,
+deserializes with trusted schema disabled, then enables query-only mode and
+uses strict existing-schema initialization. It has no writable/trusted-input
+bypass, raw connection parameter, migration option, staging file or runtime
+fallback. The caller closes the returned repository or uses its context manager.
+The existing 256 MiB image bound and a cumulative thirty-second cooperative
+construction budget apply; no expiry handler remains on subsequent service
+reads. No extra input image is retained after construction. Factual provenance,
+historical material custody and current-use authority still require service
+validation; this constructor alone grants none of them.
+
+Repository read transactions preserve an existing caller transaction, handle
+interruption immediately after BEGIN and release owned connections when rollback
+fails. Explicit close always attempts connection close despite rollback failure;
+context cleanup preserves the original error. The installed-package gate compares
+profile evidence and job records through the snapshot adapter and rejects writes.
+The capacity gate additionally measures capture and snapshot-repository reads at
+both its >16 MiB and near-capacity checkpoints, including historical factual
+validation of its real-PDF materials. The installed pilot repeats the >16 MiB
+case with installed services.
+Focused snapshot-repository gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_snapshot_repository tests.test_repository tests.test_snapshot_capture tests.test_storage_safety tests.test_schema -v`.
+
+`MaterialService.validate_historical_facts(material_id)` is an explicit internal
+per-material audit, separate from ordinary reads. One read transaction checks
+existing PDF/bundle/workflow bindings, original validated profile records and
+retirement audits. It reconstructs only recorded packet membership in original
+profile/evidence order, applying job policy at material creation time. Exact
+canonical text, packet hashes, requirement links, selected-unit order and
+registered v1/v2 presentation rules must agree. Approval and confirmation actors
+must be recorded; claim/evidence timestamps and support links must predate or
+equal creation. Later retirement is retained as history; earlier retirement,
+stale-at-creation evidence and generic records changed without reconstructible
+history fail closed. Later duplicate or conflicting profile additions never
+expand a saved packet or turn this result into current use authority.
+Unchanged same-subject peers known to exist at creation are also checked, so a
+rehashed packet cannot hide a historical contradiction or omit a required
+compatible peer. This does not rerun automatic resume selection.
+
+Questionnaire drafts use the same registered deterministic classification as
+preparation and require exact selected factual mappings and newline-joined
+canonical text. Saved NeedInfo results remain unanswered and retain nonempty
+closed structured blockers, even after later approvals. This validates their
+shape and existing bundle binding, not complete reconstruction of every past
+resolver decision. Questions newly stopped by the standalone-sign correction
+may retain their older closed unanswered blockers; they cannot retain an
+answered draft. Earlier human-gated questions keep their exact required blocker.
+This internal method raises fixed fatal
+`MaterialHistoryIntegrityError`, preserves interruptions, writes nothing and
+grants no approval. Full approval/application/workflow/orphan custody and
+conversion admission remain unfinished; production schema stays 7.
+Focused historical gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_questionnaire_signatures tests.test_questionnaire_history tests.test_material_history tests.test_materials tests.test_applications -v`.
+
+The creation-facts path also validates strict linked material-build records before
+walking profile history. The pure `material_build_history` helper checks exact
+material/workflow field sets, recursive duplicate/nonfinite-safe JSON, raw/decoded
+value agreement, scalar types, identifiers, bundle/input digests, one-material
+artifact ownership and completed-workflow metadata. Creation, start and finish
+retain their exact original timestamp strings; update ordering uses aware time
+comparison. Harmless JSON formatting, valid offset timestamps and later updates
+remain accepted. Both `approved_text_selection@1` and `@2` keep literal integer
+workflow payload version 1; only `@2` carries the registered presentation mapping.
+No new payload-size bound is imposed on existing schema-7 material bytes.
+
+Approval-fact, application-use and batch-history audits inherit this linked-build
+check through their existing factual path. It reuses the loaded bundle/PDF and
+one profile snapshot, preserves fixed fatal errors and borrowed transactions,
+and does not alter ordinary `get`, current-fact blockers or the separate
+approval-record-only contract. This still does not inventory orphan material
+build/approval workflows or admit conversion. Source/installed pilots and both
+capacity checkpoints exercise the same helper through their historical audits.
+Focused build-record gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_material_build_record tests.test_material_build_history -v`.
+
+`MaterialService.validate_historical_inventory()` audits the complete material
+component in one read snapshot. Four fixed repository queries project material,
+claim-link, approval and build/approval-workflow ownership without document columns,
+joins or status filters. Exact closed rows and sorted ownership tuples must agree
+with every audited material. Claim-link identity is the composite material/claim
+pair, so multi-claim materials remain valid and duplicate pairs fail. Complete or
+incomplete orphan workflows, missing/extra rows and wrong owners fail closed.
+
+Each material receives one bundle/PDF validation and one historical profile walk.
+Unapproved partial output remains history; a present approval must pass combined
+creation/approval factual and required-answer eligibility. Later retirement remains
+valid history. The audit covers saved output even when interrupted preparation has
+not yet recorded a batch checkpoint. It derives claim ownership from already
+validated packets and answer mappings, preserving answer-only claims and shared
+links. Existing public absent-approval and record-only contracts are unchanged.
+Fixed `MaterialHistoryIntegrityError` failures preserve caller work and interrupts;
+no current readiness, preparation, approval or mutation is performed.
+
+Source and fresh installed pilots audit all materials alongside application
+inventories in original, restored and later-retired restored homes. Capacity checks
+replace repeated per-material public audits with this aggregate check, retaining
+exact raw material/approval comparisons, coverage counts and source file guards.
+Those counts describe validated coverage, not public method invocation counts.
+Other workflow components, active leases and whole-home conversion remain separate
+unfinished gates. Focused material-inventory gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_material_inventory tests.test_material_inventory_repository -v`.
+
+`MaterialService.validate_historical_approval_record(material_id)` separately
+audits one optional saved approval against its existing historical bundle in a
+single read transaction. Absence is valid unapproved history. A present record
+requires exact material/workflow identities, bundle and input digests, an opaque
+actor, a closed integer-versioned payload, expected completed-workflow metadata,
+and no duplicate JSON object keys. Approval creation/start/finish strings retain
+their exact original binding. Aware timestamp comparisons require approval at or
+after material creation and workflow update at or after completion; equivalent
+timezones are compared as instants, and normal later updates remain valid.
+
+The method returns no readiness value, creates no approval, invokes no current
+plan/answer resolution, and maps failures to a fixed fatal
+`MaterialHistoryIntegrityError` while preserving interrupts. Intact retired or
+partial material records can retain their approval record without gaining current
+use authority. This is record consistency, not proof of actor authenticity or
+fact/question eligibility when the approval occurred. Creation-time factual
+auditing, approval-time authority, full workflow inventory and conversion
+admission remain separate checks. Production schema stays 7. The capacity gate
+compares exact source/snapshot approval records, audits both present and absent
+records at both sizes, and proves one explicitly approved synthetic material
+survives encrypted restore. Its installed >16 MiB run exercises the same audit.
+Focused approval-record gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_material_approval_history -v`.
+
+`MaterialService.validate_historical_approval_facts(material_id)` checks emitted
+facts against both material creation and the timestamp from its validated saved
+approval. It reads the historical bundle once inside one transaction. Original
+claim approval, evidence confirmation and support links must still predate or
+equal creation; later approval cannot repair missing creation-time authority.
+The additional policy check preserves the exact creation packet while requiring
+every packet member to remain usable and unretired at approval. Same-subject peers
+known at approval are checked too: intervening conflicting or packet-expanding
+peers fail, while unrelated facts and peers retired before approval do not expand
+the recorded output. Dates use aware instants and half-open effective windows.
+Questionnaire drafts, including answer-only facts, use the same checks.
+
+This audit writes nothing, returns no readiness value, invokes no current plan or
+questionnaire preparation and raises fixed fatal `MaterialHistoryIntegrityError`
+on failure, preserving interrupts and caller-owned transactions. No approval means
+only the existing bundle was checked here; the separate creation-facts audit is
+still required for unapproved history. Saved NeedInfo stays unanswered. An intact
+required-partial approval record can pass emitted-fact validation without proving
+the approval decision was valid. Exact historical blocker decisions,
+unreconstructible later generic edits, actor authentication and
+aggregate workflow custody remain separate conversion gates. The capacity and
+fresh installed gates exercise both present and absent approval paths with real
+PDFs and exact encrypted restoration. Schema 7 remains unchanged.
+Focused approval-time factual gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_material_approval_facts tests.test_material_history tests.test_questionnaire_history -v`.
+
+`MaterialService.validate_historical_approval_eligibility(material_id)` combines
+strict saved-record validation, creation/approval factual checks and recorded
+required-answer completeness. After proving the closed question/answer shapes,
+it requires every required answer to be a valid draft. Required NeedInfo fails
+even if evidence became available later; optional NeedInfo and unapproved partial
+history remain valid. Separate record-only and fact-only audits retain their
+existing partial-history behavior.
+
+The two approval-factual entry points share a private snapshot helper, so the
+combined check reads one bundle/PDF and one original profile in one transaction.
+It invokes no current preparation or readiness, stores nothing, preserves
+interrupts and caller transactions, and reports fixed fatal
+`MaterialHistoryIntegrityError`. It grants no current-use authority and cannot
+authenticate an approval action, reconstruct mutable historical states or establish
+coverage of unknown employer questions. Aggregate/orphan custody and conversion
+remain unfinished. The capacity gate replaces its approval-facts call with this
+combined check; its exact restore/readiness assertions remain unchanged.
+Focused recorded-eligibility gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_material_approval_eligibility tests.test_material_approval_facts tests.test_material_approval_history -v`.
+
+`MaterialService.validate_historical_use(material_id, used_at=...)` additionally
+requires a present intact approval and checks the recorded facts at a required,
+aware use timestamp. Creation <= approval <= use must hold; original claim,
+evidence and support-link authority still belongs to creation. All recorded
+packet members, effective windows and reconstructible peer context are checked
+at all three instants. Required answers must be complete; optional NeedInfo is
+preserved. Missing approval is fatal for this method, while the older optional
+approval audits keep their absent-approval behavior.
+
+`ApplicationService.validate_historical_material_use(application_id)` binds those
+checks to every saved ready-for-review and applied event, including earlier ready
+materials later replaced. One outer read transaction pins the job, events,
+workflows, bundles, approvals, facts and submission. Each use event loads one
+bundle/PDF and original profile; its applied pair is reused to verify the exact
+submission snapshot without another PDF load. No eligibility result is cached
+only by material ID. Ordinary `get` keeps its separate current-readiness behavior.
+The audit invokes no current approval/readiness or answer preparation and creates
+no output or approval. Fixed fatal RepositoryError sanitizes failures; interrupts,
+caller-owned transactions and stored bytes are preserved.
+
+This verifies reconstructible emitted facts and recorded required answers, not
+actor authenticity, unknown employer questions, generic mutable history, complete
+workflow schemas or orphan/aggregate custody. Schema 7 and the conversion gate
+remain unchanged. The real-PDF source and installed pilots audit manual application
+history before restore, after restore and after later retirement, checking exact
+source bytes and filesystem inventory without network use.
+Focused material-use gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_material_use_history tests.test_application_material_history tests.test_application_chronology tests.test_applications -v`.
+
+Ordinary application history and the explicit use audit share pure validators in
+`services/application_history.py`. Application origins, events, their completed
+workflows and submission rows have closed fields and exact types. Recursive JSON
+duplicate keys, nonfinite values, boolean/integer/float substitutions and
+unsupported pending/retry/model/failure metadata fail closed. Submission values
+must match the existing validated job/material/approval reconstruction at every
+depth and retain the original digest. Harmless JSON whitespace, object ordering
+and Unicode escapes remain valid; no stored JSON or timestamp is rewritten.
+
+Workflow creation/start/finish strings bind exactly to the event timestamp.
+Updates must be aware and at or after that instant; later updates, including
+future values, remain valid. Replay requires the exact workflow linked to the
+recorded event, preventing an unlinked workflow from claiming its artifacts.
+Valid replay after later transitions and ordinary request/key conflicts retain
+their behavior. Corrupt replay records are validated before comparing the caller's
+request. Invalid new writes roll back; reads and interrupts preserve stored state.
+These checks cover linked application records, not complete orphan/aggregate
+inventory, actor authentication or conversion admission.
+Focused application-record gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_application_record_history tests.test_application_material_history tests.test_application_chronology tests.test_applications -v`.
+
+`ApplicationService.validate_historical_inventory()` checks application-component
+coverage in one outer read snapshot. A metadata-only repository query inventories
+application IDs, event/workflow ownership, submission references and every
+application-create/transition workflow. Each application receives the existing
+historical record/use audit once. Exact sorted ownership tuples, including their
+multiplicity, must match the inventory; duplicate identities and unvisited rows
+fail closed, including orphan workflows when no application exists.
+
+The initial event and application origin correctly share one creation workflow.
+Submission references come from already checked applied events, avoiding another
+PDF read. Valid retired histories and earlier ready/replacement rounds remain
+intact. No current-readiness/preparation call, output, approval or mutation occurs;
+fixed fatal errors, interruptions and caller-owned transactions retain the same
+boundaries. The repository API independently pins its four metadata reads when
+called directly. Source and installed pilots now run the full inventory audit at
+their original/restored/later-retired checkpoints. This checks application
+coverage; other workflow kinds, active leases and whole-profile admission remain
+separate gates. It does not establish large application-history performance.
+Focused application-inventory gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_application_inventory tests.test_application_inventory_repository -v`.
+
+`BatchService.validate_historical_materials(batch_id)` is an explicit audit of
+one batch in a pinned read snapshot. It checks closed origin/item/event/lease
+rows, recursive JSON duplicates and nonfinite values, exact integer versions and
+positions, normalized manifests/specifications, hashes and deterministic IDs.
+Its creation workflow must retain the exact expected input, completed metadata,
+artifact and creation/start/finish bindings; a later aware update remains valid.
+Batch and checkpoint times retain their existing canonical UTC microsecond form.
+
+Every saved checkpoint is retained for this audit. Each distinct referenced
+material is loaded and PDF-validated once, then checked against its creation-time
+facts and optional approval record. Every reference still checks its preparation
+binding and requires material creation at or before the checkpoint. Every draft
+checkpoint requires completed recorded required answers; a later blocked state
+cannot hide an invalid earlier draft. Exact reuse may predate the newer batch.
+Unapproved, partial-blocked, interrupted and later-retired histories remain valid.
+No current selection, questionnaire preparation, approval eligibility or readiness
+call occurs. Queued checkpoints without material references need no profile/PDF
+walk. The audit returns None, writes nothing and uses fixed fatal
+`BatchIntegrityError`, preserving interrupts and caller-owned work.
+
+This explicit path adds strict historical checks; ordinary batch review and reuse
+keep their current-fact behavior. Lease shape is checked without admitting active
+leases. Reverse inventory, orphan workflows, search/schedule custody and whole-home
+conversion remain separate gates. The real-PDF batch gate audits its original and
+encrypted-restored batch in quiet read-only subprocesses, checking exact source
+bytes, mtime, runtime inventory and no external actions. The installed gate uses
+the fresh installation's interpreter for these same checks.
+Focused batch-history gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_batch_record_history tests.test_batch_material_history -v`.
+
+`BatchService.validate_historical_inventory()` extends that audit to the complete
+batch component in one read snapshot. Five fixed repository projections inventory
+batches and their creation workflows, item ownership, checkpoint ownership, lease
+membership and every exact-kind batch_create workflow regardless of status.
+Closed metadata shapes, opaque identifiers and unique primary identities are
+required. Every batch is audited once through the same private historical path;
+ownership is projected from those already checked records and compared as exact
+sorted tuples with multiplicity. Missing, extra, duplicate and equal-count wrong
+ownership fail, including complete valid-looking orphan workflows with no batches.
+
+No second material audit is performed merely to collect ownership. One bundle,
+PDF and factual check per distinct material within each batch remains the rule;
+cross-batch material reuse is independently audited in each batch. Partial,
+retired, queued and interrupted histories retain their previous behavior. The
+source and installed real-PDF gate now audits whole original/restored inventories,
+with the expected synthetic batch present. Fixed fatal BatchIntegrityError,
+interrupt identity, quiet unchanged files and caller-owned transactions remain
+covered. The metadata repository method independently pins its five reads.
+Lease membership/shape does not admit active leases. Uncheckpointed materials,
+all-material/approval inventory, other workflow kinds and search/schedule custody
+remain separate conversion gates. This is not a large-history performance result.
+Focused batch-inventory gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_batch_inventory tests.test_batch_inventory_repository -v`.
+
+Ordinary `MaterialService.is_approved` uses the same strict approval-record
+validator, reading the material and optional approval together in one pinned
+transaction. Missing approval remains false; valid optional unanswered questions
+do not block readiness, while required unanswered questions do. A corrupt present
+approval raises fixed fatal `MaterialApprovalIntegrityError` (a `RepositoryError`)
+rather than false or an ordinary preparation blocker. This includes boolean/float
+payload-version aliases, duplicate JSON keys and unsupported workflow metadata.
+Current fact validation retains precedence: a retired claim can raise
+`MaterialBlocked` before inspecting its approval. Explicit historical reads with
+`require_current=False` still inspect the record. Nested reads borrow their
+caller's transaction, including approval creation and replay, without committing
+or rolling it back. These checks establish record consistency and current
+readiness, not reconstruction of factual eligibility at an old approval time.
+Focused ordinary-read and caller gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_material_approval_reads tests.test_material_approval_history tests.test_materials tests.test_applications tests.test_batch_search_history tests.test_search_review_exports -v`.
+
 `tests.test_schema` forces another connection to migrate between validation reads
 for both fresh and version-1 databases and retains the eight-worker initialization
 test. The deterministic fixture uses WAL through private schema helpers so a

@@ -7,12 +7,13 @@ import time
 from contextlib import closing
 
 from grounded_apply.repositories._schema import (
-    LATEST_SCHEMA_VERSION, default_migrations_directory, initialize_schema, validate_schema,
+    LATEST_SCHEMA_VERSION, SCHEMA_OBJECTS_QUERY, default_migrations_directory,
+    reference_schema_objects, validate_schema,
 )
 from grounded_apply.services.backup import BackupError, MAX_SNAPSHOT_BYTES, SNAPSHOT_WORK_SECONDS
 
 
-_SCHEMA_QUERY = "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"
+_SCHEMA_QUERY = SCHEMA_OBJECTS_QUERY
 _RESTORABLE_SCHEMA_VERSIONS = frozenset({4, 5, 6, 7})
 
 
@@ -42,10 +43,7 @@ def validate_profile_snapshot(snapshot: bytes) -> None:
         raise BackupError("Unsupported profile database size or schema version")
     deadline = time.monotonic() + SNAPSHOT_WORK_SECONDS
     try:
-        with closing(sqlite3.connect(":memory:", isolation_level=None)) as reference:
-            reference.execute("PRAGMA temp_store = MEMORY")
-            initialize_schema(reference, default_migrations_directory(), target_version=schema_version)
-            expected = reference.execute(_SCHEMA_QUERY).fetchall()
+        expected = reference_schema_objects(default_migrations_directory(), target_version=schema_version)
         with closing(sqlite3.connect(":memory:", isolation_level=None)) as database:
             database.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
             database.execute("PRAGMA trusted_schema = OFF")
@@ -53,7 +51,7 @@ def validate_profile_snapshot(snapshot: bytes) -> None:
             database.deserialize(snapshot)
             database.execute("PRAGMA query_only = ON")
             database.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
-            if database.execute(_SCHEMA_QUERY).fetchall() != expected:
+            if tuple(database.execute(_SCHEMA_QUERY).fetchall()) != expected:
                 raise BackupError("Snapshot SQL schema does not match registered migrations")
             if validate_schema(database, default_migrations_directory()) != schema_version:
                 raise BackupError("Snapshot schema version is unsupported")

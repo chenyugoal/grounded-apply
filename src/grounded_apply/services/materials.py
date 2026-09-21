@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 from uuid import uuid4
 
 from grounded_apply.domain import Resolved, resolve_claims, to_jsonable
-from grounded_apply.repositories import RepositoryError, SQLiteRepository
+from grounded_apply.repositories import Record, RepositoryError, SQLiteRepository
 from grounded_apply.services.jobs import JobService
 from grounded_apply.services.matching import job_policy, terms
 from grounded_apply.services.material_models import (
-    HEADING_TYPES, TRANSFORMATIONS, FactualUnit, MaterialValidationError, RenderedResume,
-    ResumeRenderer, ResumeStructure, validate_layout,
+    TRANSFORMATIONS, FactualUnit, MaterialValidationError, RenderedResume,
+    ResumeRenderer, ResumeStructure, selected_presentation, validate_layout,
 )
 from grounded_apply.services.profile import ProfileService, resolve_selected_claim
 from grounded_apply.services.questionnaires import QuestionnaireService, validate_question_specs
@@ -25,6 +26,14 @@ from grounded_apply.services.workflow import (
 )
 
 CURRENT_TRANSFORMATION = "approved_text_selection@2"
+
+
+class MaterialHistoryIntegrityError(RepositoryError):
+    """Historical material custody failed; never an ordinary preparation blocker."""
+
+
+class MaterialApprovalIntegrityError(RepositoryError):
+    """Saved approval integrity failed; never an unapproved or blocked result."""
 
 
 class MaterialBlocked(MaterialValidationError):
@@ -114,16 +123,7 @@ class MaterialService:
                     continue
                 packet = outcome.packet
                 relevant = tuple(r.id for r in job.requirements if terms(r.quote) & terms(claim.canonical_text))
-                presentation = "bullet" if any(re.match(r"^\s*[-*•]\s+", e.source_text or "") for e in packet.evidence) else "paragraph"
-                if transformation == "approved_text_selection@2":
-                    if any(re.match(r"^\s*\\resumeItem\s*\{", e.source_text or "") for e in packet.evidence):
-                        presentation = "bullet"
-                    if claim.claim_type in HEADING_TYPES and any(re.match(r"^\s*\\resumeSubheading\b", e.source_text or "") for e in packet.evidence):
-                        presentation = "heading"
-                    presentation = styles.get(claim_id, presentation)
-                    if ((claim.claim_type == "candidate_name" or claim.claim_type.startswith("contact_")) and claim_id in styles
-                        or presentation == "heading" and claim.claim_type not in HEADING_TYPES):
-                        raise MaterialValidationError("Presentation is incompatible with the selected claim type")
+                presentation = selected_presentation(claim, packet, transformation, styles)
                 units.append(FactualUnit(claim.id, claim.claim_type, claim.canonical_text,
                     packet.claim_ids, tuple(e.id for e in packet.evidence), relevant,
                     digest(to_jsonable(packet)), presentation))
@@ -304,21 +304,221 @@ class MaterialService:
             raise MaterialValidationError("Material version failed provenance or PDF validation") from None
         return {**record, "structure": asdict(structure), "manifest": manifest, "validation": validation}
 
-    def is_approved(self, material_id: str, *, require_current: bool = True) -> bool:
-        material = self.get(material_id, require_current=require_current)
+    def validate_historical_facts(self, material_id: str) -> None:
+        """Audit one saved material at creation time, without granting current use.
+
+        This explicitly requested internal audit includes existing PDF/bundle
+        checks. It neither approves material nor admits a whole-home conversion.
+        """
+        try:
+            with self._repository.read_transaction():
+                material = self.get(material_id, require_current=False)
+                if material["id"] != material_id:
+                    raise ValueError
+                self._validate_historical_fact_snapshot(material)
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise MaterialHistoryIntegrityError("Material historical facts failed integrity checks") from None
+
+    def _validated_historical_material(self, material_id: str) -> dict[str, tuple[Record, ...]]:
+        """Audit one material in the caller's snapshot and return checked ownership."""
+        material = self.get(material_id, require_current=False)
+        if material["id"] != material_id:
+            raise ValueError
         approval = self._repository.get_material_approval(material_id)
         if approval is None:
-            return False
-        workflow = self._repository.get_workflow_run(approval["workflow_run_id"])
-        if workflow is None:
-            raise MaterialValidationError("Material approval audit is missing")
-        expected = {"version": 1, "material_id": material_id, "bundle_sha256": material["bundle_sha256"],
-            "actor_id": approval["actor_id"], "idempotency_sha256": workflow["idempotency_key"]}
-        validate_workflow(workflow, "material_approval", expected)
-        if (approval["bundle_sha256"] != material["bundle_sha256"] or approval["approved_at"] != workflow["created_at"]
-            or json.loads(workflow["generated_artifacts_json"]) != [material_id]):
-            raise MaterialValidationError("Material approval does not match this version")
-        return not any(a["required"] and a["status"] != "draft" for a in material["manifest"]["answers"])
+            self._validate_historical_fact_snapshot(material)
+        else:
+            self._validate_historical_approved_snapshot(material, approval, require_complete=True)
+        claim_ids = {identifier for unit in material["structure"]["units"] for identifier in unit["packet_claim_ids"]}
+        claim_ids |= {identifier for answer in material["manifest"]["answers"]
+                      for unit in answer["factual_units"] for identifier in unit["claim_ids"]}
+        workflows = [{"id": material["workflow_run_id"], "workflow_type": "material_build"}]
+        if approval is not None:
+            workflows.append({"id": approval["workflow_run_id"], "workflow_type": "material_approval"})
+        return {
+            "materials": ({"id": material_id, "workflow_run_id": material["workflow_run_id"]},),
+            "claims": tuple({"material_id": material_id, "claim_id": identifier} for identifier in sorted(claim_ids)),
+            "approvals": () if approval is None else
+                ({"material_id": material_id, "workflow_run_id": approval["workflow_run_id"]},),
+            "workflows": tuple(workflows),
+        }
+
+    def validate_historical_inventory(self) -> None:
+        """Audit every material and account for all claim, approval and build links.
+
+        Present approvals require historical factual and required-answer eligibility;
+        absent approvals retain valid unapproved history. This grants no current use.
+        """
+        columns = {
+            "materials": ("id", "workflow_run_id"),
+            "claims": ("material_id", "claim_id"),
+            "approvals": ("material_id", "workflow_run_id"),
+            "workflows": ("id", "workflow_type"),
+        }
+        try:
+            with self._repository.read_transaction():
+                inventory = self._repository.material_history_inventory()
+                if type(inventory) is not dict or set(inventory) != set(columns):
+                    raise ValueError
+                actual: dict[str, tuple[tuple[str, ...], ...]] = {}
+                for kind, fields in columns.items():
+                    rows = inventory[kind]
+                    if type(rows) is not tuple:
+                        raise ValueError
+                    values = []
+                    for row in rows:
+                        if type(row) is not dict or set(row) != set(fields):
+                            raise ValueError
+                        values.append(tuple(opaque(row[field]) for field in fields))
+                    identities = set(values) if kind == "claims" else {row[0] for row in values}
+                    if len(identities) != len(values):
+                        raise ValueError
+                    actual[kind] = tuple(sorted(values))
+                expected: dict[str, list[tuple[str, ...]]] = {kind: [] for kind in columns}
+                for material_id, _ in actual["materials"]:
+                    checked = self._validated_historical_material(material_id)
+                    for kind, fields in columns.items():
+                        expected[kind].extend(tuple(row[field] for field in fields) for row in checked[kind])
+                if any(actual[kind] != tuple(sorted(expected[kind])) for kind in columns):
+                    raise ValueError
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise MaterialHistoryIntegrityError("Material historical inventory failed integrity checks") from None
+
+    def _validate_historical_fact_snapshot(self, material: dict[str, Any], *, approval_at: str | None = None,
+                                         use_at: str | None = None) -> None:
+        """Validate an already checked bundle within the caller's read snapshot."""
+        from grounded_apply.services.material_build_history import validate_material_build_record
+        from grounded_apply.services.material_history import validate_material_history
+        from grounded_apply.services.profile_lifecycle import project_retirements
+
+        workflow = self._repository.get_workflow_run(opaque(material["workflow_run_id"]))
+        payload = validate_material_build_record(material, workflow)
+        claims, evidence = ProfileService(self._repository).validated_profile(apply_retirements=False)
+        project_retirements(self._repository, claims, evidence)
+        validate_material_history(
+            material, payload,
+            JobService(self._repository).get(material["job_id"]), claims, evidence,
+            evidence_records={item.id: self._repository.get_evidence(item.id) for item in evidence},
+            support_links={(row["evidence_id"], row["claim_id"]): row
+                           for row in self._repository.list_claim_evidence(relationship="supports")},
+            retirements={row["claim_id"]: row["retired_at"] for row in self._repository.list_claim_retirements()},
+            approval_at=approval_at, use_at=use_at,
+        )
+
+    def validate_historical_approval_facts(self, material_id: str) -> None:
+        """Audit emitted facts at creation and saved approval, without readiness.
+
+        An absent approval needs only bundle validation here; creation facts for
+        unapproved materials have their separate audit. Unanswered questions stay
+        unanswered; this does not establish a valid historical approval decision.
+        """
+        try:
+            self._validate_historical_approval_snapshot(material_id, require_complete=False)
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise MaterialHistoryIntegrityError("Material historical approval facts failed integrity checks") from None
+
+    def validate_historical_approval_eligibility(self, material_id: str) -> None:
+        """Check saved approval facts and required answers, without current use.
+
+        This verifies recorded questionnaire completeness after both factual
+        clocks. It does not fill answers, authenticate an actor or reconstruct
+        unknown historical states. Absence remains unapproved bundle history.
+        """
+        try:
+            self._validate_historical_approval_snapshot(material_id, require_complete=True)
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise MaterialHistoryIntegrityError("Material historical approval eligibility failed integrity checks") from None
+
+    def _validate_historical_approval_snapshot(self, material_id: str, *, require_complete: bool) -> None:
+        """Own one snapshot for the two fixed historical approval audit modes."""
+        opaque(material_id)
+        with self._repository.read_transaction():
+            material = self.get(material_id, require_current=False)
+            if material["id"] != material_id:
+                raise ValueError
+            approval = self._repository.get_material_approval(material_id)
+            if approval is None:
+                return
+            self._validate_historical_approved_snapshot(material, approval, require_complete=require_complete)
+
+    def _validate_historical_approved_snapshot(self, material: dict[str, Any], approval: dict[str, Any], *,
+                                             require_complete: bool, used_at: str | None = None) -> None:
+        """Check an already validated bundle and approval in the caller's snapshot."""
+        from grounded_apply.services.material_approval_history import validate_approval_record
+
+        workflow = self._repository.get_workflow_run(opaque(approval["workflow_run_id"]))
+        validate_approval_record(material, approval, workflow)
+        self._validate_historical_fact_snapshot(material, approval_at=approval["approved_at"], use_at=used_at)
+        # The factual audit first proves closed answer/spec shapes, exact
+        # boolean flags and draft mappings. Completeness adds no resolution.
+        if require_complete and any(answer["required"] and answer["status"] != "draft"
+                                    for answer in material["manifest"]["answers"]):
+            raise ValueError("Historical approval has an unanswered required question")
+
+    def validate_historical_use(self, material_id: str, *, used_at: str) -> None:
+        """Audit approved output at a supplied past use time, without current use.
+
+        Approval must exist and recorded required answers must be complete.
+        Creation retains authority; approval and use each check factual policy
+        and retirement. Binding this time to an event belongs to the caller.
+        """
+        try:
+            opaque(material_id)
+            if type(used_at) is not str or not used_at:
+                raise ValueError
+            with self._repository.read_transaction():
+                material = self.get(material_id, require_current=False)
+                if material["id"] != material_id:
+                    raise ValueError
+                approval = self._repository.get_material_approval(material_id)
+                if approval is None:
+                    raise ValueError
+                self._validate_historical_approved_snapshot(material, approval, require_complete=True, used_at=used_at)
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise MaterialHistoryIntegrityError("Material historical use failed integrity checks") from None
+
+    def validate_historical_approval_record(self, material_id: str) -> None:
+        """Audit an optional saved approval record without granting readiness.
+
+        This checks historical bundle and approval/workflow bindings in one read
+        transaction. Absence is valid unapproved history. Factual eligibility at
+        creation/approval time and complete conversion admission remain separate.
+        """
+        from grounded_apply.services.material_approval_history import validate_approval_record
+
+        try:
+            opaque(material_id)
+            with self._repository.read_transaction():
+                material = self.get(material_id, require_current=False)
+                if material["id"] != material_id:
+                    raise ValueError
+                approval = self._repository.get_material_approval(material_id)
+                if approval is None:
+                    return
+                workflow = self._repository.get_workflow_run(opaque(approval["workflow_run_id"]))
+                validate_approval_record(material, approval, workflow)
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise MaterialHistoryIntegrityError("Material historical approval record failed integrity checks") from None
+
+    def is_approved(self, material_id: str, *, require_current: bool = True) -> bool:
+        """Read readiness and a strictly validated approval in one snapshot."""
+        from grounded_apply.services.material_approval_history import validate_approval_record
+
+        try:
+            with self._repository.read_transaction():
+                material = self.get(material_id, require_current=require_current)
+                if material["id"] != material_id:
+                    raise ValueError
+                approval = self._repository.get_material_approval(material_id)
+                if approval is None:
+                    return False
+                workflow = self._repository.get_workflow_run(opaque(approval["workflow_run_id"]))
+                validate_approval_record(material, approval, workflow)
+                return not any(a["required"] and a["status"] != "draft" for a in material["manifest"]["answers"])
+        except MaterialBlocked:
+            raise
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            raise MaterialApprovalIntegrityError("Material approval failed integrity checks") from None
 
     def list(self, job_id: str | None = None) -> tuple[dict[str, Any], ...]:
         """Find saved versions without promoting historical facts to current use."""

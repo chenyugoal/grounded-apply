@@ -14,7 +14,7 @@ from grounded_apply.repositories import SQLiteRepository
 from grounded_apply.services.batches import BatchService
 from grounded_apply.services.batches import _at
 from grounded_apply.services.material_models import MaterialValidationError
-from grounded_apply.services.materials import MaterialService
+from grounded_apply.services.materials import MaterialApprovalIntegrityError, MaterialService
 from grounded_apply.services.profile_lifecycle import ProfileLifecycleService
 from grounded_apply.services.searches import SearchExecutionError, SearchService
 from grounded_apply.services.workflow import canonical
@@ -174,8 +174,42 @@ class SearchReviewExportTests(unittest.TestCase):
             connection.execute("UPDATE material_approvals SET bundle_sha256=? WHERE material_id=?",
                 ("0" * 64, item["material_id"]))
             connection.commit()
-        with self.assertRaises(MaterialValidationError):
+        before = self.database.read_bytes()
+        with self.assertRaisesRegex(MaterialApprovalIntegrityError, "^Material approval failed integrity checks$"):
             self.service.export_snapshot(run["run_id"])
+        self.assertEqual(self.database.read_bytes(), before)
+
+    def test_current_export_rejects_approval_version_aliases_and_unsupported_metadata(self):
+        run = self.service.run(self.configure(), idempotency_key="first")
+        item = run["items"][0]
+        with self.factory(False) as repository:
+            MaterialService(repository, self.renderer).approve(item["material_id"],
+                bundle_sha256=item["bundle_sha256"], actor_id="synthetic-user",
+                idempotency_key="synthetic-approval", confirm=True)
+            approval = repository.get_material_approval(item["material_id"])
+            workflow = repository.get_workflow_run(approval["workflow_run_id"])
+            original_payload = json.loads(workflow["input_json"])
+        alterations = (("boolean-version", True, None), ("float-version", 1.0, None),
+                       ("failure-metadata", 1, "fictional-private-approval-detail"))
+        for label, version, failure in alterations:
+            with self.subTest(corruption=label):
+                payload = {**original_payload, "version": version}
+                with self.factory(False) as repository, repository.transaction():
+                    # Retain the genuine integer-version input hash: ordinary
+                    # Python equality alone would accept both numeric aliases.
+                    repository._connection.execute("""UPDATE workflow_runs
+                        SET input_json = ?, failure_reason = ? WHERE id = ?""",
+                        (canonical(payload), failure, workflow["id"]))
+                before = self.database.read_bytes()
+                calls, rendered = len(self.transport.calls), len(self.renderer.built)
+                self.opens.clear()
+                with self.assertRaisesRegex(MaterialApprovalIntegrityError, "^Material approval failed integrity checks$"):
+                    self.service.export_snapshot(run["run_id"])
+                self.assertEqual(self.opens, [True])
+                self.assertEqual(self.active_repositories, 0)
+                self.assertEqual(self.database.read_bytes(), before)
+                self.assertEqual((len(self.transport.calls), len(self.renderer.built)), (calls, rendered))
+                self.assertFalse(Path(str(self.database) + "-journal").exists())
 
     def test_exact_old_run_export_does_not_follow_latest_posting_version(self):
         scope = self.configure()

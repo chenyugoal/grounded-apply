@@ -72,7 +72,7 @@ class SnapshotTests(unittest.TestCase):
     def test_snapshot_deadline_rolls_back_and_keeps_repository_usable(self) -> None:
         image = self.image()
         with SQLiteRepository(self.database, read_only=True) as repository:
-            with patch("grounded_apply.repositories.sqlite.time.monotonic",
+            with patch("grounded_apply.repositories.snapshot_capture.time.monotonic",
                        side_effect=[0.0, SNAPSHOT_WORK_SECONDS + 1]):
                 with self.assertRaisesRegex(RuntimeError, "time budget"):
                     repository.snapshot_bytes(max_bytes=len(image))
@@ -99,9 +99,9 @@ class SnapshotTests(unittest.TestCase):
                 return result
 
         with SQLiteRepository(self.database, read_only=True) as repository:
-            with patch("grounded_apply.repositories.sqlite.sqlite3.connect",
+            with patch("grounded_apply.repositories.snapshot_capture.sqlite3.connect",
                        side_effect=lambda *args, **kwargs: connect(*args, **kwargs, factory=SlowSerialization)), patch(
-                "grounded_apply.repositories.sqlite.time.monotonic", side_effect=lambda: now[0],
+                "grounded_apply.repositories.snapshot_capture.time.monotonic", side_effect=lambda: now[0],
             ):
                 with self.assertRaisesRegex(RuntimeError, "time budget"):
                     repository.snapshot_bytes(max_bytes=len(image))

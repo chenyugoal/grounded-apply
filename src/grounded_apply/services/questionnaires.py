@@ -16,6 +16,35 @@ from grounded_apply.services.workflow import opaque
 _HUMAN_GATE = re.compile(r"\b(authoriz|sponsor|visa|citizenship|nationality|clearance|criminal|convict|legal|attest|certify|signature|signing|disab|veteran|gender|race|ethnicity|religion|birth|conflict|non.?compete|consent|agree|password|token|salary|compensation|relocat|available|availability)\w*", re.I)
 _CAREER = re.compile(r"\b(experience|project|achievement|skill|education|degree|certification|built|contribut|accomplish)\w*", re.I)
 _PROMPT = re.compile(r"\b(ignore|override|disregard|instructions|system prompt|developer message)\b", re.I)
+_CAREER_SIGN_NOUNS = re.compile(
+    r"\b(?:single[ -]sign[ -]on|sign-on integrations?|sign[ -]language)\b", re.I,
+)
+_ELECTRONIC_SIGN_REQUEST = re.compile(r"\be-?sign\b", re.I)
+_SIGN_INSTRUCTION = re.compile(
+    r"\b(?:please|kindly|must|shall|should|(?:can|could|will|would) you)\s+"
+    r"(?:(?:electronically|digitally)\s+)?sign\b", re.I,
+)
+_SIGN_REQUEST = re.compile(r"\bsign\b", re.I)
+
+
+def is_eligible_career_question(text: str) -> bool:
+    """Classify a validated question without resolving any candidate facts."""
+    # Mask only compact career nouns, never the entire question: a second sign
+    # request still stops. In particular, 'sign on the dotted line' is not a noun.
+    return (_legacy_career_question_is_eligible(text)
+            and not _ELECTRONIC_SIGN_REQUEST.search(text)
+            and not _SIGN_INSTRUCTION.search(text)
+            and not _SIGN_REQUEST.search(_CAREER_SIGN_NOUNS.sub(" ", text)))
+
+
+def _legacy_career_question_is_eligible(text: str) -> bool:
+    """Preserve the base classifier for unanswered historical compatibility."""
+    gated = bool(_HUMAN_GATE.search(text) or _PROMPT.search(text))
+    try:
+        validate_profile_import_metadata((text,))
+    except ValueError:
+        gated = True
+    return not gated and bool(_CAREER.search(text))
 
 
 def validate_question_specs(specs: object) -> tuple[dict[str, Any], ...]:
@@ -57,15 +86,10 @@ class QuestionnaireService:
             policy = job_policy(job_id)
             for q in questions:
                 text = q["text"]
-                gated = bool(_HUMAN_GATE.search(text) or _PROMPT.search(text))
-                try:
-                    validate_profile_import_metadata((text,))
-                except ValueError:
-                    gated = True
                 parts = []
                 mappings = []
                 issues: list[Any] = []
-                if gated or not _CAREER.search(text):
+                if not is_eligible_career_question(text):
                     issues.append({"kind": "need_info", "reason": "human_answer_required",
                         "question": "Answer this question yourself. No sensitive answer is inferred or stored."})
                 elif not q["claim_ids"]:

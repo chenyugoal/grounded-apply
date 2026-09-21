@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import time
 import uuid
 from hashlib import sha256
@@ -119,13 +120,13 @@ class SQLiteRepository:
             isolation_level=None,
             uri=self._database_path is not None,
         )
-        self._connection.row_factory = sqlite3.Row
         self._closed = False
         self._initialized = False
         self._transaction_depth = 0
         self._savepoint_counter = 0
 
         try:
+            self._connection.row_factory = sqlite3.Row
             self._validate_storage()
             timeout_ms = min(round(timeout * 1000), 2_147_483_647)
             self._connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
@@ -136,8 +137,55 @@ class SQLiteRepository:
             if read_only:
                 self._connection.execute("PRAGMA query_only = ON")
         except BaseException:
-            self._connection.close()
-            self._closed = True
+            try:
+                self.close()
+            except BaseException:
+                pass
+            raise
+
+    @classmethod
+    def from_snapshot(cls, snapshot: bytes) -> Self:
+        """Own a validated current-schema snapshot for read-only service access.
+
+        This always validates the supplied immutable image; it accepts neither
+        a trusted-image bypass nor a writable option. No live profile, runtime
+        default or staging file is opened. SQL integrity is not factual custody:
+        services must still apply their claim/material/history validation.
+        """
+        from grounded_apply.repositories.snapshots import validate_profile_snapshot
+        from grounded_apply.services.backup import SNAPSHOT_WORK_SECONDS
+
+        repository: Self | None = None
+        try:
+            deadline = time.monotonic() + SNAPSHOT_WORK_SECONDS
+            validate_profile_snapshot(snapshot)
+            if int.from_bytes(snapshot[60:64], "big") != LATEST_SCHEMA_VERSION:
+                raise RepositoryError("Snapshot repository requires the current schema")
+            if time.monotonic() > deadline:
+                raise RepositoryError("Snapshot repository opening exceeded its time budget")
+            repository = cls(":memory:")
+            repository._read_only = True
+            repository._existing_only = True
+            connection = repository._connection
+            connection.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
+            connection.execute("PRAGMA trusted_schema = OFF")
+            connection.execute("PRAGMA temp_store = MEMORY")
+            connection.deserialize(snapshot)
+            if time.monotonic() > deadline:
+                raise RepositoryError("Snapshot repository opening exceeded its time budget")
+            connection.execute("PRAGMA query_only = ON")
+            repository.initialize()
+            if time.monotonic() > deadline:
+                raise RepositoryError("Snapshot repository opening exceeded its time budget")
+            return repository
+        except BaseException as error:
+            if repository is not None:
+                try:
+                    repository.close()
+                except BaseException:
+                    pass
+            if isinstance(error, Exception):
+                raise RepositoryError("Profile snapshot repository could not be opened") from None
             raise
 
     def _validate_storage(self) -> None:
@@ -192,12 +240,22 @@ class SQLiteRepository:
 
         if self._closed:
             return
-        if self._connection.in_transaction:
-            self._connection.execute("ROLLBACK")
-        self._transaction_depth = 0
-        self._connection.close()
-        self._closed = True
-        self._initialized = False
+        try:
+            try:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+            except BaseException:
+                try:
+                    self._connection.close()
+                except BaseException:
+                    pass
+                raise
+            else:
+                self._connection.close()
+        finally:
+            self._transaction_depth = 0
+            self._closed = True
+            self._initialized = False
 
     def snapshot_bytes(self, *, max_bytes: int) -> bytes:
         """Capture a bounded consistent image without a plaintext staging file.
@@ -207,50 +265,30 @@ class SQLiteRepository:
         on the same database revision. Busy retries have a fixed deadline.
         """
 
-        from grounded_apply.services.backup import SNAPSHOT_WORK_SECONDS
+        from grounded_apply.repositories.snapshot_capture import (
+            SnapshotCaptureError, _capture_read_only_snapshot,
+        )
 
         self._require_initialized()
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("Snapshot size limit must be a positive integer")
         if not self._read_only or self._connection.in_transaction:
             raise RepositoryError("Snapshots require an idle read-only repository")
-        self._validate_storage()
-        destination = sqlite3.connect(":memory:", isolation_level=None)
-        deadline = time.monotonic() + SNAPSHOT_WORK_SECONDS
-
-        def progress(status: int, remaining: int, total: int) -> None:
-            del status, remaining
-            if total * page_size > max_bytes or time.monotonic() > deadline:
-                raise RepositoryError("Snapshot exceeded its size or time budget")
-
         try:
-            destination.execute("PRAGMA temp_store = MEMORY")
-            self._connection.execute("BEGIN")
-            self._connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
-            page_size = int(self._connection.execute("PRAGMA page_size").fetchone()[0])
-            page_count = int(self._connection.execute("PRAGMA page_count").fetchone()[0])
-            if page_size * page_count > max_bytes:
-                raise RepositoryError("Snapshot exceeds its supported size")
-            self._connection.backup(destination, pages=128, progress=progress, sleep=0.01)
-            snapshot = destination.serialize()
-            if len(snapshot) > max_bytes:
-                raise RepositoryError("Snapshot exceeds its supported size")
-            if time.monotonic() > deadline:
-                raise RepositoryError("Snapshot exceeded its size or time budget")
-            self._validate_storage()
-            return snapshot
-        finally:
-            try:
-                if self._connection.in_transaction:
-                    self._connection.execute("ROLLBACK")
-            finally:
-                destination.close()
+            return _capture_read_only_snapshot(
+                self._connection, max_bytes=max_bytes, revalidate_storage=self._validate_storage,
+            )
+        except SnapshotCaptureError as error:
+            raise RepositoryError(str(error)) from None
 
     def __enter__(self) -> Self:
         try:
             return self.initialize()
         except BaseException:
-            self.close()
+            try:
+                self.close()
+            except BaseException:
+                pass
             raise
 
     def __exit__(
@@ -259,8 +297,14 @@ class SQLiteRepository:
         exc: BaseException | None,
         traceback: object | None,
     ) -> None:
-        del exc_type, exc, traceback
-        self.close()
+        del exc, traceback
+        if exc_type is None:
+            self.close()
+        else:
+            try:
+                self.close()
+            except BaseException:
+                pass
 
     @contextmanager
     def transaction(self) -> Iterator[Self]:
@@ -1567,6 +1611,52 @@ class SQLiteRepository:
         row = self._connection.execute("SELECT * FROM submission_snapshots WHERE application_id = ?", (application_id,)).fetchone()
         return None if row is None else _row_record(row)
 
+    def application_history_inventory(self) -> dict[str, tuple[Record, ...]]:
+        """Read application ownership metadata in one owned or borrowed snapshot."""
+        with self.read_transaction():
+            return {
+                "applications": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT id FROM applications ORDER BY id")),
+                "events": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT id, application_id, workflow_run_id FROM application_events ORDER BY id")),
+                "submissions": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT application_id, event_id, material_id FROM submission_snapshots ORDER BY application_id")),
+                "workflows": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT id, workflow_type FROM workflow_runs "
+                    "WHERE workflow_type IN ('application_create', 'application_transition') ORDER BY id")),
+            }
+
+    def batch_history_inventory(self) -> dict[str, tuple[Record, ...]]:
+        """Read batch ownership metadata in one owned or borrowed snapshot."""
+        with self.read_transaction():
+            return {
+                "batches": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT id, workflow_run_id FROM preparation_batches ORDER BY id")),
+                "items": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT id, batch_id FROM preparation_batch_items ORDER BY id")),
+                "events": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT id, item_id FROM preparation_batch_events ORDER BY id")),
+                "leases": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT batch_id FROM preparation_batch_leases ORDER BY batch_id")),
+                "workflows": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT id, workflow_type FROM workflow_runs WHERE workflow_type = 'batch_create' ORDER BY id")),
+            }
+
+    def material_history_inventory(self) -> dict[str, tuple[Record, ...]]:
+        """Read material ownership metadata in one owned or borrowed snapshot."""
+        with self.read_transaction():
+            return {
+                "materials": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT id, workflow_run_id FROM material_versions ORDER BY id")),
+                "claims": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT material_id, claim_id FROM material_claims ORDER BY material_id, claim_id")),
+                "approvals": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT material_id, workflow_run_id FROM material_approvals ORDER BY material_id")),
+                "workflows": tuple(_row_record(row) for row in self._connection.execute(
+                    "SELECT id, workflow_type FROM workflow_runs "
+                    "WHERE workflow_type IN ('material_build', 'material_approval') ORDER BY id")),
+            }
+
     def support_counts(self) -> dict[str, int]:
         """Only fixed table counts; no values, IDs, paths, or source text."""
         self._require_initialized()
@@ -1807,11 +1897,23 @@ class SQLiteRepository:
         if self._connection.in_transaction:
             yield self
             return
-        self._connection.execute("BEGIN")
         try:
+            self._connection.execute("BEGIN")
             yield self
         finally:
-            self._connection.execute("ROLLBACK")
+            original_error = sys.exception()
+            try:
+                if not self._closed and self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+            except BaseException:
+                # A failed owned rollback makes this repository unusable. Close
+                # it even when rollback fails again, retaining a body exception.
+                try:
+                    self.close()
+                except BaseException:
+                    pass
+                if original_error is None:
+                    raise
 
     def get_claim_retirement(self, claim_id: str) -> Record | None:
         self._require_initialized()

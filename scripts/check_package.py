@@ -78,11 +78,19 @@ def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | Non
                 "grounded_apply/migrations/007_daily_schedules.sql",
                 "grounded_apply/diagnostics.py",
                 "grounded_apply/services/backup.py",
+                "grounded_apply/services/material_history.py",
+                "grounded_apply/services/material_build_history.py",
+                "grounded_apply/services/material_approval_history.py",
+                "grounded_apply/services/questionnaire_history.py",
                 "grounded_apply/services/discovery.py",
                 "grounded_apply/services/batches.py",
                 "grounded_apply/services/searches.py",
+                "grounded_apply/services/search_scope_history.py",
+                "grounded_apply/services/search_run_history.py",
                 "grounded_apply/services/review_exports.py",
                 "grounded_apply/repositories/review_files.py",
+                "grounded_apply/repositories/material_payloads.py",
+                "grounded_apply/repositories/snapshot_capture.py",
                 "grounded_apply/services/search_policy.py",
                 "grounded_apply/services/schedules.py",
                 "grounded_apply/services/schedule_policy.py",
@@ -133,6 +141,35 @@ def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | Non
         ))
         if any(not Path(path).is_relative_to(installation) for path in location):
             raise RuntimeError("Installed check imported source checkout content")
+        print(run([str(executable), "-I", "-c", """
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+from grounded_apply.config import resolve_runtime_paths
+from grounded_apply.repositories._schema import default_migrations_directory, initialize_schema
+from grounded_apply.repositories.backup_files import LocalBackupStorage
+from grounded_apply.repositories.snapshot_capture import capture_registered_profile_snapshot
+from grounded_apply.repositories.snapshots import validate_profile_snapshot
+
+for version in (4, 5, 6, 7):
+    with closing(sqlite3.connect(':memory:', isolation_level=None)) as database:
+        initialize_schema(database, default_migrations_directory(), target_version=version)
+        image = database.serialize()
+    home = Path.cwd() / f'synthetic-capture-v{version}'
+    LocalBackupStorage().restore_profile(home, image, '0' * 64, confirm=True)
+    paths = resolve_runtime_paths({'GROUNDED_APPLY_HOME': str(home)})
+    before = paths.database.read_bytes(), paths.database.stat().st_mtime_ns
+    inventory = set(home.rglob('*'))
+    captured = capture_registered_profile_snapshot(paths, allowed_source_versions=frozenset({version}))
+    validate_profile_snapshot(captured)
+    if int.from_bytes(captured[60:64], 'big') != version:
+        raise RuntimeError('Installed capture changed historical schema')
+    if before != (paths.database.read_bytes(), paths.database.stat().st_mtime_ns):
+        raise RuntimeError('Installed capture changed source database')
+    if set(home.rglob('*')) != inventory:
+        raise RuntimeError('Installed capture changed runtime inventory')
+print('PASS — installed guarded schema-4–7 capture without source writes')
+"""], cwd=workspace, environ=environment).strip(), flush=True)
         if run([str(command), "--version"], cwd=workspace, environ=environment).strip() != f"gapply {version}":
             raise RuntimeError("Installed CLI version disagrees with package metadata")
         for args in (
@@ -223,6 +260,32 @@ print(json.dumps({"job_id": first["job_id"]}))
         if len(cli("profile", "review")["items"]) != len(review["items"]) - 1:
             raise RuntimeError("Approved item remained in pending review")
         cli("--log-events", "doctor")
+        print(run([str(executable), "-I", "-c", """
+from grounded_apply.config import resolve_runtime_paths
+from grounded_apply.repositories import RepositoryError, SQLiteRepository
+from grounded_apply.repositories.backup_files import LocalBackupStorage
+from grounded_apply.services.profile import ProfileService
+
+paths = resolve_runtime_paths()
+before = paths.database.read_bytes(), paths.database.stat().st_mtime_ns
+with SQLiteRepository(paths.database, read_only=True) as source:
+    expected_profile = ProfileService(source).validated_profile()
+    expected_jobs = source.list_job_snapshots()
+snapshot = LocalBackupStorage(paths).capture_profile()
+with SQLiteRepository.from_snapshot(snapshot) as captured:
+    if ProfileService(captured).validated_profile() != expected_profile:
+        raise RuntimeError('Installed snapshot repository changed profile evidence')
+    if captured.list_job_snapshots() != expected_jobs:
+        raise RuntimeError('Installed snapshot repository changed job history')
+    try:
+        with captured.transaction():
+            raise RuntimeError('Installed snapshot repository allowed mutation')
+    except RepositoryError:
+        pass
+if before != (paths.database.read_bytes(), paths.database.stat().st_mtime_ns):
+    raise RuntimeError('Installed snapshot repository changed its source')
+print('PASS — installed read-only snapshot service reads and mutation refusal')
+"""], cwd=workspace, environ=environment).strip(), flush=True)
         if dependencies is not None:
             print("Checking installed optional encryption, restore preview, and replay...", flush=True)
             passphrase = "synthetic-package-only-passphrase\n"
@@ -264,10 +327,10 @@ print(json.dumps({"job_id": first["job_id"]}))
             from check_storage_capacity import check_storage_capacity
             pilot = workspace / "pilot"
             pilot.mkdir(mode=0o700)
-            check_pilot([str(command)], pilot)
+            check_pilot([str(command)], pilot, python=str(executable))
             batch_workspace = workspace / "batch-pilot"
             batch_workspace.mkdir(mode=0o700)
-            check_batch([str(command)], batch_workspace, include_backup=True)
+            check_batch([str(command)], batch_workspace, include_backup=True, python=str(executable))
             search_workspace = workspace / "search-pilot"
             search_workspace.mkdir(mode=0o700)
             check_search([str(command)], search_workspace, include_backup=True)

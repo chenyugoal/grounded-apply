@@ -48,6 +48,7 @@ def check_batch(
     source_path: Path | None = None,
     demo_output: Path | None = None,
     include_backup: bool = False,
+    python: str | None = None,
 ) -> None:
     """Exercise an isolated CLI in an empty, external synthetic workspace."""
     if sys.flags.optimize:
@@ -72,6 +73,67 @@ def check_batch(
         PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1",
         GROUNDED_APPLY_HOME=str(workspace / "runtime"),
     )
+
+    def audit_batch(batch_id: str) -> None:
+        """Audit only this gate's fictional home using its selected interpreter."""
+        audit = """
+import hashlib
+import os
+import sys
+from pathlib import Path
+
+def forbid_external_action(event, arguments):
+    if event.startswith('socket.') or event in {'subprocess.Popen', 'os.system'}:
+        raise RuntimeError('Historical batch audit attempted an external action')
+    if event == 'open' and arguments[2] & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC):
+        raise RuntimeError('Historical batch audit attempted a file write')
+
+sys.addaudithook(forbid_external_action)
+from grounded_apply.config import resolve_runtime_paths
+from grounded_apply.repositories import SQLiteRepository
+from grounded_apply.repositories.latex_renderer import LatexResumeRenderer
+from grounded_apply.services.batches import BatchService
+from grounded_apply.services.materials import MaterialService
+
+expected = Path(sys.argv[2] or sys.prefix).resolve()
+for implementation in (BatchService, MaterialService, SQLiteRepository, LatexResumeRenderer):
+    origin = Path(sys.modules[implementation.__module__].__file__).resolve()
+    if not origin.is_relative_to(expected):
+        raise RuntimeError('Historical batch audit imported a different installation')
+paths = resolve_runtime_paths()
+home = Path(os.environ['GROUNDED_APPLY_HOME']).resolve()
+if paths.portable_root != home or not home.is_relative_to(Path.cwd()):
+    raise RuntimeError('Historical batch audit escaped its synthetic workspace')
+
+def identity():
+    data = paths.database.read_bytes()
+    inventory = tuple(sorted((str(path.relative_to(home)), path.lstat().st_mode,
+                              path.lstat().st_size, path.lstat().st_mtime_ns)
+                             for path in home.rglob('*')))
+    return data, hashlib.sha256(data).hexdigest(), paths.database.stat().st_mtime_ns, inventory
+
+before = identity()
+with SQLiteRepository(paths.database, read_only=True) as repository, repository.read_transaction():
+    service = BatchService(repository, MaterialService(repository, LatexResumeRenderer()))
+    inventory = repository.batch_history_inventory()
+    if not any(row['id'] == sys.argv[1] for row in inventory['batches']):
+        raise RuntimeError('Historical inventory lost the synthetic batch')
+    if service.validate_historical_inventory() is not None:
+        raise RuntimeError('Historical batch audit returned readiness')
+if identity() != before:
+    raise RuntimeError('Historical batch audit changed its synthetic source')
+"""
+        arguments = [python or sys.executable, "-B"]
+        if source_path is None:
+            arguments.append("-I")
+        try:
+            process = subprocess.run([*arguments, "-c", audit, batch_id,
+                "" if source_path is None else str(source_path.resolve())], cwd=workspace,
+                env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeError("Synthetic historical batch audit failed") from None
+        if process.returncode or process.stdout or process.stderr:
+            raise RuntimeError("Synthetic historical batch audit failed")
 
     def cli(*args: str, input_data: str | None = None, expected: int = 0) -> dict[str, Any]:
         inputs: dict[str, Any] = (
@@ -246,6 +308,7 @@ def check_batch(
     assert_complete_queue(resumed)
     assert {item["material_id"] for item in cli("materials", "list")["materials"]} == material_ids
     assert cli("applications", "list")["applications"] == []
+    audit_batch(batch_id)
 
     if include_backup:
         print("Batch gate: encrypted backup/restore preserves queue and artifacts...", flush=True)
@@ -261,6 +324,7 @@ def check_batch(
         restored_items = assert_complete_queue(cli("batches", "show", "--batch-id", batch_id))
         assert {item["material_id"] for item in restored_items.values() if item["material_id"]} == material_ids
         assert cli("applications", "list")["applications"] == []
+        audit_batch(batch_id)
 
     if demo_output is not None:
         shutil.copytree(exports, demo_output)

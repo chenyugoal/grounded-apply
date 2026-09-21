@@ -8,6 +8,7 @@ immutable job snapshots. Scheduling and external application actions are absent.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -30,12 +31,14 @@ from grounded_apply.services.materials import MaterialBlocked, MaterialService
 from grounded_apply.services.review_exports import ReviewMaterial, SearchReviewSnapshot
 from grounded_apply.services.search_policy import SearchEligibilityPolicy, validate_excluded_identities
 from grounded_apply.services.search_filters import PreparationFilters, validate_preparation_filters
+from grounded_apply.services.search_scope_history import validate_search_scope_record
+from grounded_apply.services.search_run_history import validate_search_run_origin, validate_search_run_record
 from grounded_apply.services.source_rotation import (
     SourceRotation, source_indices, validate_rotation_ledger, validate_source_rotation,
 )
 from grounded_apply.services.workflow import (
     canonical, digest, existing_workflow, finish_workflow, hash_bytes, opaque,
-    request_input, start_workflow, validate_workflow,
+    request_input, start_workflow,
 )
 
 
@@ -256,24 +259,19 @@ class SearchService:
 
     def _scope(self, repository: SQLiteRepository, search_id: str) -> tuple[Record, dict[str, Any]]:
         opaque(search_id)
-        record = repository.get_saved_search(search_id)
-        if record is None:
-            raise ValueError("Saved search does not exist")
         try:
-            manifest = json.loads(record["manifest_json"])
-            if validate_search_manifest(manifest) != manifest or record["manifest_sha256"] != digest(manifest) or not _valid_at(record["created_at"]):
-                raise ValueError
-            workflow = repository.get_workflow_run(record["workflow_run_id"])
-            if workflow is None:
-                raise ValueError
-            validate_workflow(workflow, "search_configure", {"version": 1, "manifest_sha256": digest(manifest),
-                "idempotency_sha256": workflow["idempotency_key"]})
-            if (search_id != str(uuid5(NAMESPACE_URL, "grounded-apply.search@1/" + workflow["idempotency_key"]))
-                or workflow["created_at"] != record["created_at"] or json.loads(workflow["generated_artifacts_json"]) != [search_id]):
-                raise ValueError
-        except (ValueError, TypeError, KeyError):
+            with repository.read_transaction():
+                record = repository.get_saved_search(search_id)
+                if record is not None:
+                    workflow = repository.get_workflow_run(opaque(record["workflow_run_id"]))
+                    manifest = validate_search_scope_record(
+                        record, workflow, search_id, normalize_manifest=validate_search_manifest,
+                    )
+                    return record, manifest
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError,
+                AttributeError, OverflowError, RecursionError):
             raise SearchIntegrityError("Saved search failed integrity checks") from None
-        return record, manifest
+        raise ValueError("Saved search does not exist")
 
     def _lease(self, repository: SQLiteRepository, search_id: str) -> Record:
         lease = repository.get_search_lease(search_id)
@@ -526,20 +524,33 @@ class SearchService:
     def _validated(self, repository: SQLiteRepository, run_id: str, *, check_windows: bool = True,
                    check_rotation: bool = True) -> tuple[Record, dict[str, Any], dict[str, Any]]:
         opaque(run_id)
-        run = repository.get_search_run(run_id)
+        try:
+            with repository.read_transaction():
+                return self._validated_snapshot(repository, run_id,
+                    check_windows=check_windows, check_rotation=check_rotation)
+        except sqlite3.Error:
+            raise SearchIntegrityError("Search run failed integrity checks") from None
+
+    def _validated_snapshot(self, repository: SQLiteRepository, run_id: str, *, check_windows: bool,
+                            check_rotation: bool) -> tuple[Record, dict[str, Any], dict[str, Any]]:
+        try:
+            run = repository.get_search_run(run_id)
+            if run is not None:
+                search_id = validate_search_run_origin(run, run_id)
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError,
+                AttributeError, OverflowError, RecursionError):
+            raise SearchIntegrityError("Search run failed integrity checks") from None
         if run is None:
             raise ValueError("Search run does not exist")
-        _, manifest = self._scope(repository, run["search_id"])
+        _, manifest = self._scope(repository, search_id)
         try:
             workflow = repository.get_workflow_run(run["workflow_run_id"])
-            if workflow is None:
-                raise ValueError
-            validate_workflow(workflow, "search_run_create", {"version": 1, "search_id": run["search_id"],
-                "manifest_sha256": digest(manifest), "idempotency_sha256": workflow["idempotency_key"]})
-            if (run_id != str(uuid5(NAMESPACE_URL, f"grounded-apply.search-run@1/{run['search_id']}/{workflow['idempotency_key']}"))
-                or workflow["created_at"] != run["created_at"] or not _valid_at(run["created_at"])
-                or json.loads(workflow["generated_artifacts_json"]) != [run_id]):
-                raise ValueError
+            validate_search_run_record(run, workflow, run_id,
+                search_id=search_id, manifest_sha256=digest(manifest))
+        except (RepositoryError, sqlite3.Error, ValueError, TypeError, KeyError,
+                AttributeError, OverflowError, RecursionError):
+            raise SearchIntegrityError("Search run failed integrity checks") from None
+        try:
             state, events = self._history(repository, run_id, manifest)
             if events[0]["at"] != run["created_at"]:
                 raise ValueError

@@ -10,12 +10,18 @@ from __future__ import annotations
 import hashlib
 import re
 import sqlite3
+from collections.abc import Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 
 
 LATEST_SCHEMA_VERSION = 7
+REGISTERED_SCHEMA_VERSION = 7
+SCHEMA_OBJECTS_QUERY = "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"
 
 _MIGRATION_NAME = re.compile(
     r"^(?P<version>[0-9]{3})_(?P<description>[a-z][a-z0-9_]*)\.sql$"
@@ -34,6 +40,28 @@ class MigrationError(SchemaError):
     """A migration is missing, invalid, or could not be applied atomically."""
 
 
+class ConversionRequiredError(MigrationError):
+    """A registered storage change cannot run through ordinary initialization."""
+
+
+class MigrationExecution(StrEnum):
+    IN_PLACE = "in_place"
+    CONVERSION_ONLY = "conversion_only"
+
+
+# Availability does not authorize execution against an existing profile. A new
+# SQL file needs an explicit classification, independently of the active version.
+_MIGRATION_EXECUTION_POLICY: Mapping[int, MigrationExecution] = MappingProxyType({
+    1: MigrationExecution.IN_PLACE,
+    2: MigrationExecution.IN_PLACE,
+    3: MigrationExecution.IN_PLACE,
+    4: MigrationExecution.IN_PLACE,
+    5: MigrationExecution.IN_PLACE,
+    6: MigrationExecution.IN_PLACE,
+    7: MigrationExecution.IN_PLACE,
+})
+
+
 @dataclass(frozen=True, slots=True)
 class Migration:
     """One immutable migration loaded from disk."""
@@ -42,6 +70,7 @@ class Migration:
     name: str
     sql: str
     checksum_sha256: str
+    execution: MigrationExecution
 
 
 def utc_now() -> str:
@@ -74,7 +103,9 @@ def default_migrations_directory() -> Path:
 
 
 def load_migrations(directory: Path) -> tuple[Migration, ...]:
-    """Load and checksum the complete migration sequence."""
+    """Load the complete registered sequence and its closed execution policy."""
+
+    policy = _registered_execution_policy()
 
     if not directory.is_dir():
         raise MigrationError(f"Migration directory does not exist: {directory}")
@@ -89,6 +120,8 @@ def load_migrations(directory: Path) -> tuple[Migration, ...]:
         version = int(match.group("version"))
         if version < 1:
             raise MigrationError(f"Migration versions start at 1: {path.name}")
+        if version not in policy:
+            raise MigrationError("Migration file has no registered execution policy")
         if version in migrations_by_version:
             other = migrations_by_version[version].name
             raise MigrationError(
@@ -102,9 +135,10 @@ def load_migrations(directory: Path) -> tuple[Migration, ...]:
             name=path.name,
             sql=sql,
             checksum_sha256=hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+            execution=policy[version],
         )
 
-    expected_versions = list(range(1, LATEST_SCHEMA_VERSION + 1))
+    expected_versions = list(range(1, REGISTERED_SCHEMA_VERSION + 1))
     actual_versions = sorted(migrations_by_version)
     if actual_versions != expected_versions:
         raise MigrationError(
@@ -112,6 +146,42 @@ def load_migrations(directory: Path) -> tuple[Migration, ...]:
             f"expected {expected_versions}, found {actual_versions}"
         )
     return tuple(migrations_by_version[version] for version in expected_versions)
+
+
+def _registered_execution_policy() -> dict[int, MigrationExecution]:
+    if (type(LATEST_SCHEMA_VERSION) is not int
+            or type(REGISTERED_SCHEMA_VERSION) is not int
+            or not 1 <= LATEST_SCHEMA_VERSION <= REGISTERED_SCHEMA_VERSION <= 999
+            or type(_MIGRATION_EXECUTION_POLICY) is not MappingProxyType):
+        raise MigrationError("Invalid migration execution policy")
+    policy = dict(_MIGRATION_EXECUTION_POLICY)
+    if (any(type(version) is not int or type(mode) is not MigrationExecution
+            for version, mode in policy.items())
+            or set(policy) != set(range(1, REGISTERED_SCHEMA_VERSION + 1))):
+        raise MigrationError("Incomplete or invalid migration execution policy")
+    return policy
+
+
+def reference_schema_objects(
+    migrations_directory: Path, *, target_version: int,
+) -> tuple[tuple[str, str, str, str | None], ...]:
+    """Build trusted SQL structure in a fresh, privately owned in-memory DB.
+
+    This is a schema inventory, not a conversion path: no caller database or
+    snapshot is accepted and no writable connection escapes. Registered SQL may
+    describe a future conversion-only version without activating it for profiles
+    or adding that version to the independent backup-restore allowlist.
+    """
+    migrations = load_migrations(migrations_directory)
+    if type(target_version) is not int or not 1 <= target_version <= REGISTERED_SCHEMA_VERSION:
+        raise MigrationError("Unsupported reference schema version")
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as reference:
+        reference.execute("PRAGMA temp_store = MEMORY")
+        _apply_schema_migrations(
+            reference, migrations, current=0, target=target_version,
+            supported_version=REGISTERED_SCHEMA_VERSION, max_database_bytes=None,
+        )
+        return tuple(reference.execute(SCHEMA_OBJECTS_QUERY).fetchall())
 
 
 def read_schema_version(connection: sqlite3.Connection) -> int:
@@ -132,9 +202,10 @@ def initialize_schema(
 ) -> int:
     """Validate and migrate a database, returning its current version.
 
-    The optional target builds a trusted historical reference for snapshot
-    validation. It never permits downgrades. Normal repository opens use the
-    current version.
+    The optional target selects an ordinary migration prefix; it never permits
+    downgrades or conversion-only execution. Normal repository opens use the
+    current version. Snapshot validation builds its empty trusted reference
+    through ``reference_schema_objects`` instead.
 
     An optional allocation bound is checked inside each migration transaction;
     an oversized migration rolls back without making its prior version
@@ -157,11 +228,34 @@ def initialize_schema(
     current = _validate_schema_state(connection, migrations)
     if current > target:
         raise MigrationError("Schema migration cannot downgrade an existing database")
+    if any(migration.execution is MigrationExecution.CONVERSION_ONLY
+           for migration in migrations[current:target]):
+        raise ConversionRequiredError("Schema change requires explicit conversion into a new home")
 
+    return _apply_schema_migrations(
+        connection, migrations, current=current, target=target,
+        supported_version=LATEST_SCHEMA_VERSION, max_database_bytes=max_database_bytes,
+    )
+
+
+def _apply_schema_migrations(
+    connection: sqlite3.Connection,
+    migrations: tuple[Migration, ...],
+    *,
+    current: int,
+    target: int,
+    supported_version: int,
+    max_database_bytes: int | None,
+) -> int:
+    """Execute a preflighted ordinary plan or privately owned empty reference."""
     for migration in migrations[current:target]:
         try:
             connection.execute("BEGIN IMMEDIATE")
-            locked_version = _validate_schema_state(connection, migrations)
+            locked_version = _validate_schema_state(
+                connection, migrations, supported_version=supported_version,
+            )
+            if locked_version > target:
+                raise MigrationError("Database advanced beyond the requested schema target")
             if locked_version >= migration.version:
                 connection.execute("COMMIT")
                 continue
@@ -202,7 +296,12 @@ def initialize_schema(
                 f"Could not apply migration {migration.name!r}: {exc}"
             ) from exc
 
-    return _validate_schema_state(connection, migrations)
+    final_version = _validate_schema_state(
+        connection, migrations, supported_version=supported_version,
+    )
+    if final_version != target:
+        raise MigrationError("Database changed beyond the requested schema target")
+    return final_version
 
 
 def validate_schema(
@@ -235,6 +334,7 @@ def _sql_statements(script: str) -> tuple[str, ...]:
 def _validate_schema_state(
     connection: sqlite3.Connection,
     migrations: tuple[Migration, ...],
+    *, supported_version: int | None = None,
 ) -> int:
     """Read version, tables, and ledger from one consistent snapshot.
 
@@ -248,7 +348,10 @@ def _validate_schema_state(
     if owns_transaction:
         connection.execute("BEGIN")
     try:
-        return _validate_schema_snapshot(connection, migrations)
+        return _validate_schema_snapshot(
+            connection, migrations,
+            supported_version=LATEST_SCHEMA_VERSION if supported_version is None else supported_version,
+        )
     finally:
         if owns_transaction and connection.in_transaction:
             connection.execute("ROLLBACK")
@@ -257,21 +360,22 @@ def _validate_schema_state(
 def _validate_schema_snapshot(
     connection: sqlite3.Connection,
     migrations: tuple[Migration, ...],
+    *, supported_version: int,
 ) -> int:
     current = read_schema_version(connection)
-    if current > LATEST_SCHEMA_VERSION:
+    if current > supported_version:
         raise FutureSchemaError(
             "Database schema version "
-            f"{current} is newer than supported version {LATEST_SCHEMA_VERSION}"
+            f"{current} is newer than supported version {supported_version}"
         )
 
     has_ledger = _table_exists(connection, "schema_migrations")
     applied = _read_applied_migrations(connection) if has_ledger else []
-    future_applied = [version for version, _, _ in applied if version > LATEST_SCHEMA_VERSION]
+    future_applied = [version for version, _, _ in applied if version > supported_version]
     if future_applied:
         raise FutureSchemaError(
             "Database migration ledger contains future version "
-            f"{max(future_applied)}; this code supports {LATEST_SCHEMA_VERSION}"
+            f"{max(future_applied)}; this code supports {supported_version}"
         )
 
     if current == 0:
