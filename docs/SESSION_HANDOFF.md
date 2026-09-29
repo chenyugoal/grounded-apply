@@ -14,16 +14,20 @@ This is the single live checkpoint. [ROADMAP.md](ROADMAP.md) owns feature scope;
   experimental alpha. Broader feature development is paused. No new feature
   milestone or unattended development is selected.
 - **Starting branch / HEAD:** `codex/phase-0-truth-layer`, `9a3b4bf`, matching
-  origin. Local and remote `main` are `b2fc88e`. The 91 pre-existing changed/new
-  files from the September 21 usability window are preserved for integration.
-- **Current candidate:** `a0bad45` on `codex/phase-0-truth-layer`, pushed to origin.
-  `342a688` preserved the previous 91-file implementation and added release docs;
-  `a0bad45` fixes one test fixture's dependence on shell umask. No production code
-  changed during wrap-up. All local gates and both hosted macOS jobs passed.
-  The user selected publication of the macOS-tested alpha with Linux pending.
-  Main remains unmerged and the repository private until the release step below.
-  There are no remote-only
-  branches, tags, releases, issues, pull requests or uploaded Actions artifacts.
+  origin. Local and remote `main` were `b2fc88e`. The 91 pre-existing changed/new
+  files from the September 21 usability window were preserved and integrated.
+- **Published:** [chenyugoal/grounded-apply](https://github.com/chenyugoal/grounded-apply)
+  is public, with `main` as its default branch. GitHub API and signed-out browser
+  access both confirm visibility. Private vulnerability reporting is enabled.
+- **Integration:** `342a688` preserves the prior implementation plus release docs;
+  `a0bad45` corrects one test fixture; `a7cb8ae` finalizes release scope, evidence
+  and the CI deadline. The development branch was fast-forward merged into `main`
+  and pushed. This final checkpoint change is documentation only; use `git log -1`
+  for its commit. No production/test bytes changed after verified `a0bad45`.
+- **Working tree:** the release closeout is committed on `main`; all prior work
+  is preserved. No feature implementation is in progress in this session. Normal
+  GitHub push-triggered checks use the longer deadline; their incomplete results
+  do not change the explicitly pending Linux support status.
 - **Release positioning:** usable supervised career-profile and application
   preparation workflow; no demonstrated reduction in active user effort.
   Public source availability is not completion of the product-acceptance trial.
@@ -141,10 +145,26 @@ identity metadata and historical maintainer machine paths; publication exposes
 that history. Remote inventory matches the inspected main/development branches;
 there are no tags, releases, pull requests or Actions artifacts to disclose.
 
-The GitHub API confirms admin/push access and private visibility. Private
-vulnerability reporting returns 404 while private; activation and verification
-remain required immediately after publication. SECURITY.md supplies the intended
-private form plus a content-free fallback for channel failures.
+Publication was performed after the user explicitly chose the macOS-tested
+experimental alpha with Linux pending. The API verified the expected main SHA
+before changing visibility. It then returned `visibility: public`, `private:
+false`, and default branch `main`. Enabling private vulnerability reporting
+returned HTTP 204; a subsequent read confirmed `enabled: true`. Signed-out GitHub
+browsing shows the Public badge, merged main branch, current README and successfully
+rendered Mermaid diagram. SECURITY.md links the private reporting form.
+
+Remote privacy inventory found only the inspected main/development branches,
+with no tags, releases, open/closed issues, pull requests or Actions artifacts.
+The separate wiki remote did not exist. Downloaded Ubuntu job logs contain no
+unittest failure or error before cancellation (1,055 and 703 completed test lines);
+this is partial progress, not a Linux pass. No GitHub Release/tag or PyPI package
+was created; publication is the source repository.
+
+Final hygiene: `git diff --check` passed; the closeout diff was reviewed. The
+production code, tests, scripts, migrations, dependency manifests and repository
+skill compare identically to `a0bad45` via `git diff --exit-code`. Only release
+documentation and the validated CI deadline differ. All generated verification
+artifacts and the personal LinkedIn draft remain outside Git.
 
 ## Delivered scope
 
@@ -188,14 +208,18 @@ private form plus a content-free fallback for channel failures.
 
 ## Next exact task
 
-Commit the final release documentation and validated CI deadline change, merge
-the development branch into `main`, and publish the repository as the explicitly
-authorized macOS-tested experimental alpha. Verify public visibility and enable
-private vulnerability reporting. Preserve Linux verification as pending. No
-feature implementation or time-saving product milestone is selected.
+**Release wrap-up complete; broader development is paused.** No further feature
+implementation or unattended follow-up is selected. Linux remains pending by
+explicit release scope, and human time savings remain unmeasured.
 
-The optional final illustration should replace the Mermaid figure only after
-review against `docs/PRODUCT_VISION.md`; do not invent completion of wishlist work.
+If the user supplies a final illustration, start with `docs/PRODUCT_VISION.md`,
+check that it preserves current/wishlist labels and human submission, then replace
+the README Mermaid figure with the reviewed asset and accessible alternative text.
+
+If the user requests Linux verification, first inspect the latest main-branch
+[GitHub Actions run](https://github.com/chenyugoal/grounded-apply/actions) and its
+actual conclusion. Do not infer a pass from the longer timeout or retry blindly.
+Keep this platform check bounded; it does not resume wishlist development.
 
 ## First command
 
