@@ -12,9 +12,11 @@ from .profile import (
     ProfileService,
     ProfileReviewDecisionResult,
     ProfileReviewItem,
+    ProfileReviewPage,
     ProposedImportClaim,
     TextSourceSpan,
     registered_profile_import_extractors,
+    validate_profile_review_page_request,
 )
 from .profile_import_validation import (
     PROFILE_IMPORT_MAX_SOURCE_BYTES,
@@ -38,10 +40,12 @@ __all__ = [
     "ProfileService",
     "ProfileReviewDecisionResult",
     "ProfileReviewItem",
+    "ProfileReviewPage",
     "PROFILE_IMPORT_MAX_SOURCE_BYTES",
     "ProposedImportClaim",
     "TextSourceSpan",
     "registered_profile_import_extractors",
+    "validate_profile_review_page_request",
     "registered_profile_import_claim_types",
     "registered_profile_import_restricted_categories",
 ]

@@ -1,6 +1,9 @@
 # Contributing
 
-Grounded Apply is in an early truth-layer phase. Before contributing, read
+Grounded Apply is an experimental alpha with a working local application workflow.
+Broader development is paused; the wishlist records possibilities rather than
+commitments. Small fixes and clearly scoped proposals are welcome, but there is
+no promised response or release schedule. Before contributing, read
 [AGENTS.md](AGENTS.md), the live [session handoff](docs/SESSION_HANDOFF.md), and
 the [development guide](docs/DEVELOPMENT.md).
 

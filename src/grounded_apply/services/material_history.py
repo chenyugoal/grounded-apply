@@ -14,7 +14,7 @@ from typing import Any
 
 from grounded_apply.domain import Claim, ClaimPacket, Evidence, Resolved, to_jsonable
 from grounded_apply.services.jobs import JobSnapshot
-from grounded_apply.services.material_models import TRANSFORMATIONS, selected_presentation, validate_layout
+from grounded_apply.services.material_models import PRESENTATION_TRANSFORMATIONS, TRANSFORMATIONS, selected_presentation, validate_layout
 from grounded_apply.services.matching import job_policy, terms
 from grounded_apply.services.profile import resolve_selected_claim
 from grounded_apply.services.questionnaire_history import validate_historical_answers
@@ -96,7 +96,7 @@ def validate_material_history(
     if len(selected) > 80:
         raise ValueError("Historical selection exceeds its bound")
     transformation = structure["transformation"]
-    styles = validate_layout({"schema_version": 1, "presentations": payload["presentations"]}, selected) if transformation == "approved_text_selection@2" else {}
+    styles = validate_layout({"schema_version": 1, "presentations": payload["presentations"]}, selected) if transformation in PRESENTATION_TRANSFORMATIONS else {}
     by_id = {claim.id: claim for claim in claims}
     if len(by_id) != len(claims) or len({(item.id, item.claim_id) for item in evidence}) != len(evidence):
         raise ValueError("Historical profile identities are invalid")

@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from grounded_apply.repositories import RepositoryError
-from grounded_apply.services.material_models import TRANSFORMATIONS, validate_layout
+from grounded_apply.services.material_models import PRESENTATION_TRANSFORMATIONS, TRANSFORMATIONS, validate_layout
 from grounded_apply.services.workflow import canonical, digest, hash_bytes, opaque, validate_workflow
 
 
@@ -126,7 +126,7 @@ def _material_values(material: Mapping[str, Any]) -> tuple[dict[str, Any], dict[
 
 
 def _payload(value: object, transformation: str) -> dict[str, Any]:
-    fields = _PAYLOAD_FIELDS | {"presentations"} if transformation == "approved_text_selection@2" else _PAYLOAD_FIELDS
+    fields = _PAYLOAD_FIELDS | {"presentations"} if transformation in PRESENTATION_TRANSFORMATIONS else _PAYLOAD_FIELDS
     payload = _closed(value, fields)
     if (type(payload["version"]) is not int or payload["version"] != 1
             or payload["transformation"] != transformation
@@ -139,7 +139,7 @@ def _payload(value: object, transformation: str) -> dict[str, Any]:
         raise ValueError(_ERROR)
     for key in ("structure_sha256", "question_specs_sha256", "answers_sha256", "idempotency_sha256"):
         _digest(payload[key])
-    if transformation == "approved_text_selection@2":
+    if transformation in PRESENTATION_TRANSFORMATIONS:
         validate_layout({"schema_version": 1, "presentations": payload["presentations"]}, selected)
     return dict(payload)
 
@@ -170,7 +170,7 @@ def validate_material_build_record(
             "job_id": row["job_id"], "selected_claim_ids": payload["selected_claim_ids"],
             "structure_sha256": digest(structure), "transformation": structure["transformation"],
             "question_specs_sha256": digest(manifest["question_specs"]), "answers_sha256": digest(manifest["answers"])}
-        if structure["transformation"] == "approved_text_selection@2":
+        if structure["transformation"] in PRESENTATION_TRANSFORMATIONS:
             expected["presentations"] = validate_layout(
                 {"schema_version": 1, "presentations": payload["presentations"]}, tuple(payload["selected_claim_ids"]))
         if canonical(payload) != canonical(expected):

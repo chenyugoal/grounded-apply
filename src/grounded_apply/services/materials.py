@@ -15,7 +15,7 @@ from grounded_apply.repositories import Record, RepositoryError, SQLiteRepositor
 from grounded_apply.services.jobs import JobService
 from grounded_apply.services.matching import job_policy, terms
 from grounded_apply.services.material_models import (
-    TRANSFORMATIONS, FactualUnit, MaterialValidationError, RenderedResume,
+    PRESENTATION_TRANSFORMATIONS, TRANSFORMATIONS, FactualUnit, MaterialValidationError, RenderedResume,
     ResumeRenderer, ResumeStructure, selected_presentation, validate_layout,
 )
 from grounded_apply.services.profile import ProfileService, resolve_selected_claim
@@ -86,8 +86,8 @@ class MaterialService:
         self._renderer = renderer
 
     def plan(self, job_id: str, claim_ids: tuple[str, ...], *, layout: object = None,
-             transformation: str = "approved_text_selection@2") -> ResumeStructure:
-        if transformation not in TRANSFORMATIONS:
+             transformation: str | None = None) -> ResumeStructure:
+        if transformation is not None and transformation not in TRANSFORMATIONS:
             raise MaterialValidationError("Unsupported material transformation")
         styles = validate_layout(layout, claim_ids)
         if transformation == "approved_text_selection@1" and styles:
@@ -101,6 +101,14 @@ class MaterialService:
             profile = ProfileService(self._repository)
             claims, evidence = profile.validated_profile()
             by_id = {c.id: c for c in claims}
+            if transformation is None:
+                transformation = ("approved_text_selection@3" if any(
+                    identifier in by_id and by_id[identifier].claim_type == "research_description"
+                    for identifier in claim_ids) else CURRENT_TRANSFORMATION)
+            if transformation not in TRANSFORMATIONS:
+                raise MaterialValidationError("Unsupported material transformation")
+            if transformation == "approved_text_selection@1" and styles:
+                raise MaterialValidationError("Legacy materials cannot change presentation on replay")
             policy = job_policy(job_id)
             selected = list(claim_ids)
             issues: list[Any] = []
@@ -153,7 +161,7 @@ class MaterialService:
             if type(max_database_bytes) is not int or not 1 <= max_database_bytes <= MAX_SNAPSHOT_BYTES:
                 raise ValueError("Material storage limit must fit the supported database bound")
         styles = validate_layout(layout, claim_ids)
-        transformation = CURRENT_TRANSFORMATION
+        transformation: str | None = None
         # A retry retains its original registered transformation, including v1.
         with self._repository.read_transaction():
             previous = self._repository.get_workflow_run_by_idempotency_key("material_build", request_input(idempotency_key, {})["idempotency_sha256"])
@@ -162,9 +170,12 @@ class MaterialService:
                     previous_input = json.loads(previous["input_json"])
                     validate_workflow(previous, "material_build", previous_input)
                     transformation = previous_input["transformation"]
+                    if transformation not in TRANSFORMATIONS:
+                        raise ValueError("Unsupported stored material transformation")
                 except (KeyError, TypeError, ValueError):
                     raise MaterialValidationError("Material replay audit is invalid") from None
         structure = self.plan(job_id, claim_ids, layout=layout, transformation=transformation)
+        transformation = structure.transformation
         question_specs = validate_question_specs(questions)
         answers = QuestionnaireService(self._repository).prepare(job_id, question_specs)
         if expected_plan_sha256 is not None and expected_plan_sha256 != digest({"structure": asdict(structure), "answers": answers}):
@@ -174,7 +185,7 @@ class MaterialService:
         payload = request_input(idempotency_key, {"job_id": job_id, "selected_claim_ids": list(claim_ids),
             "structure_sha256": digest(asdict(structure)), "transformation": structure.transformation,
             "question_specs_sha256": digest(question_specs), "answers_sha256": digest(answers)})
-        if transformation == "approved_text_selection@2":
+        if transformation in PRESENTATION_TRANSFORMATIONS:
             payload["presentations"] = styles
         with self._repository.read_transaction():
             existing = existing_workflow(self._repository, "material_build", payload)
@@ -287,7 +298,7 @@ class MaterialService:
                 "structure_sha256": digest(asdict(structure)), "transformation": structure.transformation,
                 "question_specs_sha256": digest(manifest["question_specs"]), "answers_sha256": digest(manifest["answers"])}
             layout = None
-            if structure.transformation == "approved_text_selection@2":
+            if structure.transformation in PRESENTATION_TRANSFORMATIONS:
                 layout = {"schema_version": 1, "presentations": payload["presentations"]}
                 expected["presentations"] = validate_layout(layout, tuple(payload["selected_claim_ids"]))
             validate_workflow(workflow, "material_build", expected)

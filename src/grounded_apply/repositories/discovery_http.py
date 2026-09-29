@@ -19,7 +19,8 @@ import socket
 import ssl
 import threading
 import time
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext, suppress
 from urllib.parse import urlsplit
 
 from grounded_apply.services.discovery import netflix_job_url_id
@@ -27,6 +28,10 @@ from grounded_apply.services.discovery import netflix_job_url_id
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
 _BOARD = r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
+_WORKABLE_URL = re.compile(
+    rf"https://apply\.workable\.com/api/v1/widget/accounts/{_BOARD}\?details=true"
+)
+_WORKABLE_MINIMUM_GAP = 1.05
 _ALLOWED_URLS = (
     re.compile(
         rf"https://boards-api\.greenhouse\.io/v1/boards/{_BOARD}/jobs"
@@ -37,6 +42,7 @@ _ALLOWED_URLS = (
         rf"https://api\.(?:eu\.)?lever\.co/v0/postings/{_BOARD}"
         r"\?mode=json&skip=(?:0|[1-9][0-9]{0,6})&limit=100"
     ),
+    _WORKABLE_URL,
 )
 _NETFLIX_URLS = (
     (re.compile(r"https://explore\.jobs\.netflix\.net/robots\.txt"), ("text/plain",)),
@@ -69,6 +75,34 @@ class PublicJobTransportError(Exception):
 
 class PublicJobHTTPTransport:
     """Fetch only bounded, public board listings; no candidate input is sent."""
+
+    def __init__(self) -> None:
+        self._workable_lock = threading.Lock()
+        self._workable_next_attempt: float | None = None
+
+    @contextmanager
+    def _workable_attempt(self, deadline: float) -> Iterator[None]:
+        # Courtesy pacing belongs to this transport instance, not all processes
+        # or an authenticated account. Keep at least a second between attempts
+        # without extending the caller's original timeout budget.
+        if not self._workable_lock.acquire(timeout=_remaining(deadline)):
+            raise PublicJobTransportError("timeout")
+        attempted = False
+        try:
+            while self._workable_next_attempt is not None:
+                wait = self._workable_next_attempt - time.monotonic()
+                if wait <= 0:
+                    break
+                if wait >= _remaining(deadline):
+                    raise PublicJobTransportError("timeout")
+                time.sleep(wait)
+            _remaining(deadline)
+            attempted = True
+            yield
+        finally:
+            if attempted:
+                self._workable_next_attempt = time.monotonic() + _WORKABLE_MINIMUM_GAP
+            self._workable_lock.release()
 
     def get(self, url: str, *, max_bytes: int, timeout: float) -> bytes:
         if (
@@ -108,22 +142,23 @@ class PublicJobHTTPTransport:
         deadline_timer: threading.Timer | None = None
         expired = threading.Event()
         try:
-            _require_public_resolution(host)
-            connection = http.client.HTTPSConnection(
-                host,
-                timeout=_remaining(deadline),
-                context=ssl.create_default_context(),
-            )
-            connection.request(
-                "GET",
-                target,
-                headers={
-                    "User-Agent": "GroundedApply/1 public-job-discovery",
-                    "Accept": ", ".join(allowed_types),
-                    "Accept-Encoding": "identity",
-                    "Connection": "close",
-                },
-            )
+            with self._workable_attempt(deadline) if _WORKABLE_URL.fullmatch(url) else nullcontext():
+                _require_public_resolution(host)
+                connection = http.client.HTTPSConnection(
+                    host,
+                    timeout=_remaining(deadline),
+                    context=ssl.create_default_context(),
+                )
+                connection.request(
+                    "GET",
+                    target,
+                    headers={
+                        "User-Agent": "GroundedApply/1 public-job-discovery",
+                        "Accept": ", ".join(allowed_types),
+                        "Accept-Encoding": "identity",
+                        "Connection": "close",
+                    },
+                )
             # Keep the socket reference: getresponse() may detach it from the
             # connection for a response marked Connection: close.
             request_socket = connection.sock

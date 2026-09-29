@@ -100,7 +100,7 @@ def check_schedule(command: list[str], workspace: Path, *, source_path: Path | N
     source.write_text(RESUME, encoding="utf-8")
     extracted = cli("profile", "extract", "--source-file", str(source))
     cli("profile", "init")
-    imported = cli("profile", "onboard", "--source-file", str(source),
+    imported = cli("profile", "onboard", "--extractor-version", "2", "--source-file", str(source),
         "--source-sha256", extracted["source_sha256"], "--select", "0,1,2,3,4,6,7",
         "--idempotency-key", "fictional-daily-profile")
     for item in cli("profile", "review")["items"]:

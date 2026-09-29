@@ -156,6 +156,7 @@ class BatchCliTests(unittest.TestCase):
         self.assertEqual(result["data"]["remaining_count"], 1)
         self.assertEqual(result["data"]["stop_reason"], "shared_failure")
         self.assertIn("PDF environment", result["error"]["message"])
+        self.assertIn("doctor --materials", result["error"]["message"])
         self.assertNotIn("fictional private", json.dumps(result) + events)
         code, resumed, _ = self.invoke("batches", "resume", "--batch-id", result["data"]["batch_id"])
         self.assertEqual(code, 0, resumed)

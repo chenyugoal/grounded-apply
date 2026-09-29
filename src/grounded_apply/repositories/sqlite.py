@@ -768,6 +768,7 @@ class SQLiteRepository:
         claim_id: str,
         evidence_id: str,
         record_sha256: str,
+        source_type: str = "imported_resume",
         created_at: str | None = None,
     ) -> Record:
         """Bind one imported claim/evidence pair to its immutable review slot.
@@ -777,6 +778,7 @@ class SQLiteRepository:
         without changing the existing association.
         """
 
+        self._require_profile_import_source_type(source_type)
         if isinstance(proposal_index, bool) or not isinstance(proposal_index, int):
             raise TypeError("proposal_index must be an integer")
         if proposal_index < 0:
@@ -805,9 +807,10 @@ class SQLiteRepository:
                         self._require_pending_profile_import_review_projection(
                             claim_id,
                             evidence_id,
+                            source_type,
                         )
                     else:
-                        self._require_decided_profile_import_review_projection(existing)
+                        self._require_decided_profile_import_review_projection(existing, source_type)
                     return existing
                 raise RepositoryError(
                     "Profile import review claim is already bound to another record"
@@ -832,7 +835,7 @@ class SQLiteRepository:
                     "Profile import review evidence is already bound to another record"
                 )
 
-            self._require_pending_profile_import_review_projection(claim_id, evidence_id)
+            self._require_pending_profile_import_review_projection(claim_id, evidence_id, source_type)
             self._connection.execute(
                 """
                 INSERT INTO profile_import_review_items (
@@ -915,6 +918,7 @@ class SQLiteRepository:
         decision_workflow_run_id: str,
         decided_by: str,
         decided_at: str,
+        source_type: str = "imported_resume",
     ) -> Record:
         """Atomically apply one terminal import-review trust transition.
 
@@ -923,6 +927,7 @@ class SQLiteRepository:
         updates so concurrent or malformed state fails closed.
         """
 
+        self._require_profile_import_source_type(source_type)
         if not isinstance(decision, str):
             raise TypeError("decision must be text")
         if decision not in _PROFILE_IMPORT_REVIEW_DECISIONS:
@@ -953,7 +958,7 @@ class SQLiteRepository:
                     and review_item["decided_by"] == decided_by
                     and review_item["decided_at"] == decided_at
                 ):
-                    self._require_decided_profile_import_review_projection(review_item)
+                    self._require_decided_profile_import_review_projection(review_item, source_type)
                     return review_item
                 raise RepositoryError(
                     f"Profile import review item is already decided: {claim_id}"
@@ -963,7 +968,9 @@ class SQLiteRepository:
             if not isinstance(evidence_id, str):
                 raise RepositoryError("Profile import review association is malformed")
             self._require_pending_profile_import_review_item(review_item)
-            self._require_pending_profile_import_review_projection(claim_id, evidence_id)
+            source_ref, artifact_id, extraction_method = self._require_pending_profile_import_review_projection(
+                claim_id, evidence_id, source_type
+            )
 
             if decision == "approved":
                 claim_status = "verified"
@@ -991,7 +998,8 @@ class SQLiteRepository:
                     verified_by = ?,
                     updated_at = ?
                 WHERE id = ?
-                  AND source_type = 'imported_resume'
+                  AND source_type = ?
+                  AND source_ref = ?
                   AND status = 'needs_review'
                   AND approval_status = 'pending'
                   AND verified_at IS NULL
@@ -1004,6 +1012,8 @@ class SQLiteRepository:
                     verified_by,
                     decided_at,
                     claim_id,
+                    source_type,
+                    source_ref,
                 ),
             )
             if claim_cursor.rowcount != 1:
@@ -1017,7 +1027,10 @@ class SQLiteRepository:
                     confirmed_by = ?,
                     updated_at = ?
                 WHERE id = ?
-                  AND source_type = 'imported_resume'
+                  AND source_type = ?
+                  AND source_ref = ?
+                  AND artifact_id IS ?
+                  AND extraction_method = ?
                   AND confirmation_status = 'pending'
                   AND confirmed_at IS NULL
                   AND confirmed_by IS NULL
@@ -1028,6 +1041,10 @@ class SQLiteRepository:
                     confirmed_by,
                     decided_at,
                     evidence_id,
+                    source_type,
+                    source_ref,
+                    artifact_id,
+                    extraction_method,
                 ),
             )
             if evidence_cursor.rowcount != 1:
@@ -1061,7 +1078,7 @@ class SQLiteRepository:
 
             decided = self.get_profile_import_review_item(claim_id)
             assert decided is not None
-            self._require_decided_profile_import_review_projection(decided)
+            self._require_decided_profile_import_review_projection(decided, source_type)
             return decided
 
     def _get_profile_import_review_slot(
@@ -1100,11 +1117,54 @@ class SQLiteRepository:
             if any(link.get(field) != value for field, value in expected.items()):
                 raise RepositoryError("Profile import review support link is invalid")
 
+    @staticmethod
+    def _require_profile_import_source_type(source_type: str) -> None:
+        if not isinstance(source_type, str) or source_type not in ("imported_resume", "user_statement"):
+            raise ValueError("Profile import source type must be imported_resume or user_statement")
+
+    @staticmethod
+    def _require_profile_import_review_origin(
+        claim: Record, evidence: Record, source_type: str,
+    ) -> tuple[str, str | None, str]:
+        """Require one exact origin/identity pair, including decided replays.
+
+        The application service additionally validates workflow ownership and
+        source artifact contents. Legacy resume adapter callers may omit the
+        artifact; the new statement ingress always requires its reserved ID.
+        """
+
+        if source_type == "user_statement":
+            ref_prefix = "user-statement:sha256:"
+            artifact_prefix = "profile-user-statement-source:sha256:"
+            extraction_method = "grounded-apply.profile-user-statement.manifest@1"
+        else:
+            ref_prefix = "sha256:"
+            artifact_prefix = "profile-import-source:sha256:"
+            extraction_method = "grounded-apply.profile-import.manifest@1"
+        source_ref = claim.get("source_ref")
+        artifact_id = evidence.get("artifact_id")
+        if not isinstance(source_ref, str) or not source_ref.startswith(ref_prefix):
+            raise RepositoryError("Profile import review source identity is inconsistent")
+        digest = source_ref[len(ref_prefix):]
+        if (
+            len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest)
+            or claim.get("source_type") != source_type
+            or evidence.get("source_type") != source_type
+            or evidence.get("source_ref") != source_ref
+            or evidence.get("extraction_method") != extraction_method
+            or (artifact_id != artifact_prefix + digest
+                and not (source_type == "imported_resume" and artifact_id is None))
+        ):
+            raise RepositoryError("Profile import review source identity is inconsistent")
+        assert artifact_id is None or isinstance(artifact_id, str)
+        return source_ref, artifact_id, extraction_method
+
     def _require_pending_profile_import_review_projection(
         self,
         claim_id: str,
         evidence_id: str,
-    ) -> None:
+        source_type: str,
+    ) -> tuple[str, str | None, str]:
         claim = self.get_claim(claim_id)
         if claim is None:
             raise RecordNotFoundError(f"Claim does not exist: {claim_id}")
@@ -1112,7 +1172,7 @@ class SQLiteRepository:
         if evidence is None:
             raise RecordNotFoundError(f"Evidence does not exist: {evidence_id}")
         if (
-            claim.get("source_type") != "imported_resume"
+            claim.get("source_type") != source_type
             or claim.get("status") != "needs_review"
             or claim.get("approval_status") != "pending"
             or claim.get("verified_at") is not None
@@ -1121,7 +1181,7 @@ class SQLiteRepository:
         ):
             raise RepositoryError("Profile import claim is not pending review")
         if (
-            evidence.get("source_type") != "imported_resume"
+            evidence.get("source_type") != source_type
             or evidence.get("confirmation_status") != "pending"
             or evidence.get("confirmed_at") is not None
             or evidence.get("confirmed_by") is not None
@@ -1129,6 +1189,7 @@ class SQLiteRepository:
         ):
             raise RepositoryError("Profile import evidence is not pending review")
         self._require_profile_import_review_support_link(claim_id, evidence_id)
+        return self._require_profile_import_review_origin(claim, evidence, source_type)
 
     @staticmethod
     def _require_pending_profile_import_review_item(review_item: Record) -> None:
@@ -1144,6 +1205,7 @@ class SQLiteRepository:
     def _require_decided_profile_import_review_projection(
         self,
         review_item: Record,
+        source_type: str,
     ) -> None:
         claim_id = review_item.get("claim_id")
         evidence_id = review_item.get("evidence_id")
@@ -1168,6 +1230,7 @@ class SQLiteRepository:
         evidence = self.get_evidence(evidence_id)
         if claim is None or evidence is None:
             raise RepositoryError("Profile import review decision projection is missing")
+        self._require_profile_import_review_origin(claim, evidence, source_type)
         if decision == "approved":
             claim_projection = (
                 claim.get("status") == "verified"

@@ -12,10 +12,11 @@ from hashlib import sha256
 from typing import Literal, Protocol
 from urllib.parse import unquote, urlsplit
 
+from grounded_apply.services.search_filters import MissingLocationPolicy, PreparationFilters
 from grounded_apply.services.source_windows import NetflixCursor, NetflixWindowProgress
 
 
-Provider = Literal["greenhouse", "ashby", "lever", "lever_eu", "netflix", "manual"]
+Provider = Literal["greenhouse", "ashby", "lever", "lever_eu", "workable", "netflix", "manual"]
 SourceStatus = Literal["successful", "partial", "failed", "manual_required"]
 NORMALIZER_VERSION = "public_ats_text@1"
 NETFLIX_NORMALIZER_VERSION = "netflix_jobposting@1"
@@ -26,7 +27,7 @@ MAX_SELECTED_JOBS = 1000
 DEFAULT_SELECTED_JOBS = 100
 MAX_SOURCE_REQUESTS = 10
 REQUEST_TIMEOUT = 10.0
-_PROVIDERS = frozenset({"greenhouse", "ashby", "lever", "lever_eu", "netflix", "manual"})
+_PROVIDERS = frozenset({"greenhouse", "ashby", "lever", "lever_eu", "workable", "netflix", "manual"})
 _SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _OPAQUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
 _NETFLIX_JOB_URL = re.compile(
@@ -99,6 +100,72 @@ class DiscoveryReport:
     jobs: tuple[DiscoveredJob, ...]
     sources: tuple[SourceReport, ...]
     filter_method: str = "title_substring_or@1"
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoverySelection:
+    """Account for normalized valid records, separately from provider observations."""
+
+    source_id: str
+    valid_count: int
+    title_filtered_count: int
+    location_filtered_count: int
+    unknown_excluded_count: int
+    unknown_included_count: int
+    selected_count: int
+    selected_unknown_count: int
+    limit_deferred_count: int
+
+    def __post_init__(self) -> None:
+        counts = (self.valid_count, self.title_filtered_count, self.location_filtered_count,
+                  self.unknown_excluded_count, self.unknown_included_count, self.selected_count,
+                  self.selected_unknown_count, self.limit_deferred_count)
+        if (type(self.source_id) is not str or _OPAQUE.fullmatch(self.source_id) is None
+                or any(type(value) is not int or not 0 <= value <= MAX_SOURCE_RECORDS for value in counts)
+                or self.valid_count != (self.title_filtered_count + self.location_filtered_count
+                    + self.unknown_excluded_count + self.selected_count + self.limit_deferred_count)
+                or self.selected_unknown_count > min(self.selected_count, self.unknown_included_count)
+                or self.unknown_included_count - self.selected_unknown_count > self.limit_deferred_count):
+            raise ValueError("Discovery location selection counts are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class LocationDiscoveryReport:
+    jobs: tuple[DiscoveredJob, ...]
+    sources: tuple[SourceReport, ...]
+    location_contains: tuple[str, ...]
+    missing_location: MissingLocationPolicy
+    selections: tuple[DiscoverySelection, ...]
+    filter_method: str = "title_location_substring_or@1"
+
+
+def validate_location_filters(
+    location_contains: tuple[str, ...], missing_location: MissingLocationPolicy,
+) -> PreparationFilters:
+    """Validate explicit preferences without normalizing terms or accessing IO."""
+
+    return PreparationFilters(location_contains=location_contains, missing_location=missing_location)
+
+
+def _validate_title_limit(title_contains: tuple[str, ...], limit_per_source: int) -> None:
+    if type(limit_per_source) is not int or not 1 <= limit_per_source <= MAX_SELECTED_JOBS:
+        raise ValueError("Discovery requires bounded sources and a record limit from one to one thousand")
+    if (type(title_contains) is not tuple or len(title_contains) > 20
+        or any(type(term) is not str or not term.strip() or term != term.strip()
+               or len(term) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in term)
+               for term in title_contains)):
+        raise ValueError("Title filters require at most twenty bounded nonblank terms")
+
+
+def validate_location_discovery_request(
+    *, title_contains: tuple[str, ...] = (), location_contains: tuple[str, ...] = (),
+    missing_location: MissingLocationPolicy = "include", limit_per_source: int = DEFAULT_SELECTED_JOBS,
+) -> PreparationFilters:
+    """Validate opt-in filters and quota before source input, storage or network."""
+
+    policy = validate_location_filters(location_contains, missing_location)
+    _validate_title_limit(title_contains, limit_per_source)
+    return policy
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +259,10 @@ def canonical_job_url(provider: Provider, board: str, external_id: str) -> str:
         if board != "netflix" or not re.fullmatch(r"[1-9][0-9]{0,19}", external_id):
             raise ValueError("Invalid Netflix posting identity")
         return f"https://explore.jobs.netflix.net/careers/job/{external_id}"
+    if provider == "workable":
+        if not re.fullmatch(r"[A-F0-9]{10}", external_id):
+            raise ValueError("Invalid Workable posting identity")
+        return f"https://apply.workable.com/j/{external_id}"
     host = {"ashby": "jobs.ashbyhq.com", "lever": "jobs.lever.co", "lever_eu": "jobs.eu.lever.co"}[provider]
     return f"https://{host}/{board}/{external_id}"
 
@@ -287,6 +358,33 @@ class DiscoveryService:
 
     def discover(self, sources: tuple[SourceSpec, ...], *, title_contains: tuple[str, ...] = (),
                  limit_per_source: int = DEFAULT_SELECTED_JOBS) -> DiscoveryReport:
+        report, _ = self._discover(sources, title_contains=title_contains,
+                                   limit_per_source=limit_per_source, location_filters=None)
+        return report
+
+    def discover_with_locations(
+        self, sources: tuple[SourceSpec, ...], *, title_contains: tuple[str, ...] = (),
+        location_contains: tuple[str, ...] = (), missing_location: MissingLocationPolicy = "include",
+        limit_per_source: int = DEFAULT_SELECTED_JOBS,
+    ) -> LocationDiscoveryReport:
+        """Select literal published-location text before quota, without extra reads.
+
+        Unknown locations follow an explicit policy and remain distinguishable
+        from known matches. Neither selection nor Remote wording is eligibility.
+        """
+
+        policy = validate_location_discovery_request(title_contains=title_contains,
+            location_contains=location_contains, missing_location=missing_location,
+            limit_per_source=limit_per_source)
+        report, selections = self._discover(sources, title_contains=title_contains,
+                                           limit_per_source=limit_per_source, location_filters=policy)
+        return LocationDiscoveryReport(report.jobs, report.sources, policy.location_contains,
+                                       policy.missing_location, selections)
+
+    def _discover(
+        self, sources: tuple[SourceSpec, ...], *, title_contains: tuple[str, ...],
+        limit_per_source: int, location_filters: PreparationFilters | None,
+    ) -> tuple[DiscoveryReport, tuple[DiscoverySelection, ...]]:
         # Adapters implement this module's transport/models contract. Import here
         # avoids making their implementation part of the model import surface.
         from grounded_apply.repositories.job_sources import discover_source
@@ -303,23 +401,44 @@ class DiscoveryService:
                 raise ValueError("Source identifiers and board routes must be distinct")
             ids.add(source.id)
             identities.add(identity)
-        if (type(title_contains) is not tuple or len(title_contains) > 20
-            or any(type(term) is not str or not term.strip() or term != term.strip()
-                   or len(term) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in term)
-                   for term in title_contains)):
-            raise ValueError("Title filters require at most twenty bounded nonblank terms")
+        _validate_title_limit(title_contains, limit_per_source)
         filters = tuple(term.casefold() for term in title_contains)
         jobs = []
         reports = []
+        selections = []
         for source in sources:
             fetched_at = datetime.now(UTC).isoformat()
             if source.provider == "manual":
                 reports.append(SourceReport(source.id, source.provider, None, source.careers_url,
                     "manual_required", 0, 0, 0, None, fetched_at))
+                if location_filters is not None:
+                    selections.append(DiscoverySelection(source.id, 0, 0, 0, 0, 0, 0, 0, 0))
                 continue
             result = discover_source(source, self._transport, max_records=MAX_SOURCE_RECORDS)
             matching = tuple(job for job in result.jobs if not filters or any(term in job.title.casefold() for term in filters))
+            if location_filters is not None:
+                title_filtered = len(result.jobs) - len(matching)
+                location_filtered = unknown_excluded = unknown_included = 0
+                eligible = []
+                for job in matching:
+                    reason = location_filters.assess(title=job.title, location=job.location)
+                    if reason == "location_unknown_excluded":
+                        unknown_excluded += 1
+                    elif reason == "location_not_matched":
+                        location_filtered += 1
+                    elif reason is None:
+                        eligible.append(job)
+                        unknown_included += job.location is None
+                    else:
+                        raise ValueError("Unexpected discovery location filter result")
+                matching = tuple(eligible)
             selected = matching[:limit_per_source]
+            if location_filters is not None:
+                selections.append(DiscoverySelection(
+                    source.id, len(result.jobs), title_filtered, location_filtered, unknown_excluded,
+                    unknown_included, len(selected), sum(job.location is None for job in selected),
+                    len(matching) - len(selected),
+                ))
             errors = result.errors
             if len(matching) > limit_per_source and DiscoveryErrorCode.SOURCE_LIMIT_REACHED not in errors:
                 errors += (DiscoveryErrorCode.SOURCE_LIMIT_REACHED,)
@@ -331,4 +450,4 @@ class DiscoveryService:
                 len(selected), len(result.jobs) - len(matching), result.observed_count,
                 errors[0] if errors else None, fetched_at, errors,
                 result.indexed_count, result.remaining_count))
-        return DiscoveryReport(tuple(jobs), tuple(reports))
+        return DiscoveryReport(tuple(jobs), tuple(reports)), tuple(selections)

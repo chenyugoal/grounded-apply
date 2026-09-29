@@ -169,6 +169,55 @@ def _lever(source: SourceSpec, record: dict[str, object]) -> DiscoveredJob:
         location=_location(None if categories is None else categories.get("location")), description=_text("\n\n".join(parts)))
 
 
+def _workable_location(record: dict[str, object]) -> str | None:
+    def place(values: tuple[object, ...]) -> str | None:
+        parts = [_line(value, 512) for value in values if value is not None and value != ""]
+        return ", ".join(dict.fromkeys(parts)) or None
+
+    places: list[str] = []
+    if "locations" in record:
+        locations = record["locations"]
+        if type(locations) is not list or len(locations) > 100:
+            raise ValueError("Invalid Workable locations")
+        for location in locations:
+            if type(location) is not dict or type(location.get("hidden")) is not bool:
+                raise ValueError("Workable location visibility is unknown")
+            if location["hidden"]:
+                continue
+            value = place(tuple(location.get(key) for key in ("city", "region", "country")))
+            if value is None:
+                raise ValueError("Visible Workable location is empty")
+            places.append(value)
+        # An explicit list controls location visibility. Falling back to the
+        # top-level fields could restore a location the board marked hidden.
+    else:
+        value = place(tuple(record.get(key) for key in ("city", "state", "country")))
+        if value is not None:
+            places.append(value)
+    if "telecommuting" in record:
+        if type(record["telecommuting"]) is not bool:
+            raise ValueError("Invalid Workable remote flag")
+        if record["telecommuting"]:
+            places.append("Remote")
+    return _location("; ".join(dict.fromkeys(places)))
+
+
+def _workable(source: SourceSpec, record: dict[str, object]) -> DiscoveredJob:
+    identifier = record.get("shortcode")
+    if type(identifier) is not str:
+        raise ValueError("Invalid Workable posting identity")
+    url = canonical_job_url(source.provider, source.board or "", identifier)
+    if record.get("url") != url or record.get("shortlink") != url:
+        raise ValueError("Workable posting URLs do not match its identity")
+    if "application_url" in record and record["application_url"] != url + "/apply":
+        raise ValueError("Invalid Workable application URL")
+    # This documented public widget route publishes public jobs. Its `state`
+    # field is geographic; the authenticated SPI publication-state schema does
+    # not apply. Only explicit public location fields establish location/remote.
+    return _job(source, external_id=identifier, title=_line(record.get("title"), 512),
+        location=_workable_location(record), description=html_to_text(record.get("description")))
+
+
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -198,6 +247,16 @@ def _records(provider: str, payload: bytes) -> list[object]:
         if type(parsed) is not dict or parsed.get("apiVersion") != "1" or type(parsed.get("jobs")) is not list:
             raise ValueError("Invalid Ashby response")
         records = parsed["jobs"]
+    elif provider == "workable":
+        # The documented widget is a single public feed. Unknown fields could
+        # introduce pagination or completeness semantics: do not silently ignore
+        # them, follow cursors, or claim an authoritative complete observation.
+        if (type(parsed) is not dict or set(parsed) != {"name", "description", "jobs"}
+            or type(parsed["jobs"]) is not list):
+            raise ValueError("Invalid Workable response")
+        _line(parsed["name"], 512)
+        _text(parsed["description"], allow_empty=True)
+        records = parsed["jobs"]
     else:
         records = parsed
     if type(records) is not list:
@@ -210,6 +269,8 @@ def _url(source: SourceSpec, skip: int) -> str:
         return f"https://boards-api.greenhouse.io/v1/boards/{source.board}/jobs?content=true"
     if source.provider == "ashby":
         return f"https://api.ashbyhq.com/posting-api/job-board/{source.board}"
+    if source.provider == "workable":
+        return f"https://apply.workable.com/api/v1/widget/accounts/{source.board}?details=true"
     host = "api.eu.lever.co" if source.provider == "lever_eu" else "api.lever.co"
     return f"https://{host}/v0/postings/{source.board}?mode=json&skip={skip}&limit=100"
 
@@ -264,7 +325,9 @@ def discover_source(source: SourceSpec, transport: Transport, *, max_records: in
             try:
                 if type(record) is not dict:
                     raise ValueError("Invalid posting record")
-                parser = _greenhouse if source.provider == "greenhouse" else _ashby if source.provider == "ashby" else _lever
+                parser = (_greenhouse if source.provider == "greenhouse" else
+                    _ashby if source.provider == "ashby" else
+                    _workable if source.provider == "workable" else _lever)
                 job = parser(source, record)
                 if job is None:
                     continue

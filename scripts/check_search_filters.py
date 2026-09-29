@@ -109,7 +109,7 @@ def check_search_filters(command: list[str], workspace: Path, *, source_path: Pa
     source.write_text(RESUME, encoding="utf-8")
     extracted = cli("profile", "extract", "--source-file", str(source))
     cli("profile", "init")
-    imported = cli("profile", "onboard", "--source-file", str(source), "--source-sha256", extracted["source_sha256"],
+    imported = cli("profile", "onboard", "--extractor-version", "2", "--source-file", str(source), "--source-sha256", extracted["source_sha256"],
         "--select", "0,1,2,3,4,6,7", "--idempotency-key", "fictional-filter-profile")
     for item in cli("profile", "review")["items"]:
         cli("profile", "decide", "--claim-id", item["claim"]["id"], "--review-token", item["review_token"],

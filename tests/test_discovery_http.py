@@ -5,7 +5,7 @@ import io
 import socket
 import ssl
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from grounded_apply.repositories.discovery_http import (
     MAX_RESPONSE_BYTES,
@@ -19,6 +19,7 @@ GREENHOUSE = "https://boards-api.greenhouse.io/v1/boards/synthetic-example/jobs?
 ASHBY = "https://api.ashbyhq.com/posting-api/job-board/synthetic-example"
 LEVER = "https://api.lever.co/v0/postings/synthetic-example?mode=json&skip=0&limit=100"
 LEVER_EU = "https://api.eu.lever.co/v0/postings/synthetic-example?mode=json&skip=100&limit=100"
+WORKABLE = "https://apply.workable.com/api/v1/widget/accounts/synthetic-example?details=true"
 
 
 class FakeResponse:
@@ -79,7 +80,7 @@ class PublicJobHTTPTransportTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), code)
 
     def test_only_documented_board_gets_are_sent_without_credentials(self) -> None:
-        for url in (GREENHOUSE, ASHBY, LEVER, LEVER_EU):
+        for url in (GREENHOUSE, ASHBY, LEVER, LEVER_EU, WORKABLE):
             with self.subTest(url=url):
                 response = FakeResponse()
                 self.connection.getresponse.return_value = response
@@ -133,6 +134,24 @@ class PublicJobHTTPTransportTests(unittest.TestCase):
             LEVER.replace("skip=0", "skip=-1"),
             LEVER.replace("limit=100", "limit=100000"),
             LEVER + "&mode=html",
+            WORKABLE.replace("apply.workable.com", "www.workable.com"),
+            "https://www.workable.com/api/accounts/synthetic-example?details=true",
+            WORKABLE.replace("apply.workable.com", "synthetic-example.workable.com"),
+            WORKABLE.replace("apply.workable.com", "apply.workable.com.example.com"),
+            WORKABLE.replace("apply.workable.com", "user:secret@apply.workable.com"),
+            WORKABLE.replace("apply.workable.com", "apply.workable.com:443"),
+            WORKABLE.replace("details=true", "details=false"),
+            WORKABLE.replace("?details=true", ""),
+            WORKABLE + "&token=private",
+            WORKABLE + "&details=true",
+            WORKABLE + "#fragment",
+            WORKABLE.replace("synthetic-example", "../private"),
+            WORKABLE.replace("synthetic-example", "%2e%2e"),
+            WORKABLE.replace("synthetic-example", "board/nested"),
+            WORKABLE.replace("synthetic-example", "-board"),
+            WORKABLE.replace("synthetic-example", "a" * 129),
+            WORKABLE.replace("/widget/accounts/", "/accounts/"),
+            WORKABLE.replace("?details=true", "/jobs?details=true"),
         )
         for url in invalid:
             with self.subTest(url=url):
@@ -314,6 +333,118 @@ class PublicJobHTTPTransportTests(unittest.TestCase):
 
         with patch.object(self.response, "read1", side_effect=expired_read):
             self.assert_code("timeout")
+
+    def test_workable_exact_target_and_bounded_board_names(self) -> None:
+        for board in ("A", "Synthetic_Board-9", "a" * 128):
+            with self.subTest(board=board):
+                self.connection.getresponse.return_value = FakeResponse()
+                transport = PublicJobHTTPTransport()
+                url = WORKABLE.replace("synthetic-example", board)
+                self.assertEqual(transport.get(url, max_bytes=1024, timeout=10), b'{"jobs":[]}')
+                self.assertEqual(self.factory.call_args.args, ("apply.workable.com",))
+                self.assertEqual(self.connection.request.call_args.args,
+                                 ("GET", f"/api/v1/widget/accounts/{board}?details=true"))
+
+    def test_workable_redirect_and_nonjson_response_keep_existing_refusal(self) -> None:
+        for status, headers, code in (
+            (302, [("Location", WORKABLE)], "redirect_refused"),
+            (429, [("Content-Type", "application/json")], "rate_limited"),
+            (200, [("Content-Type", "text/html")], "invalid_response"),
+            (200, [("Content-Type", "application/json"), ("Content-Length", "1025")], "response_too_large"),
+        ):
+            with self.subTest(status=status, headers=headers):
+                self.transport = PublicJobHTTPTransport()
+                response = FakeResponse(b"private response body", status=status, headers=headers)
+                self.connection.getresponse.return_value = response
+                self.assert_code(code, WORKABLE)
+                self.assertEqual(response.read_sizes, [])
+                self.assertTrue(response.closed)
+
+    def test_workable_pacing_shares_one_instance_and_consumes_timeout_budget(self) -> None:
+        clock = [100.0]
+        sleeps: list[float] = []
+        def advance(delay: float) -> None:
+            sleeps.append(delay)
+            clock[0] += delay
+        with patch(MODULE + ".time.monotonic", side_effect=lambda: clock[0]), patch(MODULE + ".time.sleep", side_effect=advance):
+            for board in ("synthetic-one", "synthetic-two", "synthetic-three"):
+                self.connection.getresponse.return_value = FakeResponse()
+                self.transport.get(WORKABLE.replace("synthetic-example", board), max_bytes=1024, timeout=10)
+            self.assertEqual(len(sleeps), 2)
+            for delay in sleeps:
+                self.assertAlmostEqual(delay, 1.05)
+            timeouts = [call.kwargs["timeout"] for call in self.factory.call_args_list]
+            self.assertAlmostEqual(timeouts[0], 10.0)
+            self.assertAlmostEqual(timeouts[1], 8.95)
+            self.assertAlmostEqual(timeouts[2], 8.95)
+            # An independently constructed transport does not share this clock.
+            self.connection.getresponse.return_value = FakeResponse()
+            PublicJobHTTPTransport().get(WORKABLE, max_bytes=1024, timeout=10)
+            self.assertEqual(len(sleeps), 2)
+
+    def test_workable_unavailable_slot_times_out_without_network_or_new_reservation(self) -> None:
+        clock = [100.0]
+        with patch(MODULE + ".time.monotonic", side_effect=lambda: clock[0]), patch(MODULE + ".time.sleep") as sleep:
+            self.transport.get(WORKABLE, max_bytes=1024, timeout=10)
+            self.dns.reset_mock()
+            self.factory.reset_mock()
+            self.assert_code("timeout", WORKABLE, timeout=0.5)
+            sleep.assert_not_called()
+            self.dns.assert_not_called()
+            self.factory.assert_not_called()
+            clock[0] = 101.05
+            self.connection.getresponse.return_value = FakeResponse()
+            self.transport.get(WORKABLE, max_bytes=1024, timeout=10)
+            sleep.assert_not_called()
+            self.dns.assert_called_once()
+
+    def test_workable_sleep_overrun_still_expires_original_deadline(self) -> None:
+        clock = [100.0]
+        def delayed_sleep(_: float) -> None:
+            clock[0] += 11
+        with patch(MODULE + ".time.monotonic", side_effect=lambda: clock[0]), patch(MODULE + ".time.sleep", side_effect=delayed_sleep):
+            self.transport.get(WORKABLE, max_bytes=1024, timeout=10)
+            self.dns.reset_mock()
+            self.factory.reset_mock()
+            self.assert_code("timeout", WORKABLE)
+            self.dns.assert_not_called()
+            self.factory.assert_not_called()
+
+    def test_workable_lock_wait_is_bounded_and_fails_before_network(self) -> None:
+        lock = Mock()
+        lock.acquire.return_value = False
+        self.transport._workable_lock = lock
+        with patch(MODULE + ".time.monotonic", return_value=100), patch(MODULE + ".time.sleep") as sleep:
+            self.assert_code("timeout", WORKABLE, timeout=2)
+        lock.acquire.assert_called_once_with(timeout=2)
+        lock.release.assert_not_called()
+        sleep.assert_not_called()
+        self.dns.assert_not_called()
+        self.factory.assert_not_called()
+
+    def test_workable_failed_attempt_retains_pacing_and_releases_lock(self) -> None:
+        clock = [100.0]
+        sleeps: list[float] = []
+        def advance(delay: float) -> None:
+            sleeps.append(delay)
+            clock[0] += delay
+        with patch(MODULE + ".time.monotonic", side_effect=lambda: clock[0]), patch(MODULE + ".time.sleep", side_effect=advance):
+            self.connection.request.side_effect = OSError("private failure detail")
+            self.assert_code("transport_failure", WORKABLE)
+            self.connection.request.side_effect = None
+            self.connection.getresponse.return_value = FakeResponse()
+            self.transport.get(WORKABLE, max_bytes=1024, timeout=10)
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 1.05)
+
+    def test_workable_pacing_does_not_delay_other_providers(self) -> None:
+        with patch(MODULE + ".time.monotonic", return_value=100), patch(MODULE + ".time.sleep") as sleep:
+            self.transport.get(WORKABLE, max_bytes=1024, timeout=10)
+            for url in (GREENHOUSE, ASHBY, LEVER, LEVER_EU):
+                self.connection.getresponse.return_value = FakeResponse()
+                self.transport.get(url, max_bytes=1024, timeout=10)
+                self.assertEqual(self.factory.call_args.kwargs["timeout"], 10)
+            sleep.assert_not_called()
 
 
 if __name__ == "__main__":

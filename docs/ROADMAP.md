@@ -4,6 +4,13 @@ This roadmap defines delivery scope and acceptance gates. It is not the live
 session log; use [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) for the current
 working-tree checkpoint and next exact task.
 
+**September 29, 2026: release wrap-up.** Broader feature development is paused.
+The public-facing scope is an experimental, supervised application-preparation
+tool. The sections below preserve implemented work and unfinished ideas; “next”
+and “planned” describe design order, not scheduled commitments. Active-user-time
+savings, independent first-use acceptance, and the full hosted platform matrix
+remain unverified. No browser filling or automatic submission is implemented.
+
 ## Status rules
 
 - **Implemented** means code or documentation exists and its documented
@@ -13,13 +20,14 @@ working-tree checkpoint and next exact task.
 - **Planned** means design intent only.
 - **Blocked** names a concrete dependency or unresolved decision.
 
-As of September 4, 2026, **the bounded local application pilot is implemented**
+As of September 21, 2026, **the bounded local application pilot is implemented**
 (ADR 0006); broader platform and semantic features remain in progress. The design basis,
 resumability contract, executable scaffold, deterministic truth policies, and
 initial SQLite persistence slice are implemented and verified. Safe structured
 text-import proposals, registered schema-v1 claim values, a versioned
 nine-category restricted-text taxonomy for deterministic high-confidence
-screening of persisted content and metadata, whole-source minimization guards, a
+screening of persisted content and metadata, legacy source-minimization guards
+and explicit complete-fact retention, a
 stable-descriptor file/stdin CLI boundary, application-owned digest provenance,
 a registered manifest ingress, replay-bound workflow records,
 provenance-validating read-only review, durable record-digest associations,
@@ -30,8 +38,8 @@ persistent-WAL refusal, resolution-time imported-record revalidation, and the
 first synthetic profile fixture, adapter-owned safe SQLite opens, genuine
 hot-journal recovery tests, fixed-schema opt-in diagnostic events, and an isolated
 installed-package gate, and optional authenticated profile backup/restore with
-an isolated installed-extra round trip are implemented. Exact text extraction,
-selected onboarding, explicit name/contact vocabulary, audited retirement and
+an isolated installed-extra round trip are implemented. Local text/PDF/static-LaTeX
+extraction, complete-inventory and selected onboarding, explicit name/contact vocabulary, audited retirement and
 approved replacement, support export, and whole-portable-home deletion now extend
 that foundation. The local pilot covers job capture, evidence retrieval, verified
 PDFs/answers, explicit material approval, and manual application history. Broader
@@ -39,6 +47,147 @@ semantic contradiction handling, novel-obfuscation classification, registered
 derivations, automatic retention, and Phases 2–5 remain planned or in progress.
 
 ## Delivered milestone — Codex-guided application preparation
+
+### September 21 usability follow-up
+
+**Status: Implemented and locally verified.** The 1296-test full suite, 74 focused
+onboarding tests, required PDF/encryption gates, source lifecycle/search/daily
+pilots, near-capacity restoration and fresh installed-package pilots pass. An
+independent first-user test retained all seven fictional PDF facts pending,
+without a manual text export or implicit approval. The current window
+prioritizes new-user feedback over further storage-conversion preparation.
+The implementation adds text/PDF/static-LaTeX intake, complete line inventory,
+explicit full-fact retention without the legacy 80% cap, a progressive optional
+question catalogue, board-link source setup, and a concise README with a detailed
+reference. See [profile setup](PROFILE_SETUP.md),
+[ADR 0012](adr/0012-complete-profile-onboarding.md), and the live checkpoint for
+exact acceptance evidence. Semantic completeness, OCR/DOCX, custom TeX expansion,
+durable interview state, persisted original-document provenance and platform-wide
+job aggregation remain unfinished. Final review/approval/submission boundaries
+are unchanged.
+
+The configured-board Workable extension is also implemented and locally
+verified: 1326 combined regression tests, 84 focused discovery tests, two real
+PDFs in both source and fresh installed acceptance gates, and the existing
+PDF/encryption/search/capacity gates pass. Offline setup accepts explicit company
+boards; boardless job links remain manual gaps. The public feed uses fixed,
+credential-free reads, strict identities, visible location fields, bounded
+requests and explicit unknown totals. One live read of Workable's own board
+passed without retaining posting prose. This extends configured-company support,
+not market-wide aggregation; see [job discovery](JOB_DISCOVERY.md#workable-public-boards).
+
+The complete fact queue can now be reviewed in bounded pages, with total,
+earlier and later pending counts. Continuation survives approving or rejecting
+the anchor; skipped facts remain pending and reappear on restart. Each page
+validates the complete queue in one read snapshot, and no-option review remains
+compatible. All 1353 regression tests, 247 focused profile tests, source and fresh
+installed onboarding checks, and required PDF/encryption/capacity gates pass.
+Per-fact approval remains explicit; pagination stores no cursor or answers.
+
+Explicit Research, Research Experience and Research Projects headings now retain
+research context through extractor 3 and `research_description`, with a separate
+Research section in newly selected materials. Exact contribution, degree and
+publication qualifiers remain grounded. Legacy extraction/material bytes and
+unaffected or interrupted batch identities remain unchanged; old facts are not
+automatically reclassified. All 1382 regression tests, 243 focused tests, source
+and fresh installed research-PDF/approval/history checks, PDF/encryption gates
+and sequential capacity probes pass.
+
+Retained interview answers now have explicit user-statement provenance through
+text/stdin-only `profile import --source-kind user-statement`. Exact wording,
+separate retention and per-fact approval, bounded review, replay, retirement and
+historical material audits are preserved. Default resume imports and their
+recorded identities remain unchanged. All 1414 regression tests, 327 focused
+tests, eleven source gates, fresh installed intake/material flows and sequential
+capacity probes pass. This adds no saved interview transcript or progress state.
+
+Discovery can now begin from explicit role/location terms without known company
+URLs or profile setup. The pure `jobs plan-search` command supplies bounded literal
+queries over supported hosts; Codex performs authorized browsing, validates
+observed links and previews feeds. It shows location and coverage gaps rather
+than treating the plan or search snippets as posting evidence. All 1433 tests,
+58 focused checks, eleven source gates, fresh installed flows and capacity probes
+pass. An independent fictional first-user pass reached partial useful previews
+without a runtime, retaining rejected, manual and deferred lead accounting.
+Live index coverage remains unverified.
+
+Opt-in `jobs sources --keep-valid` now retains valid observed links alongside
+position-only invalid/capped reports. Strict defaults and schema-1 manifests remain
+unchanged; all-invalid input yields no manifest. All 1454 tests, 79 focused checks,
+eleven source gates, fresh installed flows and capacity probes pass. A new offline
+first-user trial reached useful previews with one setup call, preserving rejected,
+manual, rate-limited, location and deferred-lead gaps.
+
+A compact retained-profile inventory now supports interview resumption. The default
+view contains counts only; bounded topic pages preserve exact wording, origin,
+recorded approval and lifecycle state without loading unrelated evidence. Full
+profile validation precedes every page; the view stores no answers, progress or
+approvals and makes no completeness or usability assessment. All 1483 tests,
+105 focused checks, eleven source gates, fresh installed workflows and sequential
+capacity probes pass. An independent resumed-interview trial reused retained
+research context, displayed six pending facts and asked two non-repeated follow-ups
+without mutation or network access.
+
+Explicit extractor 4 now keeps four observed unsupported headings from inheriting
+the preceding section's fact type: Research Interests, Academic Research, Selected
+Research and Professional Memberships. Their headings and unclassified body text
+remain visible; earlier extraction versions and the default stay unchanged. All
+1500 tests, 86 focused checks, eleven source gates, fresh installed workflows and
+sequential capacity probes pass. An independent original-document trial confirms
+the correction while preserving honest PDF/TeX gaps.
+
+Explicit publication grouping now joins separately chosen, disjoint title/status
+groups in one typed-CLI call, preserving exact multiline evidence and every
+qualifier. Each work stays separate, all other supported proposals remain in
+source order, and the report keeps the original inventory and visible gaps.
+Single-group responses remain compatible; the helper neither stores nor approves
+facts. All 1543 tests, 116 focused checks, eleven source gates, fresh installed
+workflows and sequential capacity probes pass. A fresh operational confirmation
+produced the same complete eight-fact proposal through one grouping call without
+manual manifest composition; reversing group order preserved the final inventory.
+
+Standalone discovery now applies explicit published-location filters before the
+per-source selection limit. Literal alternatives and a separate missing-location
+choice expose eligible unknowns, excluded records and deferred matches without
+changing provider coverage, saved-search behavior or unfiltered responses. All
+1572 regression tests, 90 focused checks, eleven source gates, fresh installed
+workflows and sequential capacity probes pass. A fresh operational confirmation
+reached a later preferred-location posting and preserved partial/manual coverage
+gaps; this does not infer remote-work eligibility or geographic equivalence.
+
+The complete-inventory operator recipe now explains how to preserve every
+supported proposal while adding explicitly classified exact source rows through
+the existing importer. A fresh documentation-only walkthrough preserved four
+supported facts, added three chosen facts from original LaTeX, and kept one
+unresolved item visible without storing or approving anything. Classification
+choices do not rewrite the extraction report or establish semantic completeness.
+
+Direct pending-fact review now opens a chosen inventory ID with its current
+evidence, review token and global pending count. It validates the whole pending
+queue in one read snapshot, preserves default and paged review, and stores no
+decision or progress. All 1595 regression tests, 58 focused checks, eleven source
+gates, fresh installed workflows and sequential capacity probes pass. A fresh
+fictional walkthrough selected and revisited a publication without reading the
+whole queue; six facts remained pending and none were approved.
+
+An optional `doctor --materials` check now reports PDF-intake and PDF-output
+prerequisite presence separately before profile setup. It reads no profile,
+imports no PDF provider and executes no compiler. Missing TeX alone leaves the
+PDF-intake prerequisite available when `pypdf` is present; probe errors stay
+unknown. Default doctor is unchanged, and presence does not prove parsing or
+rendering success. All 1604 regression tests, 25 focused checks, eleven source
+gates, base and full fresh installed workflows, and sequential capacity probes
+pass. A fresh four-call walkthrough confirms the missing-TeX guidance without
+opening a document or creating a profile.
+
+Developer-resume navigation is implemented: README and the live handoff link
+directly to current verification and next actions. Completed older evidence is
+preserved verbatim in a clearly historical archive, with exact-byte checks and
+independent navigation review. All current feature contracts and unresolved
+limits remain in the single live handoff; application code and feature scope
+are unchanged by this documentation increment.
+
+### Original delivered milestone
 
 **Status: Implemented and locally verified** (ADR 0007, September 18, 2026).
 The milestone is committed in `3fc3251`; see SESSION_HANDOFF.md for subsequent
@@ -81,7 +230,7 @@ separately from elapsed agent time; a long run alone is not success.
 | Increment | Status | Required outcome |
 |---|---|---|
 | Durable batch preparation for saved jobs | Implemented | CLI, schema 005 checkpoints, fenced leases, shared evidence, isolated blockers, replay/recovery and real-PDF synthetic gate pass; 490-test full gate and fresh installed batch pilot pass |
-| Multi-source watchlist discovery | Implemented for configured boards | Greenhouse, Ashby, Lever/global and EU; Netflix published-sitemap sampling plus advancing saved-search windows pass the 659-test checkpoint, installed gate and nine-PDF/restore gate. Immutable capture/replay, title filtering, source limits/failures and unsupported-employer gaps are explicit. Full market coverage, broader provider cursors and independent source monitoring remain unfinished |
+| Multi-source watchlist discovery | Implemented for configured boards | Greenhouse, Ashby, Lever/global and EU, and Workable; Netflix published-sitemap sampling plus advancing saved-search windows. The combined 1326-test checkpoint, fresh installed gates, two-PDF Workable gate and existing nine-PDF/restore traversal gate pass. Immutable capture/replay, title filtering, source limits/failures and unsupported-employer gaps are explicit. Full market coverage, broader provider cursors and independent source monitoring remain unfinished |
 | Discovery-to-draft workflow | Implemented | Saved source/evidence scope, durable source checkpoints, applied/excluded/unchanged selection, resumed child batch and combined review; 539-test checkpoint and fresh installed configured-search gate pass, with sixteen real PDFs and encrypted restoration |
 | Daily trigger over the same workflow | Implemented locally | Durable occurrences, timezone policy, fenced recovery, bounded catch-up, pause/resume and semantic notification acknowledgment; 659-test checkpoint and fresh installed eleven-PDF/encrypted-restore daily gate pass. External wake-up setup and personal schedule selection remain separate |
 | Preparation preferences and repeated-blocker fairness | Implemented locally | V2 literal title/location filters and stable ordering reach unattempted jobs before repeated blockers; original v1 scope/history compatibility retained. The 693-test checkpoint, fresh install and two-PDF/restore gate pass |
@@ -117,7 +266,7 @@ facts and provenance without placing private data in the repository.
 | `NeedInfo`, `Contradiction`, and claim-packet resolution | Implemented | Missing/conflicting/stale/sensitive cases fail closed |
 | SQLite schema and migration mechanism | Implemented | Atomic fresh/concurrent init, consistent validation snapshots, exact-target race refusal, closed migration execution policy, isolated trusted schema inventories, future refusal, checksum validation and existing-only no-migration writes pass locally; 839 tests and fresh installed pilot pass, hosted verification remains pending |
 | Repository/service boundaries for validated mutation | In progress | Profile, retirement, job, material, and application mutations use validated services with audited idempotency; broader editing and lifecycle services remain |
-| Resume import, extraction proposal, and human review | Implemented for UTF-8 pilot | Exact line extraction and hash-bound selected onboarding retain source spans; explicit name/contact vocabulary 2 retains vocabulary 1 replay. Pending records require per-item audited approval. Retirement/replacement resolves selected corrections without rewriting history. PDF/DOCX input and broader semantic conflict assistance remain planned |
+| Resume import, extraction proposal, and human review | Implemented for text/PDF/static-LaTeX | Every nonblank extracted line is accounted for; unknown/blocked content and document gaps remain explicit. Policy 3 permits complete fact retention while policy 2 and extractor 1 preserve recorded imports and legacy selections. Original PDF/TeX and extracted-text hashes bind selection; pending claims still require per-item approval. Bounded review pages account for all pending facts and preserve continuation after decisions, with unchanged default review. A chosen pending inventory fact can open directly with exact evidence/token and global count after the same complete-queue validation. Extractor 3 preserves explicit research context and a separate Research material section; explicit extractor 4 adds four neutral section boundaries without changing earlier versions. Read-only topic inventory supports interview resumption without approval or completeness claims. Explicit text/stdin statement intake preserves typed-answer origin with separate approval and unchanged resume defaults. Separately chosen disjoint publication groups preserve exact evidence and qualifiers in one full-proposal manifest without storage or approval. The 1595-test suite and fresh installed onboarding/lifecycle gates pass. OCR, DOCX, arbitrary TeX expansion, durable original-document provenance and broader semantic conflict assistance remain planned |
 | Content-free diagnostic logging | Implemented | Opt-in fixed-schema JSONL excludes caller content; failure, interruption, ambiguous-commit recovery, and broken-sink tests pass; no file logs or telemetry |
 | Backup, export, deletion, and retention | Implemented for bounded pilot; broader lifecycle planned | Encrypted complete-database backup/restore includes job/material/application state. Fixed-schema support export and confirmed whole-portable-home deletion pass the CLI lifecycle gate. External source files/exports/backups remain caller-owned. Full filesystem backup, per-record deletion and automatic retention remain planned |
 | Installed-package verification | Implemented locally | Source/wheel install, bundled migrations 001–007, both optional extras, full pilot and batch/search/daily/window gates pass in a fresh offline environment; latest run used local Python 3.12.14 |
@@ -159,8 +308,10 @@ extraction, and the complete workflow runs on synthetic fixtures.
 
 **Status: In progress**
 
-- official Greenhouse, Lever/global and EU, and Ashby adapters plus CLI capture
+- official Greenhouse, Lever/global and EU, Ashby and Workable adapters plus CLI capture
   are implemented and locally verified; see [JOB_DISCOVERY.md](JOB_DISCOVERY.md);
+- bounded role/location planning and Codex-assisted source finding are implemented
+  and locally verified without profile setup; they establish no market-wide coverage;
 - the public major-tech catalog has feed routes for Anthropic/OpenAI, a bounded
   Netflix sitemap route, and explicit manual gaps for Google/Apple/Amazon/Meta;
   further company connectors,

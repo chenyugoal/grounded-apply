@@ -231,7 +231,7 @@ def check_search(command: list[str], workspace: Path, *, source_path: Path | Non
     source.write_text(RESUME, encoding="utf-8")
     extracted = cli("profile", "extract", "--source-file", str(source))
     cli("profile", "init")
-    imported = cli("profile", "onboard", "--source-file", str(source),
+    imported = cli("profile", "onboard", "--extractor-version", "2", "--source-file", str(source),
         "--source-sha256", extracted["source_sha256"], "--select", "0,1,2,3,4,6,7",
         "--idempotency-key", "fictional-search-profile")
     for item in cli("profile", "review")["items"]:

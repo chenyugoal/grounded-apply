@@ -42,6 +42,107 @@ def run(
     return result.stdout
 
 
+def check_materials_preflight(
+    command: Path, executable: Path, workspace: Path, environment: dict[str, str],
+) -> None:
+    """Exercise installed presence checks before creating any profile state."""
+    observed = subprocess.run(
+        [str(command), "doctor", "--materials", "--json"], cwd=workspace,
+        env=environment, text=True, capture_output=True, timeout=120, check=False,
+    )
+    if observed.returncode not in (0, 2) or observed.stderr:
+        raise RuntimeError("Installed materials preflight failed its output contract")
+    result = json.loads(observed.stdout)
+    data = result["data"]
+    dependencies = data["dependencies"]
+    if set(dependencies) != {"pypdf", "pdflatex"} or any(
+        state not in {"present", "missing", "unknown"} for state in dependencies.values()
+    ):
+        raise RuntimeError("Installed materials preflight returned invalid states")
+    combined = (
+        "missing" if "missing" in dependencies.values()
+        else "unknown" if "unknown" in dependencies.values() else "present"
+    )
+    expected = {
+        "schema_version": 1, "check_method": "dependency_presence@1",
+        "dependencies": dependencies,
+        "pdf_intake": {"prerequisites": ["pypdf"], "status": dependencies["pypdf"]},
+        "pdf_materials": {"prerequisites": ["pypdf", "pdflatex"], "status": combined},
+        "functional_tests_run": False, "profile_read": False, "read_only": True,
+    }
+    present = combined == "present"
+    if data != expected or result["command"] != "doctor" or result["ok"] is not present:
+        raise RuntimeError("Installed materials preflight changed its presence-only contract")
+    if observed.returncode != (0 if present else 2):
+        raise RuntimeError("Installed materials preflight exit disagreed with presence")
+    if present and result["error"] is not None:
+        raise RuntimeError("Installed successful preflight returned an error")
+    if not present and result["error"]["type"] != "MaterialsPrerequisitesUnavailable":
+        raise RuntimeError("Installed missing prerequisites lost their fixed error")
+    if (workspace / "profile").exists():
+        raise RuntimeError("Installed materials preflight created runtime files")
+    controlled = r'''
+import builtins, io, json, sys
+from contextlib import ExitStack, redirect_stdout, redirect_stderr
+from pathlib import Path
+from unittest.mock import patch
+import grounded_apply.cli as cli
+attempts = []
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == 'pypdf' or name.startswith('pypdf.'):
+        attempts.append('provider_import')
+        raise AssertionError('fictional-private-provider-import')
+    return original_import(name, *args, **kwargs)
+def forbidden(*args, **kwargs):
+    attempts.append('runtime')
+    raise AssertionError('fictional-private-runtime')
+def audit(event, args):
+    if event.startswith(('subprocess.', 'socket.', 'os.spawn', 'os.exec')) or event == 'os.system':
+        attempts.append('process_or_network')
+        raise AssertionError('fictional-private-external-action')
+sys.addaudithook(audit)
+for pdf, tex in (('present','present'), ('missing','present'), ('present','missing'),
+                 ('missing','missing'), ('unknown','present'), ('present','unknown'),
+                 ('unknown','unknown'), ('missing','unknown')):
+    def probe(state, value):
+        if state == 'unknown':
+            raise RuntimeError('fictional-private-probe-detail')
+        return value if state == 'present' else None
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(builtins, '__import__', guarded_import))
+        stack.enter_context(patch.object(cli, 'resolve_runtime_paths', forbidden))
+        finder = stack.enter_context(patch('importlib.util.find_spec', side_effect=lambda name: probe(pdf, object())))
+        locator = stack.enter_context(patch('shutil.which', side_effect=lambda name: probe(tex, '/fictional-private/bin/pdflatex')))
+        stack.enter_context(redirect_stdout(stdout))
+        stack.enter_context(redirect_stderr(stderr))
+        code = cli.main(['--log-events', 'doctor', '--materials', '--json'])
+    finder.assert_called_once_with('pypdf')
+    locator.assert_called_once_with('pdflatex')
+    result = json.loads(stdout.getvalue())
+    combined = 'missing' if 'missing' in (pdf,tex) else 'unknown' if 'unknown' in (pdf,tex) else 'present'
+    assert result['data'] == {
+        'schema_version':1, 'check_method':'dependency_presence@1',
+        'dependencies':{'pypdf':pdf, 'pdflatex':tex},
+        'pdf_intake':{'prerequisites':['pypdf'], 'status':pdf},
+        'pdf_materials':{'prerequisites':['pypdf','pdflatex'], 'status':combined},
+        'functional_tests_run':False, 'profile_read':False, 'read_only':True,
+    }
+    assert code == (0 if combined == 'present' else 2)
+    assert result['ok'] is (combined == 'present')
+    assert result['error'] is None if code == 0 else result['error']['type'] == 'MaterialsPrerequisitesUnavailable'
+    assert 'fictional-private' not in stdout.getvalue() + stderr.getvalue()
+    events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+    assert len(events) == 2 and all(event['command'] == 'doctor' for event in events)
+    assert not attempts and 'pypdf' not in sys.modules
+    assert not (Path.cwd() / 'profile').exists()
+print('PASS — installed materials presence checks; no profile, provider import or process/network action')
+'''
+    print(run([str(executable), "-I", "-c", controlled],
+              cwd=workspace, environ=environment).strip(), flush=True)
+
+
 def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | None = None) -> None:
     metadata = tomllib.loads((REPOSITORY / "pyproject.toml").read_text())
     version = metadata["project"]["version"]
@@ -83,12 +184,16 @@ def check(*, backup_wheelhouse: Path | None = None, pilot_wheelhouse: Path | Non
                 "grounded_apply/services/material_approval_history.py",
                 "grounded_apply/services/questionnaire_history.py",
                 "grounded_apply/services/discovery.py",
+                "grounded_apply/services/discovery_sources.py",
+                "grounded_apply/services/profile_interview.py",
                 "grounded_apply/services/batches.py",
                 "grounded_apply/services/searches.py",
                 "grounded_apply/services/search_scope_history.py",
                 "grounded_apply/services/search_run_history.py",
                 "grounded_apply/services/review_exports.py",
                 "grounded_apply/repositories/review_files.py",
+                "grounded_apply/repositories/resume_documents.py",
+                "grounded_apply/repositories/_resume_pdf_worker.py",
                 "grounded_apply/repositories/material_payloads.py",
                 "grounded_apply/repositories/snapshot_capture.py",
                 "grounded_apply/services/search_policy.py",
@@ -173,8 +278,9 @@ print('PASS — installed guarded schema-4–7 capture without source writes')
         if run([str(command), "--version"], cwd=workspace, environ=environment).strip() != f"gapply {version}":
             raise RuntimeError("Installed CLI version disagrees with package metadata")
         for args in (
-            [], ["profile", "import"], ["profile", "review"], ["profile", "decide"],
-            ["backup"], ["restore"], ["brief"], ["jobs", "discover"], ["batches", "prepare"],
+            [], ["doctor"], ["profile", "import"], ["profile", "review"], ["profile", "decide"],
+            ["backup"], ["restore"], ["brief"], ["jobs", "discover"], ["jobs", "sources"],
+            ["profile", "extract"], ["profile", "onboard"], ["profile", "interview"], ["batches", "prepare"],
             ["searches", "configure"], ["searches", "run"], ["searches", "export"],
             ["schedules", "configure"], ["schedules", "tick"],
         ):
@@ -195,6 +301,7 @@ print('PASS — installed guarded schema-4–7 capture without source writes')
             raise RuntimeError("Fresh package runtime was unexpectedly initialized")
         if (workspace / "profile").exists():
             raise RuntimeError("Doctor created runtime files")
+        check_materials_preflight(command, executable, workspace, environment)
         first_init = cli("profile", "init")
         if cli("profile", "init")["schema_version"] != first_init["schema_version"]:
             raise RuntimeError("Initialization was not idempotent")
@@ -317,6 +424,8 @@ print('PASS — installed read-only snapshot service reads and mutation refusal'
             if cli("jobs", "show", "--job-id", discovered["job_id"])["capture_method"] != "public_ats_feed":
                 raise RuntimeError("Restored discovery capture lost source provenance")
         if pilot_wheelhouse is not None:
+            from check_onboarding import check_onboarding
+            from check_workable import check_workable
             from check_pilot import check_pilot
             from check_batch import check_batch
             from check_search import check_search
@@ -327,6 +436,12 @@ print('PASS — installed read-only snapshot service reads and mutation refusal'
             from check_storage_capacity import check_storage_capacity
             pilot = workspace / "pilot"
             pilot.mkdir(mode=0o700)
+            onboarding_workspace = workspace / "onboarding-pilot"
+            onboarding_workspace.mkdir(mode=0o700)
+            check_onboarding([str(command)], onboarding_workspace, include_materials=True, python=str(executable))
+            workable_workspace = workspace / "workable-pilot"
+            workable_workspace.mkdir(mode=0o700)
+            check_workable([str(command)], workable_workspace)
             check_pilot([str(command)], pilot, python=str(executable))
             batch_workspace = workspace / "batch-pilot"
             batch_workspace.mkdir(mode=0o700)

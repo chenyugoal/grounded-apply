@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import stat
 import sys
 import unicodedata
@@ -28,6 +29,7 @@ from grounded_apply.config import (
 )
 from grounded_apply.diagnostics import CommandDiagnostics
 from grounded_apply.json_support import dumps
+from grounded_apply.repositories.resume_documents import ResumeDocument
 
 
 Command = Callable[[argparse.Namespace], int]
@@ -197,7 +199,58 @@ def _read_schema_version(paths: RuntimePaths) -> int | None:
     return None if version == 0 else version
 
 
+def _command_materials_preflight(args: argparse.Namespace) -> int:
+    import importlib.util
+    import shutil
+
+    try:
+        pypdf = "present" if importlib.util.find_spec("pypdf") is not None else "missing"
+    except Exception:
+        pypdf = "unknown"
+    try:
+        pdflatex = "present" if shutil.which("pdflatex") is not None else "missing"
+    except Exception:
+        pdflatex = "unknown"
+    states = (pypdf, pdflatex)
+    materials = "missing" if "missing" in states else "unknown" if "unknown" in states else "present"
+    data = {
+        "schema_version": 1,
+        "check_method": "dependency_presence@1",
+        "dependencies": {"pypdf": pypdf, "pdflatex": pdflatex},
+        "pdf_intake": {"prerequisites": ["pypdf"], "status": pypdf},
+        "pdf_materials": {"prerequisites": ["pypdf", "pdflatex"], "status": materials},
+        "functional_tests_run": False,
+        "profile_read": False,
+        "read_only": True,
+    }
+    ok = materials == "present"
+    message = "\n".join((
+        "Optional PDF prerequisites (presence only):",
+        f"pypdf: {pypdf}",
+        f"pdflatex: {pdflatex}",
+        f"PDF intake prerequisites: {pypdf}",
+        f"PDF material output prerequisites: {materials}",
+    ))
+    warnings = [
+        "Presence does not verify PDF parsing, rendering, fonts, TeX packages or binary compatibility.",
+        "This checks optional PDF prerequisites only; base CLI health is not assessed.",
+    ]
+    error = None
+    if not ok:
+        guidance = "Optional PDF prerequisites are missing or unknown. See docs/QUICKSTART.md#start for setup guidance."
+        warnings.append(guidance)
+        error = {"type": "MaterialsPrerequisitesUnavailable", "message": guidance}
+    try:
+        _emit(args, command="doctor", data=data, message=message, ok=ok,
+              warnings=warnings, error=error)
+    except Exception:
+        raise CliInputError("Materials prerequisite output failed; no profile state was changed") from None
+    return 0 if ok else 2
+
+
 def _command_doctor(args: argparse.Namespace) -> int:
+    if getattr(args, "materials", False):
+        return _command_materials_preflight(args)
     paths = resolve_runtime_paths()
     runtime_safe = False
     try:
@@ -701,11 +754,24 @@ def _command_profile_import(args: argparse.Namespace) -> int:
         raise CliInputError("Only one profile import input may read from stdin")
     idempotency_key = _validated_idempotency_key(args.idempotency_key)
 
-    source_text = _read_utf8_input(
-        args.source_file,
-        label="source input",
-        max_bytes=PROFILE_IMPORT_MAX_SOURCE_BYTES,
-    )
+    if args.source_kind == "user-statement" and (
+        args.source_format != "text" or args.document_sha256 is not None or args.allow_partial
+    ):
+        raise CliInputError(
+            "User statements require exact UTF-8 text; document extraction options do not apply"
+        )
+    if args.source_format == "text":
+        source_text = _read_utf8_input(
+            args.source_file, label="source input", max_bytes=PROFILE_IMPORT_MAX_SOURCE_BYTES,
+        )
+        if args.document_sha256 is not None:
+            from hashlib import sha256
+            if sha256(source_text.encode("utf-8")).hexdigest() != args.document_sha256:
+                raise CliInputError("Resume document changed since extraction; extract and review again")
+    else:
+        document = _read_resume_input(args)
+        _validate_resume_document_selection(args, document)
+        source_text = document.text
     proposal_text = _read_utf8_input(
         args.proposals_file,
         label="proposal input",
@@ -716,12 +782,22 @@ def _command_profile_import(args: argparse.Namespace) -> int:
         proposal_text=proposal_text,
         idempotency_key=idempotency_key,
     )
+    if args.source_kind == "user-statement":
+        from dataclasses import replace
+        from grounded_apply.domain import SourceType
+        request = replace(request, source_type=SourceType.USER_STATEMENT)
+    if args.retain_all_facts:
+        from dataclasses import replace
+        from grounded_apply.services.profile_import_validation import PROFILE_IMPORT_COMPLETE_FACTS_POLICY_VERSION
+        request = replace(request, content_policy_version=PROFILE_IMPORT_COMPLETE_FACTS_POLICY_VERSION)
     preview = ProfileService.preview_import_proposal(request)
     if args.dry_run:
         data = to_jsonable(preview)
         assert isinstance(data, dict)
         data["dry_run"] = True
         data["storage_checked"] = False
+        if args.source_kind == "user-statement":
+            data["source_type"] = "user_statement"
         _emit(
             args,
             command="profile.import",
@@ -763,6 +839,7 @@ def _command_profile_import(args: argparse.Namespace) -> int:
             "source_ref": result.source_ref,
             "source_sha256": result.source_sha256,
             "workflow_run_id": result.workflow_run_id,
+            **({"source_type": "user_statement"} if args.source_kind == "user-statement" else {}),
         },
         message=(
             (
@@ -784,7 +861,8 @@ def _command_profile_import(args: argparse.Namespace) -> int:
 def _terminal_safe(value: str) -> str:
     result: list[str] = []
     for character in value:
-        if unicodedata.category(character).startswith("C"):
+        category = unicodedata.category(character)
+        if category.startswith("C") or category in {"Zl", "Zp"}:
             codepoint = ord(character)
             escape = f"\\u{codepoint:04x}" if codepoint <= 0xFFFF else f"\\U{codepoint:08x}"
             result.append(escape)
@@ -830,26 +908,113 @@ def _review_message(items: Sequence[Any]) -> str:
     return "\n".join(lines)
 
 
+def _command_profile_review_selected(args: argparse.Namespace, claim_id: str) -> int:
+    from grounded_apply.domain import to_jsonable
+    from grounded_apply.services import ProfileService
+
+    try:
+        paths = resolve_runtime_paths()
+        require_runtime_outside_repository(paths)
+        with _open_initialized_profile_repository(paths, read_only=True) as repository:
+            selection = ProfileService(repository).get_review_item(claim_id)
+            items = (selection.item,)
+            data = {"items": to_jsonable(items), "pending_count": selection.pending_count,
+                    "read_only": True}
+            message = "\n".join([
+                f"Showing one selected fact of {selection.pending_count} pending profile claim(s) (read-only).",
+                *_review_message(items).splitlines()[1:],
+            ])
+    except Exception:
+        raise CliInputError(
+            "Selected pending fact could not be reviewed. Refresh profile inventory or "
+            "the pending review queue; no state was changed"
+        ) from None
+    try:
+        _emit(args, command="profile.review", data=data, message=message,
+              warnings=(_UNTRUSTED_REVIEW_WARNING, _REVIEW_WARNING))
+    except Exception:
+        raise CliInputError("Selected profile review output failed; no state was changed") from None
+    return 0
+
+
 def _command_profile_review(args: argparse.Namespace) -> int:
     from grounded_apply.domain import to_jsonable
     from grounded_apply.services import ProfileService
+    from grounded_apply.services.profile import (
+        validate_profile_review_page_request, validate_profile_review_selection_request,
+    )
+
+    if args.claim_id is not None or args.claim_id_json is not None:
+        if args.limit is not None or args.after is not None or args.after_json is not None:
+            raise CliInputError("Choose a single pending fact or a review page, not both")
+        claim_id = args.claim_id
+        if args.claim_id_json is not None:
+            try:
+                claim_id = json.loads(args.claim_id_json)
+            except (ValueError, UnicodeError, RecursionError):
+                raise CliInputError("Review selection JSON must contain one nonblank string") from None
+        try:
+            validate_profile_review_selection_request(claim_id=claim_id)
+        except Exception:
+            raise CliInputError("Review selection requires one nonblank UTF-8 claim ID") from None
+        return _command_profile_review_selected(args, claim_id)
+
+    if (args.after is not None or args.after_json is not None) and args.limit is None:
+        raise CliInputError("Pass --limit with a continuation anchor to continue a profile review page")
+    anchor = args.after
+    if args.after_json is not None:
+        try:
+            anchor = json.loads(args.after_json)
+        except (ValueError, UnicodeError, RecursionError):
+            raise CliInputError("Review continuation JSON must contain one nonblank string") from None
+        if type(anchor) is not str:
+            raise CliInputError("Review continuation JSON must contain one nonblank string")
+    if args.limit is not None:
+        validate_profile_review_page_request(limit=args.limit, after_claim_id=anchor)
 
     paths = resolve_runtime_paths()
     require_runtime_outside_repository(paths)
     repository = _open_initialized_profile_repository(paths, read_only=True)
     try:
-        items = ProfileService(repository).list_review_items()
+        service = ProfileService(repository)
+        if args.limit is None:
+            items = service.list_review_items()
+            data = {"items": to_jsonable(items), "pending_count": len(items), "read_only": True}
+            message = _review_message(items)
+        else:
+            page = service.list_review_page(limit=args.limit, after_claim_id=anchor)
+            data = {"items": to_jsonable(page.items), "pending_count": page.pending_count,
+                    "read_only": True, "page": {
+                        "limit": page.limit, "returned_count": page.returned_count,
+                        "pending_before_count": page.pending_before_count,
+                        "pending_after_count": page.pending_after_count,
+                        "next_after": page.next_after,
+                    }}
+            lines = [f"Showing {page.returned_count} of {page.pending_count} pending profile claim(s) (read-only).",
+                     f"{page.pending_before_count} earlier pending; {page.pending_after_count} later pending."]
+            if page.items:
+                lines.extend(_review_message(page.items).splitlines()[1:])
+            else:
+                lines.append("No records were changed; this CLI command does not record decisions.")
+            if page.next_after is not None:
+                if _terminal_safe(page.next_after) == page.next_after:
+                    lines.append(f"Continue with gapply profile review --limit {page.limit} --after={shlex.quote(page.next_after)}")
+                else:
+                    encoded_anchor = json.dumps(page.next_after, ensure_ascii=True)
+                    lines.append(f"Continue with gapply profile review --limit {page.limit} --after-json={shlex.quote(encoded_anchor)}")
+            elif page.pending_before_count:
+                lines.append(f"End of this pass; {page.pending_before_count} earlier fact(s) still await review. "
+                             "Restart without --after or --after-json to revisit them.")
+            elif page.pending_count == 0:
+                lines.append("No profile claims are awaiting review.")
+            message = "\n".join(lines)
     finally:
         repository.close()
     _emit(
         args,
         command="profile.review",
-        data={
-            "items": to_jsonable(items),
-            "pending_count": len(items),
-            "read_only": True,
-        },
-        message=_review_message(items),
+        data=data,
+        message=message,
         warnings=(_UNTRUSTED_REVIEW_WARNING, _REVIEW_WARNING),
     )
     return 0
@@ -1484,7 +1649,7 @@ def _command_batches(args: argparse.Namespace) -> int:
                                 "external_action_taken": False, "application_ready": False}
                     data = {**data, "status": "failed", "stop_reason": "shared_failure",
                             "recovery": _BATCH_RECOVERY}
-                    failure = ("The PDF environment is unavailable; run doctor and check the PDF prerequisites. "
+                    failure = ("The PDF environment is unavailable; run doctor --materials and check the PDF prerequisites. "
                                if isinstance(error, MaterialDependencyError)
                                else "Shared batch preparation failed; saved progress must be checked before reuse. ")
                     execution_error = {"type": "BatchExecutionError", "message": failure + _BATCH_RECOVERY}
@@ -1577,14 +1742,82 @@ def _command_applications(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_jobs_plan_search(args: argparse.Namespace) -> int:
+    from grounded_apply.domain import to_jsonable
+    from grounded_apply.services.discovery_plan import build_public_search_plan
+
+    plan = build_public_search_plan(roles=tuple(args.role), locations=tuple(args.location))
+    lines = [
+        f"Public search plan: {plan.query_count} queries; review up to {plan.max_distinct_links} distinct result links.",
+        "Result domains: " + ", ".join(plan.searches[0].domains),
+        *(f"{row.position}. Terms: {_terminal_safe(json.dumps(row.terms, ensure_ascii=False))}" for row in plan.searches),
+        "No sites checked, profile read or state saved. Terms are data, not search-engine syntax.",
+        "Use available public browsing to inspect actual links, then jobs sources and jobs discover --dry-run.",
+        "Search results can be incomplete or stale; this plan establishes no job-market coverage.",
+    ]
+    try:
+        _emit(args, command="jobs.plan-search", data=to_jsonable(plan), message="\n".join(lines))
+    except Exception:
+        raise ValueError("Search plan output failed; no state was changed") from None
+    return 0
+
+
+def _command_jobs_sources(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+    from grounded_apply.services.discovery_sources import (
+        build_source_manifest, build_source_manifest_keep_valid,
+    )
+
+    urls = args.url or []
+    if args.urls_file is not None:
+        source = _read_utf8_input(args.urls_file, label="source links", max_bytes=1024 * 1024)
+        urls = [line.strip() for line in source.splitlines() if line.strip()]
+    partial = build_source_manifest_keep_valid(urls) if args.keep_valid else None
+    report = partial.accepted if partial is not None else build_source_manifest(urls)
+    retained_sources = report.sources if report is not None else ()
+    data: dict[str, object] = {"manifest": report.manifest() if report is not None else None,
+            "inputs": [asdict(item) for item in report.inputs] if report is not None else [],
+            "automatic_source_count": sum(source.provider != "manual" for source in retained_sources),
+            "manual_source_count": sum(source.provider == "manual" for source in retained_sources),
+            "network_requests": 0, "storage_changed": False, "live_boards_verified": False,
+            "scope": "entire_boards"}
+    lines = [f"{source.id}: {'manual gap' if source.provider == 'manual' else 'automatic board'}"
+             for source in retained_sources]
+    incomplete = partial is not None and bool(partial.rejected_inputs)
+    if partial is not None:
+        data.update({"setup_status": partial.setup_status, "input_count": partial.input_count,
+                     "accepted_input_count": partial.accepted_input_count,
+                     "rejected_inputs": [asdict(item) for item in partial.rejected_inputs]})
+        lines.insert(0, f"Source setup {partial.setup_status}: {partial.accepted_input_count} of {partial.input_count} links accepted.")
+        lines.extend(f"Input {item.position}: {item.error}" for item in partial.rejected_inputs)
+        if report is None:
+            lines.append("No usable source manifest; correct or replace the rejected links before discovery.")
+    try:
+        _emit(args, command="jobs.sources", data=data, ok=not incomplete,
+              error={"type": "IncompleteSourceSetup", "message": "Some source links were rejected; review their positions and reasons."} if incomplete else None,
+              message="\n".join(lines) + "\nSource setup only; no sites checked or profile saved. "
+              "Recognized links select entire boards; original URL filters do not carry over.")
+    except Exception:
+        raise ValueError("Source setup output failed; no state was changed") from None
+    return 2 if incomplete else 0
+
+
 def _command_jobs_discover(args: argparse.Namespace) -> int:
     from dataclasses import asdict
     from grounded_apply.repositories.discovery_http import PublicJobHTTPTransport
     from grounded_apply.services.discovery import (
-        DiscoveryService, builtin_sources, validate_source_manifest,
+        DiscoveryService, builtin_sources, validate_location_discovery_request, validate_source_manifest,
     )
     from grounded_apply.services.jobs import DiscoveryCapacityError, DiscoveryRecordError, JobService
 
+    location_filters = None
+    if args.location_contains is not None or args.missing_location is not None:
+        try:
+            location_filters = validate_location_discovery_request(
+                title_contains=tuple(args.title_contains), location_contains=tuple(args.location_contains or ()),
+                missing_location=args.missing_location or "include", limit_per_source=args.limit_per_source)
+        except Exception:
+            raise ValueError("Location-filtered discovery requires bounded title/location terms, an include or exclude missing-location policy, and a selected-job limit from one to one thousand") from None
     if args.preset:
         sources = builtin_sources(args.preset)
     else:
@@ -1597,10 +1830,21 @@ def _command_jobs_discover(args: argparse.Namespace) -> int:
         paths = resolve_runtime_paths()
         with _open_initialized_profile_repository(paths, read_only=True):
             pass
-    report = DiscoveryService(PublicJobHTTPTransport()).discover(
-        sources, title_contains=tuple(args.title_contains), limit_per_source=args.limit_per_source)
-    data = asdict(report)
-    data.update({"schema_version": 1, "dry_run": args.dry_run,
+    service = DiscoveryService(PublicJobHTTPTransport())
+    if location_filters is None:
+        report = service.discover(
+            sources, title_contains=tuple(args.title_contains), limit_per_source=args.limit_per_source)
+        data = asdict(report)
+    else:
+        try:
+            report = service.discover_with_locations(
+                sources, title_contains=tuple(args.title_contains), limit_per_source=args.limit_per_source,
+                location_contains=location_filters.location_contains,
+                missing_location=location_filters.missing_location)
+            data = asdict(report)
+        except Exception:
+            raise ValueError("Location-filtered discovery failed; no snapshots were saved") from None
+    data.update({"schema_version": 1 if location_filters is None else 2, "dry_run": args.dry_run,
                  "storage_checked": paths is not None, "external_submission_taken": False,
                  "content_trust": "untrusted", "captures": [], "capture_blockers": []})
     storage_error = None
@@ -1642,14 +1886,26 @@ def _command_jobs_discover(args: argparse.Namespace) -> int:
     if storage_error or data["capture_blockers"]:
         warnings.append("Some snapshots were not captured. Completed captures remain; repeating discovery reuses unchanged versions.")
     lines = ["Discovery preview (network reads; no local writes)." if args.dry_run else "Discovery capture results."]
+    if location_filters is not None:
+        lines.append("Published location text: " + _terminal_safe(json.dumps(location_filters.location_contains, ensure_ascii=False))
+                     + f"; missing locations: {location_filters.missing_location}.")
+        lines.append("Title and location filters apply before the selected-job limit. Text matches do not establish geographic eligibility.")
     for source in report.sources:
         lines.append(f"{_terminal_safe(source.source_id)}: {source.status}; {source.count} selected")
         if source.error is not None:
             lines.append(f"  Reason: {source.error}")
         if source.careers_url:
             lines.append(f"  Careers: {_terminal_safe(source.careers_url)}")
+    if location_filters is not None:
+        for selection in report.selections:
+            lines.append(f"{_terminal_safe(selection.source_id)} selection: {selection.valid_count} valid; "
+                f"{selection.title_filtered_count} title exclusions; {selection.location_filtered_count} location exclusions; "
+                f"{selection.unknown_excluded_count} unknown locations excluded; {selection.limit_deferred_count} deferred by limit; "
+                f"{selection.selected_unknown_count} selected with unknown location.")
     for job in report.jobs:
         lines.append(f"{_terminal_safe(job.title)} — {_terminal_safe(job.source_url)}")
+        if location_filters is not None:
+            lines.append("  Published location: " + (_terminal_safe(job.location) if job.location is not None else "unknown (included by policy)"))
     if paths is not None:
         lines.append(f"{len(data['captures'])} captured/reused; {data['uncaptured_count']} not captured.")
     # A nonzero exit preserves the report; partial success is never a clean sync.
@@ -1705,16 +1961,68 @@ def _command_jobs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_profile_interview(args: argparse.Namespace) -> int:
+    from grounded_apply.services.profile_interview import build_interview
+    data = build_interview(topic=args.topic, depth=args.depth, after=args.after, limit=args.limit)
+    questions = data["questions"]
+    lines = [f"{question['prompt']}\n  {question['why']}" for question in questions]
+    lines.extend(data["guidance"])
+    if data["next_cursor"] is not None:
+        lines.append(f"Continue this round with --after {data['next_cursor']}.")
+    _emit(args, command="profile.interview", data=data, message="\n\n".join(lines))
+    return 0
+
+
+def _read_resume_input(args: argparse.Namespace) -> ResumeDocument:
+    from grounded_apply.repositories.resume_documents import (
+        MAX_DOCUMENT_BYTES, read_resume_document, resume_document_from_bytes,
+    )
+    if args.source_file != "-":
+        return read_resume_document(args.source_file, format=args.source_format)
+    binary = getattr(sys.stdin, "buffer", None)
+    if binary is not None:
+        raw = binary.read(MAX_DOCUMENT_BYTES + 1)
+    else:
+        raw = sys.stdin.read(MAX_DOCUMENT_BYTES + 1).encode("utf-8")
+    return resume_document_from_bytes(raw, format=args.source_format)
+
+
+def _resume_document_metadata(document: ResumeDocument) -> dict[str, Any]:
+    from grounded_apply.domain import to_jsonable
+    return {"format": document.format, "document_sha256": document.raw_source_sha256,
+            "extracted_text_sha256": document.text_sha256, "extractor": document.extractor,
+            "warnings": list(document.warnings), "issues": to_jsonable(document.issues),
+            "incomplete": document.incomplete, "page_count": document.page_count,
+            "span_basis": "extracted_text", "original_document_provenance_stored": False}
+
+
+def _validate_resume_document_selection(args: argparse.Namespace, document: ResumeDocument) -> None:
+    if document.format != "text" and args.document_sha256 is None:
+        raise CliInputError("Pass the --document-sha256 shown by profile extract for PDF or LaTeX intake")
+    if args.document_sha256 is not None and args.document_sha256 != document.raw_source_sha256:
+        raise CliInputError("Resume document changed since extraction; extract and review again")
+    if document.incomplete and not args.allow_partial:
+        raise CliInputError("Document extraction is incomplete; review its issues or use --allow-partial for explicitly chosen partial retention")
+
+
 def _command_profile_extract(args: argparse.Namespace) -> int:
     from grounded_apply.domain import to_jsonable
     from grounded_apply.services.resume_extraction import extract_resume
-    source = _read_utf8_input(args.source_file, label="resume input", max_bytes=16 * 1024 * 1024)
-    result = extract_resume(source)
+    document = _read_resume_input(args)
+    result = extract_resume(document.text, version=args.extractor_version)
     data = to_jsonable(result)
+    data["document"] = _resume_document_metadata(document)
+    attention = [line for line in result.inventory if line.status in {"unclassified", "blocked"}]
     _emit(args, command="profile.extract", data=data,
-          message=f"Source SHA-256: {result.source_sha256}\n" + "\n".join(
+          message=f"Source SHA-256: {result.source_sha256}\nDocument SHA-256: {document.raw_source_sha256}\nExtractor version: {result.extractor_version}\n" + "\n".join(
               f"{i}: {p.claim_type}: {_terminal_safe(p.canonical_text)}" for i, p in enumerate(result.proposals)
-          ) + f"\n{result.skipped_lines} lines left unselected. Select proposal indexes with profile onboard; every fact still needs review.")
+          ) + "\n" + "\n".join(
+              f"Line {line.line_number}: {line.status}: {_terminal_safe(line.text or line.reason)}"
+              for line in attention
+          ) + f"\n{result.skipped_lines} lines need attention. Every nonblank source line is in the inventory. "
+          "Use profile onboard --select all to retain every proposed fact, or select indexes. "
+          "Pass the displayed --extractor-version and --document-sha256; every fact still needs approval.",
+          warnings=(*document.warnings, *(f"Source lines {issue.line}–{issue.end_line}: {issue.message}" for issue in document.issues)))
     return 0
 
 
@@ -1723,14 +2031,23 @@ def _command_profile_onboard(args: argparse.Namespace) -> int:
     from grounded_apply.services.resume_extraction import extract_resume
     paths = resolve_runtime_paths()
     require_runtime_outside_repository(paths)
-    source = _read_utf8_input(args.source_file, label="resume input", max_bytes=16 * 1024 * 1024)
-    extraction = extract_resume(source)
+    document = _read_resume_input(args)
+    source = document.text
+    _validate_resume_document_selection(args, document)
+    if args.extractor_version is None and args.select != "all":
+        raise CliInputError("Pass the --extractor-version shown by profile extract; use 1 for an existing legacy selection")
+    extraction = extract_resume(source, version=args.extractor_version or 2)
     if args.source_sha256 != extraction.source_sha256:
         raise CliInputError("Resume changed since extraction; extract and select again")
-    if not re.fullmatch(r"\d+(?:,\d+)*", args.select) or len(args.select) > 6000:
-        raise CliInputError("Select comma-separated displayed proposal indexes")
-    request = extraction.selected_request(tuple(int(i) for i in args.select.split(",")), source,
-                                          _validated_idempotency_key(args.idempotency_key))
+    retain_all = args.select == "all" or args.retain_all_facts
+    if args.select == "all":
+        indexes = tuple(range(len(extraction.proposals)))
+    else:
+        if not re.fullmatch(r"\d+(?:,\d+)*", args.select) or len(args.select) > 6000:
+            raise CliInputError("Select 'all' or comma-separated displayed proposal indexes")
+        indexes = tuple(int(i) for i in args.select.split(","))
+    request = extraction.selected_request(indexes, source,
+        _validated_idempotency_key(args.idempotency_key), retain_all_facts=retain_all)
     ProfileService.preview_import_proposal(request)
     if args.dry_run:
         data = {"proposal_count": len(request.proposals), "dry_run": True, "storage_checked": False, "review_required": True}
@@ -1739,8 +2056,132 @@ def _command_profile_onboard(args: argparse.Namespace) -> int:
             result = ProfileService(repository).create_import_proposal(request)
         data = {"claim_ids": [c.id for c in result.claims], "workflow_run_id": result.workflow_run_id,
                 "dry_run": False, "review_required": result.review_required}
+    data.update({"proposed_count": len(extraction.proposals), "selected_count": len(indexes),
+                 "unselected_proposal_count": len(extraction.proposals) - len(indexes),
+                 "lines_needing_attention": extraction.skipped_lines,
+                 "content_policy_version": request.content_policy_version,
+                 "document": _resume_document_metadata(document)})
     _emit(args, command="profile.onboard", data=data,
           message="Selected proposals validated." if args.dry_run else "Selected facts imported for review. Run gapply profile review.")
+    return 0
+
+
+def _command_profile_group_publication(args: argparse.Namespace) -> int:
+    from grounded_apply.domain import to_jsonable
+    from grounded_apply.repositories.resume_documents import ResumeDocumentError
+    from grounded_apply.services.publication_grouping import (
+        PublicationGroupingError, build_publication_group, build_publication_groups,
+        validate_publication_group_request, validate_publication_groups_request,
+    )
+
+    if len(args.indexes) > 500 or (len(args.indexes) > 1 and sum(map(len, args.indexes)) > 6000):
+        raise CliInputError("Pass at most 500 publication groups within 6000 total index characters")
+    if any(len(value) > 6000 or re.fullmatch(r"[0-9]{1,4}(?:,[0-9]{1,4})+", value) is None
+           for value in args.indexes):
+        raise CliInputError("Pass at least two consecutive displayed publication indexes, separated by commas")
+    groups = tuple(tuple(int(value) for value in group.split(",")) for group in args.indexes)
+    if len(groups) == 1:
+        validate_publication_group_request(expected_source_sha256=args.source_sha256,
+                                           extractor_version=args.extractor_version, indexes=groups[0])
+    else:
+        validate_publication_groups_request(expected_source_sha256=args.source_sha256,
+                                            extractor_version=args.extractor_version, groups=groups)
+    if re.fullmatch(r"[0-9a-f]{64}", args.document_sha256) is None:
+        raise CliInputError("Pass the original document SHA-256 shown by profile extract")
+    try:
+        document = _read_resume_input(args)
+        _validate_resume_document_selection(args, document)
+        if len(groups) == 1:
+            result = build_publication_group(document.text,
+                expected_source_sha256=args.source_sha256,
+                extractor_version=args.extractor_version, indexes=groups[0])
+        else:
+            result = build_publication_groups(document.text,
+                expected_source_sha256=args.source_sha256,
+                extractor_version=args.extractor_version, groups=groups)
+    except (PublicationGroupingError, ResumeDocumentError, CliInputError):
+        raise
+    except Exception:
+        raise CliInputError("Publication grouping failed; no state was changed") from None
+    try:
+        data = to_jsonable(result)
+        data["document"] = _resume_document_metadata(document)
+        if len(groups) == 1:
+            lines = [f"Grouped {len(result.grouped_indexes)} publication fragments into manifest proposal {result.grouped_manifest_index}."]
+        else:
+            lines = [f"Grouped {len(result.groups)} explicitly chosen publications; each group remains a separate proposal."]
+            lines.extend(f"Original indexes {','.join(map(str, group.indexes))} → manifest proposal {group.manifest_index}."
+                         for group in result.groups)
+        lines.extend([
+            f"{result.original_proposal_count} supported source proposals become {result.manifest_proposal_count} manifest proposals; all other proposals remain.",
+            f"Extractor version: {result.extractor_version}; source SHA-256: {result.source_sha256}",
+            f"Document SHA-256: {document.raw_source_sha256}",
+        ])
+        lines.extend(f"{i}: {proposal['claim_type']}: {_terminal_safe(proposal['canonical_text'])}"
+                     for i, proposal in enumerate(data["manifest"]["proposals"]))
+        lines.append("Original inventory indexes are preserved; original → manifest mapping: " + ", ".join(
+            f"{row['original_index']} → {row['manifest_index']}" for row in data["index_mapping"]))
+        lines.extend(f"Line {line.line_number}: {line.status}: {_terminal_safe(line.text or line.reason)}"
+                     for line in result.inventory if line.status != "proposed")
+        lines.extend([
+            f"{result.unclassified_count} unclassified and {result.blocked_count} blocked lines still need attention.",
+            "No profile was read, facts retained or decisions recorded. Grouping does not verify that the fragments describe one work.",
+            "Review the complete manifest and source gaps. To retain chosen facts, pass only data.manifest to profile import with --retain-all-facts; every fact still needs explicit approval.",
+        ])
+        _emit(args, command="profile.group-publication", data=data, message="\n".join(lines),
+              warnings=(_UNTRUSTED_REVIEW_WARNING, _REVIEW_WARNING, *document.warnings,
+                        *(f"Source lines {issue.line}–{issue.end_line}: {issue.message}" for issue in document.issues)))
+    except Exception:
+        raise CliInputError("Publication grouping output failed; no state was changed") from None
+    return 0
+
+
+def _command_profile_inventory(args: argparse.Namespace) -> int:
+    from grounded_apply.domain import to_jsonable
+    from grounded_apply.services.profile_inventory import (
+        ProfileInventoryService, validate_profile_inventory_request,
+    )
+
+    anchor = args.after
+    if args.after_json is not None:
+        try:
+            anchor = json.loads(args.after_json)
+        except (ValueError, UnicodeError, RecursionError):
+            raise CliInputError("Inventory continuation JSON must contain one nonblank string") from None
+        if type(anchor) is not str:
+            raise CliInputError("Inventory continuation JSON must contain one nonblank string")
+    validate_profile_inventory_request(topic=args.topic, limit=args.limit, after_claim_id=anchor)
+    with _open_initialized_profile_repository(resolve_runtime_paths(), read_only=True) as repository:
+        report = ProfileInventoryService(repository).read(
+            topic=args.topic, limit=args.limit, after_claim_id=anchor,
+        )
+    lines = [f"Retained profile inventory: {report.total_claim_count} claim(s) (read-only)."]
+    for topic in report.topics:
+        states = ", ".join(f"{state.status}/{state.approval_status}: {state.count}" for state in topic.states)
+        lines.append(f"{topic.topic}: {topic.claim_count}" + (f" ({states})" if states else ""))
+    if report.page is not None:
+        page = report.page
+        lines.append(f"Showing {page.returned_count} of {page.total_count} retained {report.selected_topic} claim(s); "
+                     f"{page.before_count} before, {page.after_count} after.")
+        for item in report.items:
+            lines.append(f"{_terminal_safe(item.id)} [{item.status}/{item.approval_status}] "
+                         f"{_terminal_safe(item.canonical_text)}")
+            lines.append(f"  Type: {_terminal_safe(item.claim_type)}; origin: {item.source_type}; "
+                         f"sensitivity: {item.sensitivity}; scope: {_terminal_safe(dumps(to_jsonable(item.scope)))}")
+        if page.next_after is not None:
+            if _terminal_safe(page.next_after) == page.next_after:
+                continuation = "--after=" + shlex.quote(page.next_after)
+            else:
+                continuation = "--after-json=" + shlex.quote(json.dumps(page.next_after, ensure_ascii=True))
+            lines.append(f"Continue with gapply profile inventory --topic {report.selected_topic} --limit {page.limit} {continuation}")
+        else:
+            lines.append("End of this topic pass. Restart without --after or --after-json to see earlier or newer records.")
+    lines.append("Counts describe retained records and recorded decisions; usability, profile completeness and interview progress are not assessed.")
+    lines.append("Viewing this inventory records no decision. Use profile review for evidence and explicit fact approval.")
+    try:
+        _emit(args, command="profile.inventory", data=to_jsonable(report), message="\n".join(lines))
+    except Exception:
+        raise ValueError("Profile inventory output failed; no state was changed") from None
     return 0
 
 
@@ -1831,6 +2272,8 @@ def build_parser() -> argparse.ArgumentParser:
     paths_parser.set_defaults(handler=_command_paths, command_name="paths")
 
     doctor_parser = commands.add_parser("doctor", help="Check the local installation safely.")
+    doctor_parser.add_argument("--materials", action="store_true",
+        help="Check optional PDF prerequisite presence without reading a profile or running PDF tools.")
     _add_json_flag(doctor_parser)
     doctor_parser.set_defaults(handler=_command_doctor, command_name="doctor")
 
@@ -1992,12 +2435,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     jobs_parser = commands.add_parser("jobs", help="Discover public jobs, save snapshots, and inspect evidence.", allow_abbrev=False)
     job_commands = jobs_parser.add_subparsers(dest="jobs_command", required=True)
+    plan_search = job_commands.add_parser("plan-search", help="Plan bounded public searches from explicit role/location terms; no network or storage.", allow_abbrev=False)
+    plan_search.add_argument("--role", action="append", required=True, metavar="TERM",
+                             help="Explicit role term; repeat for 1–3 roles, each at most 128 characters.")
+    plan_search.add_argument("--location", action="append", default=[], metavar="TERM",
+                             help="Optional location term; repeat for up to two locations. A role-only search is always included.")
+    _add_json_flag(plan_search)
+    plan_search.set_defaults(handler=_command_jobs_plan_search, command_name="jobs.plan-search")
+    sources = job_commands.add_parser("sources", help="Build a source manifest from board links without network or storage.", allow_abbrev=False)
+    source_input = sources.add_mutually_exclusive_group(required=True)
+    source_input.add_argument("--url", action="append", help="Explicit company board or posting URL; repeat for more boards.")
+    source_input.add_argument("--urls-file", help="UTF-8 file with one board link per line, or - for stdin.")
+    sources.add_argument("--keep-valid", action="store_true",
+                         help="Keep valid sources and report rejected input positions; incomplete setup exits 2.")
+    _add_json_flag(sources)
+    sources.set_defaults(handler=_command_jobs_sources, command_name="jobs.sources")
     discover = job_commands.add_parser("discover", help="Read configured public ATS feeds and capture immutable jobs.", allow_abbrev=False)
     discovery_input = discover.add_mutually_exclusive_group(required=True)
     discovery_input.add_argument("--sources-file", help="Versioned source manifest; use - for stdin.")
     discovery_input.add_argument("--preset", choices=("major-tech",), help="Public employer catalog; unsupported career sites remain visible gaps.")
     discover.add_argument("--title-contains", action="append", default=[], metavar="TERM",
                           help="Optional title substring filter (OR); repeat for alternatives. This is not a fit score.")
+    discover.add_argument("--location-contains", action="append", metavar="TERM",
+                          help="Literal published-location substring (OR); repeat up to 20 terms. Applied before the selected-job limit; missing locations default to include.")
+    discover.add_argument("--missing-location", choices=("include", "exclude"),
+                          help="Explicit treatment of unknown locations; include is the location-filter default. Either location option selects report schema 2.")
     discover.add_argument("--limit-per-source", type=int, default=100,
                           help="Maximum selected jobs per source (1–1000; default 100); capped results report partial coverage.")
     discover.add_argument("--dry-run", action="store_true", help="Fetch and preview without opening or writing profile storage.")
@@ -2016,20 +2478,62 @@ def build_parser() -> argparse.ArgumentParser:
 
     profile_parser = commands.add_parser("profile", help="Manage candidate profile data.")
     profile_commands = profile_parser.add_subparsers(dest="profile_command", required=True)
+    from grounded_apply.services.profile_interview import INTERVIEW_TOPICS
+    profile_interview = profile_commands.add_parser("interview", help="Ask optional profile questions a few at a time; no answers stored.", allow_abbrev=False)
+    profile_interview.add_argument("--topic", choices=("all", *INTERVIEW_TOPICS), default="all")
+    profile_interview.add_argument("--depth", type=int, choices=(1, 2, 3), default=1)
+    profile_interview.add_argument("--after", help="Continue after a question ID in the same topic and depth round.")
+    profile_interview.add_argument("--limit", type=int, default=3, help="Questions to show (1–10, default 3).")
+    _add_json_flag(profile_interview)
+    profile_interview.set_defaults(handler=_command_profile_interview, command_name="profile.interview")
     profile_extract = profile_commands.add_parser("extract", help="Propose exact resume text spans without storing them.", allow_abbrev=False)
     profile_extract.add_argument("--source-file", required=True)
+    profile_extract.add_argument("--source-format", choices=("auto", "text", "latex", "pdf"), default="auto")
+    profile_extract.add_argument("--extractor-version", type=int, choices=(1, 2, 3, 4), default=2,
+        help="Version 4 also stops four unsupported headings from inheriting a fact type; versions 1–3 and default 2 remain compatible.")
     _add_json_flag(profile_extract)
     profile_extract.set_defaults(handler=_command_profile_extract, command_name="profile.extract")
+    group_publication = profile_commands.add_parser("group-publication",
+        help="Group explicitly chosen publication fragments into a complete import manifest; no storage.", allow_abbrev=False)
+    for option in ("source-file", "source-sha256", "document-sha256"):
+        group_publication.add_argument("--" + option, required=True)
+    group_publication.add_argument("--indexes", action="append", required=True, metavar="I,J",
+        help="Consecutive original proposal indexes for one publication; repeat for separate disjoint groups.")
+    group_publication.add_argument("--source-format", choices=("auto", "text", "latex", "pdf"), default="auto")
+    group_publication.add_argument("--extractor-version", type=int, choices=(1, 2, 3, 4), required=True,
+        help="Use the version displayed by profile extract; there is no default.")
+    group_publication.add_argument("--allow-partial", action="store_true",
+        help="Acknowledge reported document gaps when constructing a proposal; retains nothing.")
+    _add_json_flag(group_publication)
+    group_publication.set_defaults(handler=_command_profile_group_publication, command_name="profile.group-publication")
     profile_onboard = profile_commands.add_parser("onboard", help="Import selected extracted facts for review.", allow_abbrev=False)
     for option in ("source-file", "source-sha256", "select", "idempotency-key"):
         profile_onboard.add_argument("--" + option, required=True)
     profile_onboard.add_argument("--dry-run", action="store_true")
+    profile_onboard.add_argument("--source-format", choices=("auto", "text", "latex", "pdf"), default="auto")
+    profile_onboard.add_argument("--document-sha256", help="Original document hash shown by extract; required for PDF/LaTeX.")
+    profile_onboard.add_argument("--allow-partial", action="store_true",
+        help="Explicitly retain selected readable facts despite reported document extraction gaps.")
+    profile_onboard.add_argument("--extractor-version", type=int, choices=(1, 2, 3, 4),
+        help="Required for indexed selections; use the version displayed during extraction. --select all defaults to 2.")
+    profile_onboard.add_argument("--retain-all-facts", action="store_true",
+        help="Allow complete fact retention for a selected index set; --select all implies this policy.")
     _add_json_flag(profile_onboard)
     profile_onboard.set_defaults(handler=_command_profile_onboard, command_name="profile.onboard")
 
     profile_show = profile_commands.add_parser("show", help="Show the provenance-checked effective profile.", allow_abbrev=False)
     _add_json_flag(profile_show)
     profile_show.set_defaults(handler=_command_profile_show, command_name="profile.show")
+    from grounded_apply.services.profile_inventory import PROFILE_INVENTORY_TOPICS
+    inventory = profile_commands.add_parser("inventory", help="Count retained claims or inspect one topic without changing the profile.", allow_abbrev=False)
+    inventory.add_argument("--topic", choices=PROFILE_INVENTORY_TOPICS,
+                           help="Inspect this topic only; omitted shows counts without claim text.")
+    inventory.add_argument("--limit", type=int, help="Topic page size (1–50, default 20); requires --topic.")
+    inventory_anchor = inventory.add_mutually_exclusive_group()
+    inventory_anchor.add_argument("--after", help="Continue after a retained claim in this topic; requires --topic.")
+    inventory_anchor.add_argument("--after-json", help="JSON-string continuation for claim IDs with nonprinting characters.")
+    _add_json_flag(inventory)
+    inventory.set_defaults(handler=_command_profile_inventory, command_name="profile.inventory")
     profile_retire = profile_commands.add_parser("retire", help="Preview or confirm withdrawal/replacement of an approved claim.", allow_abbrev=False)
     for option in ("claim-id", "actor-id", "idempotency-key"):
         profile_retire.add_argument("--" + option, required=True)
@@ -2074,6 +2578,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Validate and summarize without opening or changing profile storage.",
     )
+    profile_import.add_argument("--retain-all-facts", action="store_true",
+        help="Explicitly retain all proposed career facts without a source-percentage limit; approval is still required.")
+    profile_import.add_argument("--source-kind", choices=("resume", "user-statement"), default="resume",
+        help="Origin of these facts; user-statement retains exact text answers for separate review.")
+    profile_import.add_argument("--source-format", choices=("text", "auto", "latex", "pdf"), default="text",
+        help="Default exact UTF-8 text; choose auto/PDF/LaTeX to bind proposals to locally extracted text.")
+    profile_import.add_argument("--document-sha256", help="Original hash from profile extract; required for PDF/LaTeX.")
+    profile_import.add_argument("--allow-partial", action="store_true",
+        help="Explicitly retain proposals from an extraction with reported gaps.")
     _add_json_flag(profile_import)
     profile_import.set_defaults(
         handler=_command_profile_import, command_name="profile.import"
@@ -2082,6 +2595,18 @@ def build_parser() -> argparse.ArgumentParser:
     profile_review = profile_commands.add_parser(
         "review", help="Display pending profile claims and evidence without changing them."
     )
+    profile_review.add_argument("--limit", type=int,
+        help="Show a page of 1–50 pending facts; omitted means the complete queue.")
+    review_anchor = profile_review.add_mutually_exclusive_group()
+    review_anchor.add_argument("--after", metavar="CLAIM_ID",
+        help="Continue after a displayed claim, even after deciding it; requires --limit.")
+    review_anchor.add_argument("--after-json", metavar="JSON_STRING",
+        help="JSON-encoded continuation ID for legacy identifiers with control characters; requires --limit.")
+    review_selection = profile_review.add_mutually_exclusive_group()
+    review_selection.add_argument("--claim-id", metavar="CLAIM_ID",
+        help="Review one chosen pending fact by its inventory ID; cannot combine with pagination.")
+    review_selection.add_argument("--claim-id-json", metavar="JSON_STRING",
+        help="JSON-string ID for one pending fact, including nonprinting legacy IDs; cannot combine with pagination.")
     _add_json_flag(profile_review)
     profile_review.set_defaults(
         handler=_command_profile_review, command_name="profile.review"
@@ -2139,11 +2664,11 @@ def _command_name_from_argv(argv: Sequence[str]) -> str:
                         ("applications", {"add", "list", "show", "transition"})):
         if argv[0] == root and len(argv) > 1 and argv[1] in names:
             return root + "." + argv[1]
-    if argv[0] == "jobs" and len(argv) > 1 and argv[1] in {"add", "list", "show", "assess", "discover"}:
+    if argv[0] == "jobs" and len(argv) > 1 and argv[1] in {"add", "list", "show", "assess", "discover", "sources", "plan-search"}:
         return "jobs." + argv[1]
     if argv[0] == "profile" and len(argv) > 1:
         profile_command = argv[1]
-        if profile_command in {"init", "import", "review", "decide", "show", "retire", "extract", "onboard"}:
+        if profile_command in {"init", "import", "review", "decide", "show", "retire", "extract", "onboard", "interview", "inventory", "group-publication"}:
             return f"profile.{profile_command}"
     if argv[0] in {"paths", "doctor", "brief", "backup", "restore", "delete", "answers", "export"}:
         return argv[0]
@@ -2181,7 +2706,7 @@ def _main(
                 message="Invalid command arguments.",
                 ok=False,
             )
-        elif command_name in {"profile.decide", "profile.retire", "backup", "restore", "delete"} or command_name.startswith(("schedules.", "searches.", "batches.", "materials.", "applications.", "jobs.")):
+        elif command_name in {"profile.review", "profile.inventory", "profile.group-publication", "profile.decide", "profile.retire", "backup", "restore", "delete"} or command_name.startswith(("schedules.", "searches.", "batches.", "materials.", "applications.", "jobs.")):
             print(
                 "Error: Invalid command arguments. No external action was taken.",
                 file=sys.stderr,

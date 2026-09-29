@@ -85,6 +85,7 @@ class ResumeExtractionTests(unittest.TestCase):
                 self.assertFalse(runtime.exists())
                 self.assertEqual(invoke(["profile", "init"])[0], 0)
                 args = ["profile", "onboard", "--source-file", str(source), "--select", "0,1,4",
+                        "--extractor-version", "1",
                         "--source-sha256", extracted["data"]["source_sha256"], "--idempotency-key", "synthetic-onboard"]
                 self.assertEqual(invoke([*args, "--dry-run"])[0], 0)
                 self.assertEqual(invoke(args)[0], 0)

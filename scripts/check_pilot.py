@@ -159,10 +159,11 @@ if identity() != before:
     extraction = cli("profile", "extract", "--source-file", str(source))
     assert not (workspace / "runtime").exists()
     cli("profile", "init")
-    onboarding = ("profile", "onboard", "--source-file", str(source), "--source-sha256", extraction["source_sha256"],
-        "--select", "0,1,2,3,4,6,7,8,9,10", "--idempotency-key", "synthetic-onboarding")
+    onboarding = ("profile", "onboard", "--extractor-version", "2", "--source-file", str(source), "--source-sha256", extraction["source_sha256"],
+        "--select", "0,1,2,3,4,6,7,8,9,10", "--retain-all-facts", "--idempotency-key", "synthetic-onboarding")
     cli(*onboarding, "--dry-run")
     imported = cli(*onboarding)
+    assert imported["content_policy_version"] == 3
     assert cli(*onboarding) == imported
     review = cli("profile", "review")
     for item in review["items"]:

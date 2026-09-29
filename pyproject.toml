@@ -29,7 +29,7 @@ materials = ["pypdf>=6.10.0,<7"]
 gapply = "grounded_apply.cli:main"
 
 [project.urls]
-Repository = "https://github.com/grounded-apply/grounded-apply"
+Repository = "https://github.com/chenyugoal/grounded-apply"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/grounded_apply"]

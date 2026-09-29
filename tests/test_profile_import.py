@@ -87,6 +87,7 @@ SAFE_IMPORT_VALUES: dict[str, Any] = {
         "activity": "synthetic test setup",
     },
     "publication": "Testing Fictional Systems",
+    "research_description": "Studied fictional evaluation methods",
     "skill_use": "Python",
 }
 
@@ -2620,7 +2621,7 @@ class ProfileImportProposalTests(unittest.TestCase):
         self.assertEqual(result.extractor_id, PROFILE_IMPORT_EXTRACTOR_ID)
         self.assertEqual(
             registered_profile_import_extractors(),
-            frozenset({PROFILE_IMPORT_EXTRACTOR_ID}),
+            frozenset({PROFILE_IMPORT_EXTRACTOR_ID, "grounded-apply.profile-user-statement.manifest@1"}),
         )
         for claim, evidence, proposed in zip(
             result.claims, result.evidence, data["proposals"], strict=True

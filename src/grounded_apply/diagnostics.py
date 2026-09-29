@@ -28,6 +28,8 @@ class DiagnosticCommand(StrEnum):
     JOBS_SHOW = "jobs.show"
     JOBS_ASSESS = "jobs.assess"
     JOBS_DISCOVER = "jobs.discover"
+    JOBS_SOURCES = "jobs.sources"
+    JOBS_PLAN_SEARCH = "jobs.plan-search"
     BATCHES_PREPARE = "batches.prepare"
     BATCHES_RESUME = "batches.resume"
     BATCHES_SHOW = "batches.show"
@@ -65,6 +67,9 @@ class DiagnosticCommand(StrEnum):
     PROFILE_RETIRE = "profile.retire"
     PROFILE_EXTRACT = "profile.extract"
     PROFILE_ONBOARD = "profile.onboard"
+    PROFILE_INTERVIEW = "profile.interview"
+    PROFILE_INVENTORY = "profile.inventory"
+    PROFILE_GROUP_PUBLICATION = "profile.group-publication"
 
 
 class DiagnosticOutcome(StrEnum):

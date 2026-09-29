@@ -15,8 +15,9 @@ feeds and a bounded Netflix sitemap route.
 
 Python 3.12+ is required. The latest locally verified environment is macOS with Python
 3.12.14, TeX Live 2026 (`pdflatex`, `lmodern`, `geometry`, `enumitem`, `needspace`), pypdf 6.10.0,
-and cryptography 50.0.1. PDF input is not supported yet; export your resume to
-UTF-8 plain text first. The output template supports text handled by pdfLaTeX;
+and cryptography 50.0.1. Resume intake accepts text, selectable-text PDFs, and
+static LaTeX; see [profile setup](PROFILE_SETUP.md) for extraction limits.
+The output template supports text handled by pdfLaTeX;
 unsupported glyphs, overflow, or extraction differences block generation.
 
 From the repository, prepare an isolated dependency environment once:
@@ -40,6 +41,24 @@ GAPPLY_PYTHON=/absolute/path/to/python3.12 ./scripts/gapply --help
 
 For an installed wheel use the
 `backup,materials` extras and the `gapply` entry point instead.
+
+Before creating a profile, Codex can check PDF dependency presence in the selected
+interpreter and executable path:
+
+```bash
+./scripts/gapply doctor --materials --json
+```
+
+PDF intake needs `pypdf`; PDF material output needs both `pypdf` and `pdflatex`.
+Read the separate `pdf_intake` and `pdf_materials` statuses: missing TeX alone
+does not block PDF intake when `pypdf` is present. Each dependency is `present`,
+`missing` or `unknown` if its probe failed. Exit 0 means both were found; exit 2
+means a requested materials prerequisite is missing or unknown, not that the
+base application is broken. The command installs nothing, executes no TeX,
+reads no profile/document and creates no runtime. Presence does not verify
+parsing, rendering, TeX packages, fonts or layout. Follow the setup above for
+missing dependencies; use ordinary `doctor --json` separately for stored-profile
+checks. See the [presence-check contract](REFERENCE.md#pdf-prerequisite-presence).
 
 Choose a dedicated private directory **outside this repository** for your data.
 The examples below are placeholders: replace `/absolute/private` with an existing
@@ -73,21 +92,64 @@ January 2022–March 2025
 - Built a Python service for fictional warehouse robots.
 ```
 
-Extracting does not store the resume. Inspect the numbered proposals, then select
-only the facts you want stored. Each selected fact retains its exact source span.
-Selecting most of the raw source is intentionally refused by the minimization
-guard; start with the relevant subset. Do not pad the source to bypass it.
+Extracting does not store the resume. Inspect the full inventory, including
+unclassified or blocked lines, then choose all supported facts or a subset.
+Each selected fact retains its exact extracted-text span. Complete-facts retention
+has no source-percentage cap; unknown content remains a visible review task.
+
+New Codex-guided intake explicitly requests extractor 4. It keeps version 3's
+research context and stops four neutral headings from inheriting the preceding
+section's fact type. Those headings and following unclassified text remain
+visible for review. See [profile setup](PROFILE_SETUP.md#keep-unsupported-sections-separate)
+for the exact labels and limits. The CLI default remains 2; versions 1, 2 and 3
+retain their proposals, indexes and replay behavior. Retention and approval stay
+separate from extraction.
 
 ```bash
-./scripts/gapply profile extract --source-file /absolute/private/resume.txt
+./scripts/gapply profile extract --source-file /absolute/private/resume.txt --extractor-version 4
 ./scripts/gapply profile onboard --source-file /absolute/private/resume.txt \
-  --source-sha256 HASH_FROM_EXTRACTION --select 0,1,2,3,4 \
+  --source-sha256 HASH_FROM_EXTRACTION --extractor-version 4 --select all \
   --idempotency-key onboarding-1 --dry-run --json
 ./scripts/gapply profile onboard --source-file /absolute/private/resume.txt \
-  --source-sha256 HASH_FROM_EXTRACTION --select 0,1,2,3,4 \
+  --source-sha256 HASH_FROM_EXTRACTION --extractor-version 4 --select all \
   --idempotency-key onboarding-1 --json
-./scripts/gapply profile review --json
+./scripts/gapply profile review --limit 5 --json
 ```
+
+Use the original `.pdf` or `.tex` path directly and also pass the displayed
+`--document-sha256` for those formats. Review extraction warnings first; partial
+documents require an explicit `--allow-partial` choice. For numeric selections,
+pass the displayed extractor version and `--retain-all-facts` when retaining a
+large fraction of the CV. Keep the displayed version when resuming an earlier
+selection; versions 1, 2 and 3 preserve their original classifications.
+A document with no reading gaps can still contain unclassified lines;
+`--allow-partial` does not classify them or establish semantic completeness.
+If a publication title and status are split, the [explicit grouping flow](PROFILE_SETUP.md#keep-a-wrapped-publication-together)
+keeps the selected fragments together without dropping other proposals.
+Repeat `--indexes` to select each work separately using the original indexes;
+the helper returns one complete manifest.
+It returns a private import manifest;
+it does not retain or approve facts or require a manually exported text CV.
+An optional guided setup starts with `./scripts/gapply profile interview --json`;
+it stores no answers. See [profile setup](PROFILE_SETUP.md) for deeper rounds.
+
+Codex starts with five retained facts at a time; adjust the batch size when
+useful. Continue to the next batch with:
+
+```bash
+./scripts/gapply profile review --limit 5 --after CLAIM_ID_FROM_NEXT_AFTER --json
+```
+
+Codex handles the cursor from `data.page.next_after`; you need not manage IDs.
+The response shows the total pending plus displayed, earlier and later pending
+counts. Approving or rejecting the last displayed claim does not invalidate
+continuation. Skipped facts stay pending. A null next cursor means the end of
+this pass; if earlier facts remain pending, omit `--after` to revisit them.
+Stop whenever you want; a later session can continue from the prior claim or
+restart the remaining queue. Paging stores no review position or decisions.
+Limits are 1–50, and `--after` requires `--limit`. Without either option,
+`profile review --json` still returns the full pending queue. See
+[profile setup](PROFILE_SETUP.md#review-in-manageable-batches) for the full flow.
 
 For each fact you have checked against its evidence, use its displayed ID and
 review token. `--confirm` records your approval. Use `reject` for incorrect facts.
@@ -105,6 +167,33 @@ To correct an approved fact, import and approve the replacement, then use
 local-user --idempotency-key correction-1`. Review the preview and repeat with
 its `--preview-token TOKEN --confirm`. Omit the replacement for withdrawal.
 Original history remains, and retired facts cannot authorize new materials.
+
+## Build a profile through questions
+
+Start with `./scripts/gapply profile interview --json`. Codex asks a few
+questions, shows your exact answers as proposals, and asks which answers you
+want retained. You may skip or stop. Codex prepares private UTF-8 text containing
+only the chosen statements and the schema-2 manifest with their exact spans.
+It does not save a transcript or infer missing facts.
+
+```bash
+./scripts/gapply profile import --source-kind user-statement \
+  --source-file /absolute/private/chosen-answers.txt \
+  --proposals-file /absolute/private/answer-proposals.json \
+  --retain-all-facts --idempotency-key answers-1 --dry-run --json
+./scripts/gapply profile import --source-kind user-statement \
+  --source-file /absolute/private/chosen-answers.txt \
+  --proposals-file /absolute/private/answer-proposals.json \
+  --retain-all-facts --idempotency-key answers-1 --json
+./scripts/gapply profile review --limit 5 --json
+```
+
+These facts retain user-statement origin and stay pending until you approve
+them individually with the decision flow above. The command accepts text files
+or stdin, not PDF/TeX interpretation; at most one input may use `-`. Omitted
+`--source-kind` still means resume import. Existing facts are not reclassified.
+You can resume from retained facts, but the interview saves no question position
+or unretained answers. See [profile setup](PROFILE_SETUP.md#start-or-deepen-the-profile-with-questions).
 
 ## Prepare one job
 
@@ -178,10 +267,17 @@ Pass that private file with `--layout-file FILE` on both preview and build, or u
 `--layout-file -` for stdin (only one input can use stdin). Keys must be selected
 claim IDs. Values cannot contain prose, markup, fonts, or factual edits; contact
 styles cannot be overridden. Headings are supported for employment descriptions,
-employment titles, education, degrees, and portfolio items. A heading containing
-exactly four nonempty ` | `-separated fields lays them out as two rows, in original
-reading order. Other headings stay intact on one or more lines. Keep related
+employment titles, education, degrees, portfolio items, and version-3 research
+facts. A heading containing exactly four nonempty ` | `-separated fields lays
+them out as two rows, in original reading order. Other headings stay intact on
+one or more lines. Keep related
 headers and bullets adjacent; associations are not inferred.
+
+Selecting approved research facts for the resume adds a separate Research
+section, keeping Publications separate. Having research facts elsewhere in the
+profile, or using them only in
+answers, does not change the resume's presentation version. Existing saved
+materials are not rebuilt or relabeled automatically.
 
 Outputs are at most two pages. Long prose wraps; unrenderable content fails
 without truncation or automatic font shrinking. Inspect every page before
@@ -189,8 +285,8 @@ delivery. Correct presentation first; if the content still needs editing, use
 the approved-fact review path. Do not silently discard relevant facts to bypass
 overflow or edit exported files behind an approval. A different selection or
 layout needs a new idempotency key and fresh material review. Existing version-1
-materials and retries retain their original layout and approval. An omitted
-layout is equivalent to an empty presentations object.
+and version-2 materials and retries retain their original layout and approval.
+An omitted layout is equivalent to an empty presentations object.
 
 After reviewing the exact bundle, approve its displayed hash:
 
@@ -253,7 +349,8 @@ Use `backup --encrypt /absolute/private/backup.gapply` regularly; it prompts for
 passphrase. Keep the passphrase separately. Backup covers the complete pilot
 database, including PDFs and application history, up to 256 MiB. Original files,
 exports, config, caches, and external backups are excluded. Restore previews a
-new home; confirmation requires its archive hash. See the README for commands.
+new home; confirmation requires its archive hash. See the
+[backup and restore examples](REFERENCE.md#encrypted-profile-backup-and-restore).
 
 `export --redacted /absolute/private/support.json` writes only fixed-schema
 version/count diagnostics. For whole-home deletion, use `delete --target-home

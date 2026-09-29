@@ -1,16 +1,22 @@
 # Security policy
 
-Grounded Apply is pre-release software that handles highly sensitive personal
-information. The current Phase 0 scaffold is not ready for real candidate data.
+Grounded Apply is alpha software with a locally verified application workflow
+that handles private career information. Personal data belongs in a private
+runtime outside the repository; development, tests, and security reproductions
+use synthetic data only. See the [roadmap](docs/ROADMAP.md) for supported scope
+and the [live checkpoint](docs/SESSION_HANDOFF.md) for verification and known
+limitations.
 
 ## Reporting a vulnerability
 
 Do not open a public issue that contains a vulnerability exploit, candidate
 data, credentials, private artifacts, database contents, browser traces, or
-unredacted logs. Use the repository host's private security-advisory channel
-when one is configured. Until then, share only a redacted description with the
-maintainer through a private channel and wait for a secure artifact-transfer
-method.
+unredacted logs. Use GitHub's
+[private vulnerability reporting form](https://github.com/chenyugoal/grounded-apply/security/advisories/new).
+Sign in to GitHub to open the form. Do not include real candidate data; a
+synthetic reproduction is sufficient. If private reporting is unavailable,
+open an issue containing only “Private security reporting is unavailable” so the
+maintainer can restore the channel; do not include vulnerability details there.
 
 Include the affected version or commit, impact, minimal reproduction using
 synthetic data, and any suggested mitigation. Never test a report against a

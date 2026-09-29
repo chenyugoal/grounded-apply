@@ -53,6 +53,8 @@ def _validate_record(repository: SQLiteRepository, record: Record, claims: dict[
             or record["claim_sha256"] != payload["claim_sha256"]
             or record["replacement_sha256"] != payload["replacement_sha256"]
             or claim.status != ClaimStatus.VERIFIED or claim.approval_status != ApprovalStatus.APPROVED
+            or claim.source_type not in (SourceType.IMPORTED_RESUME, SourceType.USER_STATEMENT)
+            or repository.get_profile_import_review_item(claim.id) is None
         ):
             raise ValueError
         retired_at = datetime.fromisoformat(record["retired_at"])
@@ -106,7 +108,11 @@ class ProfileLifecycleService:
             effective = {c.id: c for c in project_retirements(self._repository, claims, evidence)}
             originals = {c.id: c for c in claims}
             claim = originals.get(claim_id)
-            if claim is None or claim.source_type != SourceType.IMPORTED_RESUME or claim.status != ClaimStatus.VERIFIED or claim.approval_status != ApprovalStatus.APPROVED:
+            if (
+                claim is None or claim.source_type not in (SourceType.IMPORTED_RESUME, SourceType.USER_STATEMENT)
+                or self._repository.get_profile_import_review_item(claim_id) is None
+                or claim.status != ClaimStatus.VERIFIED or claim.approval_status != ApprovalStatus.APPROVED
+            ):
                 raise ValueError("Retirement requires an approved imported claim")
             replacement = None if replacement_claim_id is None else originals.get(replacement_claim_id)
             if replacement_claim_id is not None and (

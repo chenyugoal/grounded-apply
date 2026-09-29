@@ -16,6 +16,7 @@ try:
 except ImportError:
     raise SystemExit("Required material gate needs the materials extra") from None
 
-suite = unittest.defaultTestLoader.loadTestsFromName("tests.test_materials")
+suite = unittest.defaultTestLoader.loadTestsFromNames(("tests.test_materials", "tests.test_resume_documents",
+                                                      "tests.test_research_materials", "tests.test_statement_materials"))
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)

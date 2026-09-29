@@ -171,7 +171,7 @@ if identity() != before:
     extracted = cli("profile", "extract", "--source-file", str(source))
     cli("profile", "init")
     imported = cli(
-        "profile", "onboard", "--source-file", str(source),
+        "profile", "onboard", "--extractor-version", "2", "--source-file", str(source),
         "--source-sha256", extracted["source_sha256"], "--select", "0,1,2,3,4,6,7",
         "--idempotency-key", "synthetic-batch-onboarding",
     )

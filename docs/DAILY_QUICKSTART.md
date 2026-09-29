@@ -60,7 +60,7 @@ acknowledgment never approve a package or mark an application submitted.
 
 ## Coverage and storage limits
 
-Configured Greenhouse, Ashby and Lever boards are supported. The major-tech
+Configured Greenhouse, Ashby, Lever and Workable boards are supported. The major-tech
 catalog includes Anthropic and OpenAI feed routes and bounded Netflix discovery.
 Google, Apple, Amazon and Meta remain visible manual gaps. This is not complete
 coverage of most companies or all jobs at a supported employer. See the

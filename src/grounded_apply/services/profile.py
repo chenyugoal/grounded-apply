@@ -39,6 +39,7 @@ from grounded_apply.repositories import (
 )
 from grounded_apply.services.profile_import_validation import (
     PROFILE_IMPORT_CONTENT_POLICY_VERSION,
+    PROFILE_IMPORT_SUPPORTED_CONTENT_POLICIES,
     PROFILE_IMPORT_MAX_SOURCE_BYTES,
     PROFILE_IMPORT_MAX_TOTAL_EVIDENCE_CODEPOINTS,
     PROFILE_IMPORT_MAX_TOTAL_METADATA_CODEPOINTS,
@@ -70,9 +71,22 @@ PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION = 1
 PROFILE_IMPORT_REVIEW_DECISION_SCHEMA_VERSION = 1
 PROFILE_IMPORT_REVIEW_RESULT_SCHEMA_VERSION = 1
 PROFILE_IMPORT_EXTRACTOR_ID = "grounded-apply.profile-import.manifest@1"
+PROFILE_STATEMENT_EXTRACTOR_ID = "grounded-apply.profile-user-statement.manifest@1"
+
+_PROFILE_IMPORT_VERSIONS: Mapping[SourceType, tuple[int, int, int]] = MappingProxyType({
+    SourceType.IMPORTED_RESUME: (4, 1, 1),
+    SourceType.USER_STATEMENT: (5, 2, 2),
+})
+_PROFILE_IMPORT_ORIGINS: Mapping[str, SourceType] = MappingProxyType({
+    PROFILE_IMPORT_EXTRACTOR_ID: SourceType.IMPORTED_RESUME,
+    PROFILE_STATEMENT_EXTRACTOR_ID: SourceType.USER_STATEMENT,
+})
+_STATEMENT_SOURCE_PREFIX = "user-statement:sha256:"
+_STATEMENT_ARTIFACT_PREFIX = "profile-user-statement-source:sha256:"
+_STATEMENT_EXTRACTOR_PREFIX = "grounded-apply.profile-user-statement."
 
 _PROFILE_IMPORT_EXTRACTORS: Mapping[str, int] = MappingProxyType(
-    {PROFILE_IMPORT_EXTRACTOR_ID: PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION}
+    {identifier: PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION for identifier in _PROFILE_IMPORT_ORIGINS}
 )
 _PROFILE_IMPORT_ARTIFACT_TYPE = "profile_import_source_digest"
 _PROFILE_IMPORT_ARTIFACT_MEDIA_TYPE = "text/plain; charset=utf-8"
@@ -83,6 +97,25 @@ _PROFILE_IMPORT_ARTIFACT_METADATA_BASE: Mapping[str, JsonValue] = MappingProxyTy
         "source_identity_schema_version": PROFILE_IMPORT_SOURCE_IDENTITY_SCHEMA_VERSION,
     }
 )
+
+
+def _profile_import_versions(source_type: SourceType) -> tuple[int, int, int]:
+    if not isinstance(source_type, SourceType) or source_type not in _PROFILE_IMPORT_VERSIONS:
+        raise ValueError("Profile import source type must be imported_resume or user_statement")
+    return _PROFILE_IMPORT_VERSIONS[source_type]
+
+
+def _profile_import_origin(extractor_id: str) -> SourceType:
+    _require_registered_profile_import_extractor(extractor_id)
+    return _PROFILE_IMPORT_ORIGINS[extractor_id]
+
+
+def _has_statement_marker(*values: object) -> bool:
+    # Check reserved prefixes, not valid complete identities: malformed markers
+    # must fail managed validation rather than fall back to generic statements.
+    return any(isinstance(value, str) and value.startswith((
+        "user-statement:sha256", "profile-user-statement-source:", _STATEMENT_EXTRACTOR_PREFIX,
+    )) for value in values)
 
 
 def resolve_selected_claim(
@@ -113,6 +146,7 @@ def resolve_selected_claim(
 
 def _profile_import_artifact_metadata(
     source_codepoint_size: int,
+    source_type: SourceType = SourceType.IMPORTED_RESUME,
 ) -> dict[str, JsonValue]:
     if (
         isinstance(source_codepoint_size, bool)
@@ -122,6 +156,7 @@ def _profile_import_artifact_metadata(
         raise ValueError("source_codepoint_size must be a positive integer")
     return {
         **_PROFILE_IMPORT_ARTIFACT_METADATA_BASE,
+        "source_identity_schema_version": _profile_import_versions(source_type)[1],
         "source_codepoint_size": source_codepoint_size,
     }
 
@@ -156,16 +191,20 @@ def _text_sha256(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
 
 
-def _profile_import_source_ref(source_sha256: str) -> str:
+def _profile_import_source_ref(source_sha256: str, source_type: SourceType = SourceType.IMPORTED_RESUME) -> str:
+    _profile_import_versions(source_type)
     if _SHA256_PATTERN.fullmatch(source_sha256) is None:
         raise ValueError("source_sha256 must contain a lowercase SHA-256 digest")
-    return f"sha256:{source_sha256}"
+    prefix = _STATEMENT_SOURCE_PREFIX if source_type is SourceType.USER_STATEMENT else "sha256:"
+    return f"{prefix}{source_sha256}"
 
 
-def _profile_import_source_artifact_id(source_sha256: str) -> str:
+def _profile_import_source_artifact_id(source_sha256: str, source_type: SourceType = SourceType.IMPORTED_RESUME) -> str:
+    _profile_import_versions(source_type)
     if _SHA256_PATTERN.fullmatch(source_sha256) is None:
         raise ValueError("source_sha256 must contain a lowercase SHA-256 digest")
-    return f"profile-import-source:sha256:{source_sha256}"
+    prefix = _STATEMENT_ARTIFACT_PREFIX if source_type is SourceType.USER_STATEMENT else "profile-import-source:sha256:"
+    return f"{prefix}{source_sha256}"
 
 
 def _profile_import_record_ids(workflow_id: str, index: int) -> tuple[str, str]:
@@ -194,10 +233,11 @@ def _is_canonical_uuid(value: object, *, version: int) -> bool:
     return str(parsed) == value and parsed.version == version
 
 
-def _profile_import_source_digest(source_ref: object) -> str | None:
+def _profile_import_source_digest(source_ref: object, source_type: SourceType = SourceType.IMPORTED_RESUME) -> str | None:
     if not isinstance(source_ref, str):
         return None
-    match = _PROFILE_IMPORT_SOURCE_REF_PATTERN.fullmatch(source_ref)
+    prefix = _STATEMENT_SOURCE_PREFIX if source_type is SourceType.USER_STATEMENT else "sha256:"
+    match = re.fullmatch(re.escape(prefix) + r"(?P<digest>[0-9a-f]{64})", source_ref)
     return None if match is None else match.group("digest")
 
 
@@ -247,6 +287,7 @@ def _require_profile_import_source_artifact_record(
     source_sha256: str,
     expected_byte_size: int | None,
     expected_codepoint_size: int | None,
+    source_type: SourceType = SourceType.IMPORTED_RESUME,
 ) -> tuple[Record, int]:
     """Validate a digest-only source record without exposing stored metadata."""
 
@@ -265,8 +306,8 @@ def _require_profile_import_source_artifact_record(
         raise RepositoryError(
             "Profile import source identity record failed integrity checks"
         ) from error
-    source_ref = _profile_import_source_ref(source_sha256)
-    source_artifact_id = _profile_import_source_artifact_id(source_sha256)
+    source_ref = _profile_import_source_ref(source_sha256, source_type)
+    source_artifact_id = _profile_import_source_artifact_id(source_sha256, source_type)
     byte_size = artifact.get("byte_size")
     source_codepoint_size = (
         metadata.get("source_codepoint_size") if isinstance(metadata, dict) else None
@@ -299,7 +340,9 @@ def _require_profile_import_source_artifact_record(
         or artifact.get("content_sha256") != source_sha256
         or artifact.get("sensitivity") != Sensitivity.PERSONAL.value
         or codepoint_size_invalid
-        or metadata != _profile_import_artifact_metadata(source_codepoint_size)
+        or not isinstance(metadata, dict)
+        or type(metadata.get("source_identity_schema_version")) is not int
+        or metadata != _profile_import_artifact_metadata(source_codepoint_size, source_type)
         or any(
             _timestamp(timestamp) != artifact.get(field_name)
             for field_name, timestamp in zip(
@@ -495,12 +538,17 @@ class CreateImportProposal:
     source_text: str
     expected_source_sha256: str
     proposals: tuple[ProposedImportClaim, ...]
+    content_policy_version: int = PROFILE_IMPORT_CONTENT_POLICY_VERSION
+    source_type: SourceType = SourceType.IMPORTED_RESUME
     source_sha256: str = field(init=False)
     source_ref: str = field(init=False)
     source_artifact_id: str = field(init=False)
     extractor_id: str = field(init=False)
 
     def __post_init__(self) -> None:
+        _profile_import_versions(self.source_type)
+        if type(self.content_policy_version) is not int or self.content_policy_version not in PROFILE_IMPORT_SUPPORTED_CONTENT_POLICIES:
+            raise ValueError("Unsupported profile import content policy")
         _require_text(self.idempotency_key, "idempotency_key")
         _require_text(self.source_text, "source_text")
         _require_text(self.expected_source_sha256, "expected_source_sha256")
@@ -516,14 +564,14 @@ class CreateImportProposal:
         if source_sha256 != self.expected_source_sha256:
             raise ValueError("profile import source digest does not match its manifest")
         extractor_id = _require_registered_profile_import_extractor(
-            PROFILE_IMPORT_EXTRACTOR_ID
+            PROFILE_STATEMENT_EXTRACTOR_ID if self.source_type is SourceType.USER_STATEMENT else PROFILE_IMPORT_EXTRACTOR_ID
         )
         object.__setattr__(self, "source_sha256", source_sha256)
-        object.__setattr__(self, "source_ref", _profile_import_source_ref(source_sha256))
+        object.__setattr__(self, "source_ref", _profile_import_source_ref(source_sha256, self.source_type))
         object.__setattr__(
             self,
             "source_artifact_id",
-            _profile_import_source_artifact_id(source_sha256),
+            _profile_import_source_artifact_id(source_sha256, self.source_type),
         )
         object.__setattr__(self, "extractor_id", extractor_id)
         if not isinstance(self.proposals, tuple):
@@ -550,11 +598,12 @@ class ImportProposalResult:
 
     def __post_init__(self) -> None:
         _require_text(self.workflow_run_id, "workflow_run_id")
+        source_type = _profile_import_origin(self.extractor_id)
         if (
             _SHA256_PATTERN.fullmatch(self.source_sha256) is None
-            or self.source_ref != _profile_import_source_ref(self.source_sha256)
+            or self.source_ref != _profile_import_source_ref(self.source_sha256, source_type)
             or self.source_artifact_id
-            != _profile_import_source_artifact_id(self.source_sha256)
+            != _profile_import_source_artifact_id(self.source_sha256, source_type)
         ):
             raise ValueError("import result requires application-owned source identity")
         _require_registered_profile_import_extractor(self.extractor_id)
@@ -597,9 +646,9 @@ class ImportProposalResult:
             if not lifecycle_is_valid:
                 raise ValueError("import result contains an invalid review lifecycle state")
             if (
-                claim.source_type is not SourceType.IMPORTED_RESUME
+                claim.source_type is not source_type
                 or claim.source_ref != self.source_ref
-                or item.source_type is not SourceType.IMPORTED_RESUME
+                or item.source_type is not source_type
                 or item.source_ref != self.source_ref
                 or item.artifact_id != self.source_artifact_id
                 or item.extraction_method != self.extractor_id
@@ -633,11 +682,12 @@ class ImportProposalPreview:
     review_required: bool = field(default=True, init=False)
 
     def __post_init__(self) -> None:
+        source_type = _profile_import_origin(self.extractor_id)
         if (
             _SHA256_PATTERN.fullmatch(self.source_sha256) is None
-            or self.source_ref != _profile_import_source_ref(self.source_sha256)
+            or self.source_ref != _profile_import_source_ref(self.source_sha256, source_type)
             or self.source_artifact_id
-            != _profile_import_source_artifact_id(self.source_sha256)
+            != _profile_import_source_artifact_id(self.source_sha256, source_type)
         ):
             raise ValueError("import preview requires application-owned source identity")
         _require_registered_profile_import_extractor(self.extractor_id)
@@ -832,13 +882,17 @@ class ProfileReviewItem:
             for item in self.evidence
         ):
             raise ValueError("review evidence must be linked to its claim")
-        if self.claim.source_type is SourceType.IMPORTED_RESUME and (
+        managed = (self.claim.source_type is SourceType.IMPORTED_RESUME
+                   or self.import_workflow_run_id is not None
+                   or _has_statement_marker(self.claim.source_ref, *(value for item in self.evidence
+                       for value in (item.source_ref, item.artifact_id, item.extraction_method))))
+        if managed and (
             len(self.evidence) != 1
             or self.claim.verified_at is not None
             or self.claim.verified_by is not None
             or set(evidence_ids) != set(self.claim.evidence_ids)
             or any(
-                item.source_type is not SourceType.IMPORTED_RESUME
+                item.source_type is not self.claim.source_type
                 or item.source_ref != self.claim.source_ref
                 or item.confirmation_status is not EvidenceConfirmationStatus.PENDING
                 for item in self.evidence
@@ -847,7 +901,10 @@ class ProfileReviewItem:
             raise ValueError(
                 "imported review claims require complete pending imported evidence"
             )
-        if self.claim.source_type is SourceType.IMPORTED_RESUME:
+        if managed:
+            source_type = _profile_import_origin(self.evidence[0].extraction_method)
+            if self.claim.source_type is not source_type:
+                raise ValueError("review source type does not match its registered ingress")
             if not _is_canonical_uuid(self.import_workflow_run_id, version=4):
                 raise ValueError("review import workflow identity is invalid")
             if (
@@ -861,7 +918,7 @@ class ProfileReviewItem:
                 or _SHA256_PATTERN.fullmatch(self.review_token) is None
             ):
                 raise ValueError("review token must contain a lowercase SHA-256 digest")
-            source_sha256 = _profile_import_source_digest(self.claim.source_ref)
+            source_sha256 = _profile_import_source_digest(self.claim.source_ref, source_type)
             if source_sha256 is None:
                 raise ValueError(
                     "imported review source provenance is not application-owned"
@@ -873,7 +930,7 @@ class ProfileReviewItem:
                 raise ValueError(
                     "imported review record identity is not application-owned"
                 )
-            source_artifact_id = _profile_import_source_artifact_id(source_sha256)
+            source_artifact_id = _profile_import_source_artifact_id(source_sha256, source_type)
             if any(
                 item.artifact_id != source_artifact_id
                 or _profile_import_extractor_manifest_version(
@@ -898,6 +955,78 @@ class ProfileReviewItem:
             )
         ):
             raise ValueError("non-imported review items cannot carry import identity")
+
+
+def validate_profile_review_selection_request(*, claim_id: str) -> None:
+    """Validate an exact existing-ID lookup without reading or exposing input."""
+    if type(claim_id) is not str or not claim_id.strip():
+        raise ValueError("Review selection requires a nonblank claim ID")
+    try:
+        claim_id.encode("utf-8")
+    except UnicodeError:
+        raise ValueError("Review selection claim ID must contain valid Unicode text") from None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProfileReviewSelection:
+    """One pending item, with the size of the fully validated pending queue."""
+
+    item: ProfileReviewItem
+    pending_count: int
+
+    def __post_init__(self) -> None:
+        if (type(self.item) is not ProfileReviewItem
+            or type(self.pending_count) is not int
+            or self.pending_count < 1):
+            raise ValueError("Review selection requires an item and a positive pending count")
+
+
+def validate_profile_review_page_request(
+    *, limit: int, after_claim_id: str | None = None,
+) -> None:
+    """Validate page syntax without reading a profile or revealing input text."""
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError("Review page limit must be an integer from one to fifty")
+    # Legacy generic claim IDs are nonblank strings, not path or command input.
+    # Preserve that contract instead of stranding existing rows behind a newer
+    # identifier alphabet or length restriction. Lookups are parameterized.
+    if after_claim_id is not None and (
+        type(after_claim_id) is not str or not after_claim_id.strip()
+    ):
+        raise ValueError("Review page anchor must be a nonblank claim ID")
+    if after_claim_id is not None:
+        try:
+            after_claim_id.encode("utf-8")
+        except UnicodeError:
+            raise ValueError("Review page anchor must contain valid Unicode text") from None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProfileReviewPage:
+    """A pending-queue slice; counts retain visibility of skipped earlier facts."""
+
+    items: tuple[ProfileReviewItem, ...]
+    pending_count: int
+    limit: int
+    returned_count: int
+    pending_before_count: int
+    pending_after_count: int
+    next_after: str | None
+
+    def __post_init__(self) -> None:
+        validate_profile_review_page_request(limit=self.limit, after_claim_id=self.next_after)
+        if (type(self.items) is not tuple
+            or any(type(item) is not ProfileReviewItem for item in self.items)
+            or any(type(value) is not int or value < 0 for value in (
+                self.pending_count, self.returned_count,
+                self.pending_before_count, self.pending_after_count))
+            or self.returned_count != len(self.items)
+            or self.returned_count > self.limit
+            or len({item.claim.id for item in self.items}) != self.returned_count
+            or self.pending_count != self.pending_before_count + self.returned_count + self.pending_after_count
+            or self.pending_after_count > 0 and self.returned_count != self.limit
+            or self.next_after != (self.items[-1].claim.id if self.pending_after_count > 0 else None)):
+            raise ValueError("Review page counts or continuation are inconsistent")
 
 
 def _text_span_locator(span: TextSourceSpan, source_sha256: str) -> dict[str, JsonValue]:
@@ -937,6 +1066,7 @@ def _profile_import_record_sha256(
     locator: JsonValue,
     evidence_text: str,
     extraction_method: str,
+    source_type: SourceType = SourceType.IMPORTED_RESUME,
 ) -> str:
     """Hash the immutable projection of one imported claim/evidence pair.
 
@@ -950,7 +1080,7 @@ def _profile_import_record_sha256(
     if normalized_confidence == 0.0:
         normalized_confidence = 0.0
     payload: dict[str, JsonValue] = {
-        "schema_version": PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION,
+        "schema_version": _profile_import_versions(source_type)[2],
         "claim_type": claim_type,
         "value_sha256": _text_sha256(_json_identity(value)),
         "canonical_text_sha256": _text_sha256(canonical_text),
@@ -966,6 +1096,8 @@ def _profile_import_record_sha256(
         "evidence_text_sha256": _text_sha256(evidence_text),
         "extraction_method": extraction_method,
     }
+    if source_type is SourceType.USER_STATEMENT:
+        payload["source_type"] = source_type.value
     return _text_sha256(_json_identity(payload))
 
 
@@ -988,6 +1120,7 @@ def _profile_import_record_sha256_for_proposal(
         locator=_text_span_locator(proposal.span, request.source_sha256),
         evidence_text=exact_text,
         extraction_method=request.extractor_id,
+        source_type=request.source_type,
     )
 
 
@@ -1047,6 +1180,9 @@ class _ProfileImportWorkflowIdentity:
     created_at: str
     records: tuple[_ProfileImportRecordIdentity, ...]
     value_schema_version: int
+    content_policy_version: int
+    source_type: SourceType
+    record_digest_schema_version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1073,8 +1209,8 @@ def _profile_review_workflow_input(
     return {
         "review_decision_schema_version": PROFILE_IMPORT_REVIEW_DECISION_SCHEMA_VERSION,
         "review_result_schema_version": PROFILE_IMPORT_REVIEW_RESULT_SCHEMA_VERSION,
-        "record_digest_schema_version": PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION,
-        "content_policy_version": PROFILE_IMPORT_CONTENT_POLICY_VERSION,
+        "record_digest_schema_version": state.workflow.record_digest_schema_version,
+        "content_policy_version": state.workflow.content_policy_version,
         "restricted_taxonomy_version": PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
         "restricted_taxonomy_sha256": PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
         "value_schema_version": state.workflow.value_schema_version,
@@ -1145,15 +1281,16 @@ def _import_workflow_input(
         _SHA256_PATTERN.fullmatch(item) is None for item in record_sha256s
     ):
         raise ValueError("profile import record digests do not match the proposals")
-    return {
-        "request_schema_version": PROFILE_IMPORT_REQUEST_SCHEMA_VERSION,
+    versions = _profile_import_versions(request.source_type)
+    result: dict[str, JsonValue] = {
+        "request_schema_version": versions[0],
         "manifest_schema_version": PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION,
         "result_manifest_schema_version": PROFILE_IMPORT_RESULT_MANIFEST_SCHEMA_VERSION,
         "record_id_schema_version": PROFILE_IMPORT_RECORD_ID_SCHEMA_VERSION,
-        "record_digest_schema_version": PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION,
-        "source_identity_schema_version": PROFILE_IMPORT_SOURCE_IDENTITY_SCHEMA_VERSION,
+        "record_digest_schema_version": versions[2],
+        "source_identity_schema_version": versions[1],
         "span_locator_schema_version": PROFILE_IMPORT_SPAN_LOCATOR_SCHEMA_VERSION,
-        "content_policy_version": PROFILE_IMPORT_CONTENT_POLICY_VERSION,
+        "content_policy_version": request.content_policy_version,
         "restricted_taxonomy_sha256": PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256,
         "restricted_taxonomy_version": PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION,
         "value_schema_version": profile_value_schema_version(tuple(p.claim_type for p in request.proposals)),
@@ -1168,6 +1305,9 @@ def _import_workflow_input(
         "source_ref": request.source_ref,
         "source_sha256": request.source_sha256,
     }
+    if request.source_type is SourceType.USER_STATEMENT:
+        result["source_type"] = request.source_type.value
+    return result
 
 
 def _import_request_sha256(workflow_input: dict[str, JsonValue]) -> str:
@@ -1276,6 +1416,7 @@ def _validated_source_spans(request: CreateImportProposal) -> tuple[str, ...]:
             evidence_context=request.source_text[context_start:current_line_end],
             evidence_prefix=request.source_text[current_line_start:span.start],
             preceding_line=preceding_line,
+            value_schema_version=profile_value_schema_version((proposal.claim_type,)),
         )
         total_selected_codepoints += len(exact_text)
         if total_selected_codepoints > PROFILE_IMPORT_MAX_TOTAL_EVIDENCE_CODEPOINTS:
@@ -1290,6 +1431,7 @@ def _validated_source_spans(request: CreateImportProposal) -> tuple[str, ...]:
             for proposal, exact_text in zip(request.proposals, result, strict=True)
         ),
         metadata=tuple(persisted_metadata),
+        content_policy_version=request.content_policy_version,
     )
     return tuple(result)
 
@@ -1321,8 +1463,60 @@ class ProfileService:
     def __init__(self, repository: SQLiteRepository) -> None:
         self._repository = repository
 
+    def _managed_import_owners(self) -> dict[str, str]:
+        """Index immutable workflow ownership independently of mutable markers.
+
+        Losing an association and changing source markers must not turn an
+        application-owned statement into a generic claim. This per-read index
+        retains no authority between calls; full workflow validation follows
+        whenever an owned claim is read. Legacy generic claims are unaffected.
+        """
+        owners: dict[str, str] = {}
+        try:
+            for workflow in self._repository.list_workflow_runs(workflow_type=_PROFILE_IMPORT_WORKFLOW):
+                workflow_id = _required_text(workflow, "id")
+                manifest = _canonical_stored_json(workflow.get("generated_artifacts_json"),
+                                                  field_name="workflow generated_artifacts_json")
+                if (type(manifest) is not dict or type(manifest.get("records")) is not list
+                    or not manifest["records"]):
+                    raise ValueError("import ownership manifest is invalid")
+                for index, record in enumerate(manifest["records"]):
+                    if type(record) is not dict or not _is_canonical_uuid(record.get("claim_id"), version=5):
+                        raise ValueError("import ownership record is invalid")
+                    claim_id = record["claim_id"]
+                    if claim_id in owners:
+                        raise ValueError("import ownership is ambiguous")
+                    association = self._repository.get_profile_import_review_item(claim_id)
+                    if (association is None
+                        or association.get("import_workflow_run_id") != workflow_id
+                        or association.get("proposal_index") != index
+                        or association.get("evidence_id") != record.get("evidence_id")
+                        or association.get("record_sha256") != record.get("record_sha256")):
+                        raise ValueError("import ownership association is missing or changed")
+                    owners[claim_id] = workflow_id
+        except (TypeError, ValueError, KeyError) as error:
+            raise RepositoryError("Profile import ownership failed integrity checks") from error
+        return owners
+
+    def _has_statement_provenance(self, claim: Claim) -> bool:
+        if _has_statement_marker(claim.source_ref):
+            return True
+        # Inspect markers without parsing legacy evidence that the old pending
+        # resume compatibility path deliberately leaves unusable and unverified.
+        for link in self._repository.list_claim_evidence(claim_id=claim.id):
+            item = self._repository.get_evidence(link["evidence_id"])
+            if item is not None and _has_statement_marker(
+                item.get("source_ref"), item.get("artifact_id"), item.get("extraction_method"),
+            ):
+                return True
+        return False
+
+    def _requires_managed_review(self, claim: Claim, owners: Mapping[str, str]) -> bool:
+        return (claim.id in owners or claim.source_type is SourceType.IMPORTED_RESUME
+                or self._has_statement_provenance(claim))
+
     def create_claim(self, request: CreateClaim, *, now: datetime | None = None) -> Claim:
-        if request.source_type is SourceType.IMPORTED_RESUME:
+        if request.source_type is SourceType.IMPORTED_RESUME or _has_statement_marker(request.source_ref):
             raise ValueError(
                 "Imported claims must be created by the profile import workflow"
             )
@@ -1415,7 +1609,9 @@ class ProfileService:
         *,
         now: datetime | None = None,
     ) -> Evidence:
-        if request.source_type is SourceType.IMPORTED_RESUME:
+        if request.source_type is SourceType.IMPORTED_RESUME or _has_statement_marker(
+            request.source_ref, request.artifact_id, request.extraction_method,
+        ):
             raise ValueError(
                 "Imported evidence must be created by the profile import workflow"
             )
@@ -1492,7 +1688,7 @@ class ProfileService:
                 byte_size=len(request.source_text.encode("utf-8")),
                 content_sha256=request.source_sha256,
                 sensitivity=Sensitivity.PERSONAL.value,
-                metadata=_profile_import_artifact_metadata(len(request.source_text)),
+                metadata=_profile_import_artifact_metadata(len(request.source_text), request.source_type),
                 captured_at=created_at,
                 created_at=created_at,
             )
@@ -1501,6 +1697,7 @@ class ProfileService:
             source_sha256=request.source_sha256,
             expected_byte_size=len(request.source_text.encode("utf-8")),
             expected_codepoint_size=len(request.source_text),
+            source_type=request.source_type,
         )
         return validated_artifact
 
@@ -1565,6 +1762,13 @@ class ProfileService:
                 "source_ref",
                 "source_sha256",
             }
+            extractor_id = workflow_input.get("extractor_id")
+            source_type = _profile_import_origin(extractor_id)
+            versions = _profile_import_versions(source_type)
+            if source_type is SourceType.USER_STATEMENT:
+                expected_input_fields.add("source_type")
+                if workflow_input.get("source_type") != source_type.value:
+                    raise ValueError("workflow source type is invalid")
             if set(workflow_input) != expected_input_fields:
                 raise ValueError("workflow input fields are invalid")
             source_sha256 = workflow_input.get("source_sha256")
@@ -1578,34 +1782,35 @@ class ProfileService:
             source_codepoint_size = workflow_input.get("source_codepoint_size")
             record_sha256s = workflow_input.get("record_sha256s")
             if (
-                workflow_input.get("request_schema_version")
-                != PROFILE_IMPORT_REQUEST_SCHEMA_VERSION
+                tuple(workflow_input.get(key) for key in (
+                    "request_schema_version", "source_identity_schema_version", "record_digest_schema_version",
+                )) != versions
+                or any(type(workflow_input.get(key)) is not int for key in (
+                    "request_schema_version", "source_identity_schema_version", "record_digest_schema_version",
+                ))
                 or workflow_input.get("manifest_schema_version")
                 != PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION
                 or workflow_input.get("result_manifest_schema_version")
                 != PROFILE_IMPORT_RESULT_MANIFEST_SCHEMA_VERSION
                 or workflow_input.get("record_id_schema_version")
                 != PROFILE_IMPORT_RECORD_ID_SCHEMA_VERSION
-                or workflow_input.get("record_digest_schema_version")
-                != PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION
-                or workflow_input.get("source_identity_schema_version")
-                != PROFILE_IMPORT_SOURCE_IDENTITY_SCHEMA_VERSION
                 or workflow_input.get("span_locator_schema_version")
                 != PROFILE_IMPORT_SPAN_LOCATOR_SCHEMA_VERSION
                 or workflow_input.get("content_policy_version")
-                != PROFILE_IMPORT_CONTENT_POLICY_VERSION
+                not in PROFILE_IMPORT_SUPPORTED_CONTENT_POLICIES
+                or type(workflow_input.get("content_policy_version")) is not int
                 or workflow_input.get("restricted_taxonomy_sha256")
                 != PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256
                 or workflow_input.get("restricted_taxonomy_version")
                 != PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION
                 or workflow_input.get("value_schema_version")
-                not in {1, 2}
+                not in {1, 2, 3}
                 or type(workflow_input.get("value_schema_version")) is not int
                 or not isinstance(source_sha256, str)
                 or _SHA256_PATTERN.fullmatch(source_sha256) is None
-                or source_ref != _profile_import_source_ref(source_sha256)
+                or source_ref != _profile_import_source_ref(source_sha256, source_type)
                 or source_artifact_id
-                != _profile_import_source_artifact_id(source_sha256)
+                != _profile_import_source_artifact_id(source_sha256, source_type)
                 or not isinstance(extractor_id, str)
                 or _profile_import_extractor_manifest_version(extractor_id)
                 != PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION
@@ -1759,6 +1964,7 @@ class ProfileService:
                 source_sha256=source_sha256,
                 expected_byte_size=source_byte_size,
                 expected_codepoint_size=source_codepoint_size,
+                source_type=source_type,
             )
             return _ProfileImportWorkflowIdentity(
                 workflow_id=workflow_id,
@@ -1773,6 +1979,9 @@ class ProfileService:
                 created_at=created_at,
                 records=tuple(records),
                 value_schema_version=workflow_input["value_schema_version"],
+                content_policy_version=workflow_input["content_policy_version"],
+                source_type=source_type,
+                record_digest_schema_version=versions[2],
             )
         except (TypeError, ValueError, IndexError) as error:
             raise RepositoryError(
@@ -1854,7 +2063,7 @@ class ProfileService:
                 or link.get("created_at") != workflow.created_at
                 or claim.evidence_ids != (record.evidence_id,)
                 or claim.value_json != claim_value
-                or claim.source_type is not SourceType.IMPORTED_RESUME
+                or claim.source_type is not workflow.source_type
                 or claim.source_ref != workflow.source_ref
                 or claim.effective_from is not None
                 or claim.effective_to is not None
@@ -1864,7 +2073,7 @@ class ProfileService:
                     workflow.created_at,
                     field_name="workflow created_at",
                 )
-                or evidence.source_type is not SourceType.IMPORTED_RESUME
+                or evidence.source_type is not workflow.source_type
                 or evidence.source_ref != workflow.source_ref
                 or evidence.artifact_id != workflow.source_artifact_id
                 or evidence.extraction_method != workflow.extractor_id
@@ -1919,6 +2128,7 @@ class ProfileService:
                 locator=evidence.locator,
                 evidence_text=source_text,
                 extraction_method=workflow.extractor_id,
+                source_type=workflow.source_type,
             )
             if current_record_sha256 != record.record_sha256:
                 raise ValueError("review projection digest is invalid")
@@ -2085,7 +2295,7 @@ class ProfileService:
                         claim_type=proposal.claim_type,
                         value=proposal.value,
                         canonical_text=proposal.canonical_text,
-                        source_type=SourceType.IMPORTED_RESUME,
+                        source_type=request.source_type,
                         source_ref=request.source_ref,
                         status=ClaimStatus.NEEDS_REVIEW,
                         approval_status=ApprovalStatus.PENDING,
@@ -2101,7 +2311,7 @@ class ProfileService:
                 evidence = self._create_evidence(
                     CreateEvidence(
                         claim_id=claim.id,
-                        source_type=SourceType.IMPORTED_RESUME,
+                        source_type=request.source_type,
                         source_ref=request.source_ref,
                         source_text=exact_text,
                         locator=_text_span_locator(
@@ -2125,6 +2335,7 @@ class ProfileService:
                     evidence_id=evidence.id,
                     record_sha256=record_sha256,
                     created_at=created_at_text,
+                    source_type=request.source_type.value,
                 )
                 generated_records.append(
                     {
@@ -2202,6 +2413,7 @@ class ProfileService:
     def list_review_items(self) -> tuple[ProfileReviewItem, ...]:
         """Return the pending review queue without changing trust state."""
 
+        owners = self._managed_import_owners()
         associations = self._repository.list_profile_import_review_items()
         associations_by_claim: dict[str, Record] = {}
         pending_import_states: dict[str, _ProfileImportReviewState] = {}
@@ -2268,7 +2480,7 @@ class ProfileService:
                     )
                 listed_import_claim_ids.add(claim.id)
                 continue
-            elif claim.source_type is SourceType.IMPORTED_RESUME:
+            elif self._requires_managed_review(claim, owners):
                 self._profile_import_review_state(claim.id)
                 raise RepositoryError(
                     "Profile import review lifecycle failed integrity checks"
@@ -2284,6 +2496,75 @@ class ProfileService:
                 "Profile import review lifecycle failed integrity checks"
             )
         return tuple(items)
+
+    def get_review_item(self, claim_id: str) -> ProfileReviewSelection:
+        """Select a current pending item after auditing the entire queue.
+
+        The read borrows an existing transaction or owns one read snapshot. A
+        missing or decided ID never changes the queue or discloses other items.
+        """
+        validate_profile_review_selection_request(claim_id=claim_id)
+        with self._repository.read_transaction():
+            pending = self.list_review_items()
+            for item in pending:
+                if item.claim.id == claim_id:
+                    return ProfileReviewSelection(item=item, pending_count=len(pending))
+            raise ValueError("Requested claim is not pending review.")
+
+    def list_review_page(
+        self, *, limit: int, after_claim_id: str | None = None,
+    ) -> ProfileReviewPage:
+        """Read a bounded page after a stable claim anchor in one snapshot.
+
+        Validation still covers every pending item. Imported anchors remain in
+        their immutable association order after a decision; generic claims keep
+        their repository creation-time order after all imported associations.
+        Earlier pending claims are counted, never implicitly approved or skipped
+        out of the queue. Restart without an anchor to review them.
+        """
+        validate_profile_review_page_request(limit=limit, after_claim_id=after_claim_id)
+        with self._repository.read_transaction():
+            pending = self.list_review_items()
+            before = 0
+            if after_claim_id is not None:
+                record = self._repository.get_claim(after_claim_id)
+                if record is None:
+                    raise ValueError("Review page anchor claim does not exist. Restart profile review without a continuation anchor.")
+                association = self._repository.get_profile_import_review_item(after_claim_id)
+                claim = self._claim_from_record(record)
+                if association is not None or self._requires_managed_review(claim, self._managed_import_owners()):
+                    state = self._profile_import_review_state(after_claim_id)
+                    if state.association.get("decision") is not None:
+                        self._profile_review_decision_result_from_state(state)
+                else:
+                    evidence = self._evidence_for_claim(after_claim_id)
+                    if any(item.claim_id != claim.id or item.id not in claim.evidence_ids for item in evidence):
+                        raise RepositoryError("Review page anchor evidence failed integrity checks")
+
+                # Include decided records when locating the anchor: an offset
+                # into the shrinking pending queue would skip unseen claims.
+                associations = self._repository.list_profile_import_review_items()
+                imported_ids = [item["claim_id"] for item in associations]
+                imported_id_set = set(imported_ids)
+                ordered_ids = imported_ids + [item["id"] for item in self._repository.list_claims()
+                    if item["id"] not in imported_id_set]
+                positions = {claim_id: index for index, claim_id in enumerate(ordered_ids)}
+                pending_positions: list[int] = []
+                for item in pending:
+                    position = positions.get(item.claim.id)
+                    if position is None:
+                        raise RepositoryError("Review page ordering failed integrity checks")
+                    pending_positions.append(position)
+                if (len(positions) != len(ordered_ids) or after_claim_id not in positions
+                    or pending_positions != sorted(pending_positions)):
+                    raise RepositoryError("Review page ordering failed integrity checks")
+                anchor_position = positions[after_claim_id]
+                before = sum(position <= anchor_position for position in pending_positions)
+            items = pending[before:before + limit]
+            after = len(pending) - before - len(items)
+            return ProfileReviewPage(items=items, pending_count=len(pending), limit=limit,
+                returned_count=len(items), pending_before_count=before, pending_after_count=after,
+                next_after=items[-1].claim.id if after else None)
 
     def _profile_review_approval_contradiction(
         self,
@@ -2407,15 +2688,18 @@ class ProfileService:
                 or workflow_input.get("review_result_schema_version")
                 != PROFILE_IMPORT_REVIEW_RESULT_SCHEMA_VERSION
                 or workflow_input.get("record_digest_schema_version")
-                != PROFILE_IMPORT_RECORD_DIGEST_SCHEMA_VERSION
+                != state.workflow.record_digest_schema_version
+                or type(workflow_input.get("record_digest_schema_version")) is not int
                 or workflow_input.get("content_policy_version")
-                != PROFILE_IMPORT_CONTENT_POLICY_VERSION
+                != state.workflow.content_policy_version
+                or type(workflow_input.get("content_policy_version")) is not int
                 or workflow_input.get("restricted_taxonomy_version")
                 != PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION
                 or workflow_input.get("restricted_taxonomy_sha256")
                 != PROFILE_IMPORT_RESTRICTED_TAXONOMY_SHA256
                 or workflow_input.get("value_schema_version")
                 != state.workflow.value_schema_version
+                or type(workflow_input.get("value_schema_version")) is not int
                 or workflow_input.get("import_workflow_run_id")
                 != state.workflow.workflow_id
                 or workflow_input.get("import_workflow_input_sha256")
@@ -2578,6 +2862,7 @@ class ProfileService:
                 decision_workflow_run_id=decision_workflow_id,
                 decided_by=request.actor_id,
                 decided_at=decided_at_text,
+                source_type=state.workflow.source_type.value,
             )
             self._repository.update_workflow_run(
                 decision_workflow_id,
@@ -2643,6 +2928,7 @@ class ProfileService:
         authority here and in resolve; it never rewrites historical imports.
         """
         claims = self.list_claims()
+        owners = self._managed_import_owners()
         validated_claims: list[Claim] = []
         evidence: list[Evidence] = []
         workflow_identities: dict[str, _ProfileImportWorkflowIdentity] = {}
@@ -2653,6 +2939,8 @@ class ProfileService:
             if (
                 import_association is None
                 and claim.source_type is SourceType.IMPORTED_RESUME
+                and claim.id not in owners
+                and not self._has_statement_provenance(claim)
                 and claim.status is ClaimStatus.NEEDS_REVIEW
                 and claim.approval_status is ApprovalStatus.PENDING
                 and claim.verified_at is None
@@ -2662,7 +2950,7 @@ class ProfileService:
                 continue
             if (
                 import_association is not None
-                or claim.source_type is SourceType.IMPORTED_RESUME
+                or self._requires_managed_review(claim, owners)
             ):
                 workflow_identity: _ProfileImportWorkflowIdentity | None = None
                 if import_association is not None:
@@ -2712,6 +3000,7 @@ class ProfileService:
         )
         if (
             identity.source_sha256 != request.source_sha256
+            or identity.source_type is not request.source_type
             or identity.source_ref != request.source_ref
             or identity.source_artifact_id != request.source_artifact_id
             or identity.extractor_id != request.extractor_id

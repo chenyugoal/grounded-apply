@@ -11,11 +11,13 @@ import unicodedata
 from pathlib import Path
 
 from grounded_apply.services.material_models import (
-    HEADING_TYPES, MaterialValidationError, RenderedResume, ResumeStructure, heading_fields, presented_text,
+    MaterialValidationError, RenderedResume, ResumeStructure, heading_fields, heading_types, presented_text,
 )
 
 RENDERER = "grounded-apply.latex-resume@2"
-_RENDERERS = {"approved_text_selection@1": "grounded-apply.latex-resume@1", "approved_text_selection@2": RENDERER}
+_RENDERERS = {"approved_text_selection@1": "grounded-apply.latex-resume@1",
+              "approved_text_selection@2": "grounded-apply.latex-resume@2",
+              "approved_text_selection@3": "grounded-apply.latex-resume@3"}
 _SECTIONS = (
     ("Experience", {"employment_description", "employment_title", "employment_dates", "achievement", "project_outcome"}),
     ("Projects", {"portfolio_item", "project_contribution"}),
@@ -24,8 +26,15 @@ _SECTIONS = (
     ("Certifications", {"certification"}),
     ("Publications", {"publication"}),
 )
+_RESEARCH_SECTIONS = (_SECTIONS[0], ("Research", {"research_description"}), *_SECTIONS[1:])
 _ESCAPE = {"\\": r"\textbackslash{}", "{": r"\{", "}": r"\}", "$": r"\$", "&": r"\&",
            "#": r"\#", "%": r"\%", "_": r"\_", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}"}
+
+
+def _sections(structure: ResumeStructure) -> tuple[tuple[str, set[str]], ...]:
+    if structure.transformation not in _RENDERERS:
+        raise MaterialValidationError("Unsupported material transformation")
+    return _RESEARCH_SECTIONS if structure.transformation == "approved_text_selection@3" else _SECTIONS
 
 
 def escaped(text: str) -> str:
@@ -52,7 +61,7 @@ def _legacy_latex_source(structure: ResumeStructure) -> str:
         r"\begin{document}", r"{\LARGE\bfseries " + escaped(names[0].text) + r"}\par\vspace{5pt}",
         r"{\small " + r" \enspace | \enspace ".join(escaped(u.text) for u in contacts) + r"}\par",
         r"\vspace{7pt}\hrule\vspace{5pt}"]
-    for title, types in _SECTIONS:
+    for title, types in _sections(structure):
         units = [u for u in structure.units if u.claim_type in types]
         if not units:
             continue
@@ -73,7 +82,7 @@ def _legacy_latex_source(structure: ResumeStructure) -> str:
                 lines.append(escaped(unit.text) + r"\par")
         if in_list:
             lines.append(r"\end{itemize}")
-    known = {"candidate_name"} | {u.claim_type for u in contacts} | set().union(*(types for _, types in _SECTIONS))
+    known = {"candidate_name"} | {u.claim_type for u in contacts} | set().union(*(types for _, types in _sections(structure)))
     if any(u.claim_type not in known for u in structure.units):
         raise MaterialValidationError("Resume contains an unsupported factual section")
     lines.append(r"\end{document}")
@@ -107,7 +116,7 @@ def latex_source(structure: ResumeStructure) -> str:
         r"\setlist[itemize]{leftmargin=1.3em,labelsep=0.5em,itemsep=2pt,parsep=0pt,topsep=3pt,partopsep=0pt}",
         r"\begin{document}", r"{\centering{\fontsize{22}{25}\selectfont\bfseries " + escaped(names[0].text) + r"}\par",
         r"\vspace{3pt}{\small " + r" \enspace | \enspace ".join(escaped(u.text) for u in contacts) + r"}\par}"]
-    for title, types in _SECTIONS:
+    for title, types in _sections(structure):
         units = [u for u in structure.units if u.claim_type in types]
         if not units:
             continue
@@ -126,9 +135,9 @@ def latex_source(structure: ResumeStructure) -> str:
                 lines.append(r"\end{itemize}")
                 in_list = False
             if unit.presentation == "heading":
-                if unit.claim_type not in HEADING_TYPES:
+                if unit.claim_type not in heading_types(structure.transformation):
                     raise MaterialValidationError("Unsupported heading claim type")
-                fields = heading_fields(unit)
+                fields = heading_fields(unit, structure.transformation)
                 lines.append(r"\par\Needspace{5\baselineskip}" + (r"\vspace{5pt}" if index else ""))
                 if len(fields) == 4:
                     for left, right, style in ((fields[0], fields[1], r"\bfseries"), (fields[2], fields[3], r"\itshape")):
@@ -141,7 +150,7 @@ def latex_source(structure: ResumeStructure) -> str:
                 lines.append(_emphasized(unit.text) + r"\par")
         if in_list:
             lines.append(r"\end{itemize}")
-    known = {"candidate_name"} | {u.claim_type for u in contacts} | set().union(*(types for _, types in _SECTIONS))
+    known = {"candidate_name"} | {u.claim_type for u in contacts} | set().union(*(types for _, types in _sections(structure)))
     if any(u.claim_type not in known for u in structure.units):
         raise MaterialValidationError("Resume contains an unsupported factual section")
     lines.append(r"\end{document}")
@@ -157,7 +166,7 @@ def normalized(text: str) -> str:
 def expected_text(structure: ResumeStructure) -> str:
     lines = [next(u.text for u in structure.units if u.claim_type == "candidate_name"),
         " | ".join(u.text for u in structure.units if u.claim_type.startswith("contact_"))]
-    for title, types in _SECTIONS:
+    for title, types in _sections(structure):
         units = [u for u in structure.units if u.claim_type in types]
         if units:
             lines.append(title)

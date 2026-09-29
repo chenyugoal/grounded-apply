@@ -5,6 +5,13 @@ commands that work now from the target toolchain described in the product design
 The [daily quickstart](DAILY_QUICKSTART.md) describes user setup and review without
 requiring command syntax; this guide owns the executable verification matrix.
 
+The project is being wrapped up as an experimental alpha; broader feature work
+is paused. User-facing scope lives in [README](../README.md), release changes in
+[CHANGELOG](../CHANGELOG.md), and the intended product schematic in
+[PRODUCT_VISION](PRODUCT_VISION.md). The verification and truth requirements below
+still apply to fixes and contributions. Release wrap-up does not establish the
+unmeasured human time-saving or hosted-platform acceptance criteria.
+
 ## Prerequisites
 
 - Python 3.12 or newer
@@ -35,10 +42,11 @@ assumed. No dependencies are installed by the launcher.
 | Full repository gate | `./scripts/check` | Supported now |
 | CLI help | `./scripts/gapply --help`; `./scripts/gapply profile decide --help` | Supported now |
 | Environment/path diagnostics | `./scripts/gapply doctor --json` | Read-only schema/path checks and database file headroom; advisory at 90% of the snapshot limit, unhealthy above it; no backup-validity or next-write guarantee |
+| PDF prerequisite presence | `./scripts/gapply doctor --materials [--json]` | Separate intake/output dependency presence, no runtime or functional test; default doctor unchanged |
 | Search resumption | `./scripts/gapply brief [--job-id ID] [--follow-up-days 7] [--json]` | Read-only validated snapshot; stage-based next actions, no scheduling or messages |
 | Content-free command event stream | `./scripts/gapply --log-events doctor --json` | Supported; opt-in JSONL on stderr, private response on stdout |
-| Structured profile proposal import | `./scripts/gapply profile import --source-file FILE --proposals-file FILE --idempotency-key KEY [--dry-run] [--json]` | Supported |
-| Pending profile review | `./scripts/gapply profile review [--json]` | Supported, read-only |
+| Structured profile proposal import | `./scripts/gapply profile import --source-file FILE --proposals-file FILE --idempotency-key KEY [--source-kind resume\|user-statement] [--retain-all-facts] [--dry-run] [--json]` | Default resume; opt-in user statements accept exact text/stdin and remain pending |
+| Pending profile review | `./scripts/gapply profile review [--claim-id ID\|--claim-id-json JSON_STRING\|--limit 1..50 [--after CLAIM_ID\|--after-json JSON_STRING]] [--json]` | Read-only; chosen pending fact or bounded page; no-option response unchanged |
 | One profile review decision | `./scripts/gapply profile decide --claim-id CLAIM_ID --review-token TOKEN --decision approve\|reject --actor-id ACTOR_ID --idempotency-key KEY [--confirm] [--json]` | Supported; storage-free syntax preview unless confirmed |
 | Full test suite | `PYTHONPATH=src python3 -m unittest discover -s tests -v` | Supported now |
 | Installed-package gate | `python scripts/check_package.py` | Supported with optional build tools; latest local gate verified on Python 3.12.14 |
@@ -47,12 +55,17 @@ assumed. No dependencies are installed by the launcher.
 | Required encryption gate | `python -W error scripts/check_backup.py` | Optional provider required; skipped tests fail the gate |
 | Installed encryption gate | `python scripts/check_package.py --backup-wheelhouse ABSOLUTE_PATH` | Offline dependency wheels required; installs and exercises the extra |
 | Portable-home deletion | `./scripts/gapply delete --target-home ABSOLUTE_HOME --receipt EXTERNAL_ABSOLUTE_PATH [--preview-token TOKEN --confirm] [--json]` | Read-only inventory preview unless confirmed; synthetic verification |
-| Exact resume extraction | `./scripts/gapply profile extract --source-file FILE [--json]` | No storage |
-| Selected onboarding | `./scripts/gapply profile onboard --source-file FILE --source-sha256 HASH --select 0,1,4 --idempotency-key KEY [--dry-run] [--json]` | Pending proposals only; source hash binds selection |
+| Resume inventory | `./scripts/gapply profile extract --source-file FILE [--source-format auto\|text\|latex\|pdf] [--extractor-version 1\|2\|3\|4] [--json]` | Local text/PDF/static-LaTeX; no storage; every nonblank extracted line accounted for |
+| Wrapped publication grouping | `./scripts/gapply profile group-publication --source-file FILE --source-sha256 TEXT_HASH --document-sha256 ORIGINAL_HASH --extractor-version N --indexes I,J [--indexes K,L] [--source-format auto\|text\|latex\|pdf] [--allow-partial] [--json]` | Read-only complete schema-2 proposal manifest; explicit disjoint publication groups, both hashes required for every format; no retention or approval |
+| Complete or selected onboarding | `./scripts/gapply profile onboard --source-file FILE --source-sha256 HASH --extractor-version 4 --select all --idempotency-key KEY [--document-sha256 HASH] [--allow-partial] [--dry-run] [--json]` | Pending only; PDF/TeX require original hash. Numeric selections require version; `--retain-all-facts` selects policy 3 |
+| Optional profile questions | `./scripts/gapply profile interview [--topic research] [--depth 1\|2\|3] [--after QUESTION_ID] [--limit 3] [--json]` | Read-only catalogue; no profile read, answer storage or durable interview state |
+| Retained profile inventory | `./scripts/gapply profile inventory [--topic TOPIC [--limit 20] [--after ID\|--after-json JSON_STRING]] [--json]` | Counts-only overview or bounded exact topic context; all states retained, no usability/completeness/interview-progress assessment |
 | Current verified projection | `./scripts/gapply profile show [--json]` | Read-only; includes effective retirements |
 | Claim withdrawal/replacement | `./scripts/gapply profile retire --claim-id ID [--replacement-claim-id ID] --actor-id ACTOR --idempotency-key KEY [--preview-token TOKEN --confirm] [--json]` | Audited preview/confirmation |
 | Job capture | `./scripts/gapply jobs add --url URL --source-file FILE --idempotency-key KEY [--dry-run] [--json]` | User-supplied UTF-8 snapshot, no fetch |
-| Public job discovery | `./scripts/gapply jobs discover (--sources-file FILE\|--preset major-tech) [--title-contains TERM] [--limit-per-source 100] [--dry-run] [--json]` | Bounded Greenhouse/Ashby/Lever and Netflix reads; dry-run fetches without storage, otherwise validated idempotent capture; incomplete coverage returns exit 2 with results |
+| Public job discovery | `./scripts/gapply jobs discover (--sources-file FILE\|--preset major-tech) [--title-contains TERM] [--location-contains TERM] [--missing-location include\|exclude] [--limit-per-source 100] [--dry-run] [--json]` | Bounded Greenhouse/Ashby/Lever/Workable and Netflix reads; dry-run fetches without storage, otherwise validated idempotent capture; incomplete coverage returns exit 2 with results |
+| Public-board watchlist setup | `./scripts/gapply jobs sources (--url URL [--url URL...]\|--urls-file FILE) [--keep-valid] [--json]` | Offline recognition/deduplication; opt-in partial setup retains schema-1 manifest or null and reports rejected positions; unsupported sources remain manual gaps |
+| Public-search planning | `./scripts/gapply jobs plan-search --role TERM [--role TERM] [--location TERM] [--json]` | Pure bounded literal-term plan; no profile, network or storage. Codex executes authorized searches separately and validates observed links |
 | Batch preparation | `./scripts/gapply batches prepare --spec-file FILE --idempotency-key KEY [--dry-run] [--max-items 20] [--max-seconds 900] [--json]` | Closed saved-job specification, shared evidence choices, durable per-item progress and isolated blockers |
 | Batch recovery/review | `./scripts/gapply batches resume --batch-id ID`; `./scripts/gapply batches show --batch-id ID`; `./scripts/gapply batches list` | Resume accepts the same invocation budgets; show/list are read-only; each supports JSON |
 | Saved search scope | `./scripts/gapply searches configure --spec-file FILE --idempotency-key KEY [--dry-run] [--json]` | Immutable sources, shared evidence and bounds; v2 adds literal title/location preparation filters while preserving v1; syntax preview opens no runtime and makes no requests |
@@ -74,6 +87,8 @@ assumed. No dependencies are installed by the launcher.
 | Application transition | `./scripts/gapply applications transition --application-id ID --to STATE --actor-id ACTOR --idempotency-key KEY [--material-id ID] [--confirm-submitted] [--preview-token TOKEN --confirm] [--json]` | Append-only; applied records human submission, performs no external action |
 | Support export | `./scripts/gapply export --redacted ABSOLUTE_FILE [--dry-run] [--json]` | Fixed version/count fields; excludes personal content, paths, identifiers and logs |
 | Real PDF gate | `python -W error scripts/check_materials.py` | TeX + materials extra required; skips fail |
+| Complete onboarding gate | `python -W error scripts/check_onboarding.py [--with-materials]` | Materials extra required; original PDF/TeX and no-CV user statements, all-fact paged review/approval/replay, partial refusal, interview/setup. Optional materials path requires TeX and verifies a Research-section PDF with historical audits; fresh installed pilot includes it |
+| Workable discovery gate | `python -W error scripts/check_workable.py` | TeX + materials extra required; pure role/location planning, fictional observed links and company-board setup, standalone location selection before quota, capture/version replay, partial failures, two real PDFs, saved-search budget resume and quiet unchanged refresh; no network |
 | Saved-job batch gate | `python -W error scripts/check_batch.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Ten fictional jobs, two isolated blockers, real PDFs, replay/budget recovery and encrypted queue restoration |
 | Configured-search gate | `python -W error scripts/check_search.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | Synthetic multi-source transport through actual adapters and CLI; real PDFs, changed/unchanged runs, budget resume, read-only one-folder review export/replay and encrypted restoration |
 | Daily-search gate | `python -W error scripts/check_schedule.py --with-backup [--demo-output NEW_EXTERNAL_DIR]` | External synthetic clock/transport, actual CLI, eleven real PDFs, quiet notifications, missed/paused days, bounded resume and encrypted restoration |
@@ -95,6 +110,56 @@ GROUNDED_APPLY_HOME=/tmp/grounded-apply-dev ./scripts/gapply doctor --json
 ```
 
 Do not use real candidate data in repository development.
+
+### Materials dependency presence
+
+`doctor --materials` branches before runtime resolution.
+It calls `importlib.util.find_spec("pypdf")` and `shutil.which("pdflatex")` without
+importing the optional provider or executing the binary. Each dependency state
+is `present`, `missing` or `unknown` for a probe failure; exceptions and discovered
+module/executable paths are not returned. The data contract is:
+
+```json
+{
+  "schema_version": 1,
+  "check_method": "dependency_presence@1",
+  "dependencies": {"pypdf": "present", "pdflatex": "present"},
+  "pdf_intake": {"prerequisites": ["pypdf"], "status": "present"},
+  "pdf_materials": {"prerequisites": ["pypdf", "pdflatex"], "status": "present"},
+  "functional_tests_run": false,
+  "profile_read": false,
+  "read_only": true
+}
+```
+
+This example shows the all-present case, not a functional test result. A capability
+is `missing` if any prerequisite is missing, otherwise `unknown` if any is unknown,
+otherwise `present`. Exit 0 requires both dependencies present; other presence
+results return exit 2 with fixed `MaterialsPrerequisitesUnavailable`. A missing
+TeX executable can coexist with present PDF-intake prerequisites. Keep dependency
+selection separate from candidate facts and base runtime health.
+
+The feature resolves no runtime, reads no profile/source document, connects no
+database/network, imports no `pypdf`, runs no compiler and installs nothing.
+It adds no writes; this is not a claim about arbitrary interpreter bytecode
+behavior. Probe/output failures stay fixed and private, with existing doctor
+diagnostics only. Default doctor JSON/human behavior remains unchanged. Presence
+does not verify TeX packages/fonts, PDF parsing/rendering, layout or material
+readiness. The batch dependency-recovery hint uses `doctor --materials`;
+normal runtime troubleshooting still uses base doctor.
+
+The installed-package gate runs the actual opt-in entry
+point before profile initialization, accepting only exit 0/2 consistent with
+the presence result. Controlled installed probes cover missing dependencies and
+unknown probe failures with import/process/runtime guards, even without a pilot
+wheelhouse. These checks create no extra PDF or dependency installation; source
+tests cover all four presence combinations and exact default-doctor compatibility.
+
+Run the focused source checks with:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_materials_preflight_cli tests.test_batch_cli tests.test_logging -v
+```
 
 ### Optional installed-package verification
 
@@ -186,7 +251,7 @@ backup/restore, retires a claim, and deletes both synthetic homes with receipts.
 The installed gate imports package code only from a fresh virtualenv and runs the
 same CLI flow. Its harness supplies literal synthetic inputs, never a user's
 runtime. Optional-provider skips in the base suite are not pilot release evidence.
-With `--pilot-wheelhouse`, the installed gate also runs the real-PDF batch,
+With `--pilot-wheelhouse`, the installed gate also runs complete onboarding, Workable discovery and the real-PDF batch,
 configured-search, daily-search, advancing-source, preparation-filter and
 source-rotation flows.
 It also exercises the larger-profile smoke gate above 16 MiB against the fresh
@@ -225,6 +290,17 @@ logs. Validation recomputes template text, PDF extraction, exact normalized text
 page/overflow limits, hashes, and current evidence. Unsupported text fails closed.
 Normalization changes only whitespace and Unicode presentation forms. This is
 not a claim of compatibility with every ATS or support for arbitrary languages.
+
+Material plans automatically choose `approved_text_selection@3` with renderer
+`grounded-apply.latex-resume@3` only when a selected resume claim has type
+`research_description`. Those facts appear in a fixed Research section, with
+Publications unchanged. Research headings retain the version-2 four-field text
+order and explicit heading/bullet/paragraph choices. Nonresearch selections,
+unselected research and answer-only research retain transformation 2. The planner
+and builder share the same selection, preserving existing batch fingerprints,
+child keys and approved reuse. Saved materials replay with their stored version;
+version-1/2 renderer mappings and LaTeX remain unchanged. Old transformations
+refuse the new research type. No automatic relabeling or schema migration occurs.
 
 Material approval covers one exact bundle digest, including any answer specs.
 Required unresolved answers block readiness. The application state records past
@@ -432,6 +508,84 @@ external wake-up mechanism is installed by these checks.
 
 ### Public discovery verification
 
+Opt-in standalone `jobs discover --location-contains TERM` (repeatable) or
+`--missing-location include|exclude` selects report schema 2. Without either
+option, full schema-1 JSON/human output remains unchanged. The separate typed
+`discover_with_locations` API shares bounded fetching with legacy discovery;
+`SourceReport` and saved-search serialization remain unchanged.
+
+The pure request validator checks all opt-in title/location terms, missing policy
+and quota before source-file/stdin, runtime or transport access. Location terms
+use existing `PreparationFilters` validation: at most 20 already-trimmed terms,
+each 1–128 codepoints, with no case changes, trimming or deduplication. Literal
+casefold substring OR applies within locations, AND after the title filter and
+before the selected-job quota. Missing locations default to include and bypass
+location matching, while still requiring the title match. `Remote` can match
+`Not Remote`; selection never establishes geography or eligibility.
+
+The separate `selections` rows account for every valid normalized record as a
+title exclusion, known-location exclusion, excluded unknown, selected job or
+quota-deferred job. Included unknowns before quota and selected unknowns are
+separate counters. Provider observations, errors, scan limits, indexed/remaining
+counts and manual gaps stay visible; no request budget, provider or saved-search
+behavior changes. Capture uses the existing validated storage and immutable
+posting contract. No-profile preview stores nothing, and diagnostics remain fixed.
+
+Focused location gate:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_discovery_locations tests.test_discovery_locations_cli tests.test_discovery tests.test_discovery_capture tests.test_search_filters tests.test_workable_cli tests.test_logging -v
+```
+
+The shared Workable gate exercises later matching postings under quota one,
+missing-location policies and counts, invalid selectors before source access,
+legacy response compatibility, fixed diagnostics and filtered capture/replay.
+Its original two PDFs and saved-search flow remain unchanged. The installed
+package gate executes the same acceptance against the fresh wheel.
+
+`jobs plan-search` calls the pure `build_public_search_plan` service. Input
+counts are bounded before exact deduplication: 1–3 explicit roles and 0–2
+locations. Terms retain punctuation, case and Unicode spelling; outer whitespace
+is trimmed. Invalid Unicode, control/line-separator characters and blank or
+over-128-codepoint trimmed terms fail with fixed errors. Human output escapes
+Unicode format marks while JSON retains exact terms. No candidate-sensitivity
+classifier interprets job-search intent as a candidate assertion.
+
+Schema-1 plans contain literal role-only and role/location rows, seven fixed
+supported board domains, a nine-query ceiling and an 18-distinct-link review
+budget. They report no profile read, network access, storage change or established
+coverage. They generate no URLs, shell commands, source manifest or engine query
+syntax. Codex carries out authorized browsing separately, validates observed
+links through `jobs sources`, and previews existing feeds without a profile.
+Search snippets never become snapshots; guessed board tokens are prohibited.
+
+Focused planning and integration gate:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_discovery_plan tests.test_discovery_plan_cli tests.test_discovery_sources tests.test_discovery_sources_partial tests.test_discovery_sources_partial_cli tests.test_workable_cli tests.test_logging tests.test_discovery_capture -v
+```
+
+`jobs sources --keep-valid` uses a separate pure tolerant builder; the default
+strict builder and response stay unchanged. Every original input position appears
+once in accepted inputs or fixed `invalid_url` / `source_limit_reached` rejections.
+Mixed and all-rejected setup returns exit 2 with `IncompleteSourceSetup`; the
+existing schema-1 manifest is retained when nonempty and otherwise null. Empty
+or over-256 inputs fail at the top level. After 32 retained distinct sources,
+new sources are rejected but duplicates of retained sources remain accepted.
+File positions count nonblank parsed entries. Recognition never repairs URLs,
+fetches, reads a profile or establishes live coverage; rejected URLs and exception
+text are absent from reports and diagnostics. Setup rejections remain visible
+alongside downstream source gaps.
+
+The source and fresh installed `check_workable.py` flow starts with a nonexistent
+runtime, checks literal planning and private diagnostics, then supplies an
+explicitly fictional observed-link fixture containing a malformed lead. It pins
+strict compatibility and opt-in partial accounting before feeding the retained
+manifest into discovery. It preserves the original two-PDF acceptance. This verifies the CLI
+bridge; it does not run an internet search or measure index coverage. A separate
+bounded conversational forward review checks that the skill actually carries
+source finding instead of handing query syntax to the user.
+
 See [JOB_DISCOVERY.md](JOB_DISCOVERY.md) for the closed source manifest, coverage
 states, network bounds and capture semantics. The source/normalizer registry and
 the `job_discovery_capture` workflow type reuse schema-4 snapshot/audit tables;
@@ -600,7 +754,228 @@ and context-manager initialization failures close the connection. The private
 migration helpers accept an already-owned connection and are not public safe-open
 alternatives. See ADR 0002 for the threat-model limit.
 
+### Complete profile intake
+
+[PROFILE_SETUP.md](PROFILE_SETUP.md) is the user/operator contract; ADR 0012
+records the retention decision. `profile extract` accepts bounded text, PDF and
+LaTeX files, or stdin with format selection. Text remains exact. PDF uses the
+existing optional `materials` extra in an isolated child interpreter with a
+15-second timeout, 100-page and 16 MiB input/text bounds, 4 MiB decompressed
+stream limit, quiet stderr and available OS resource limits. A platform may
+refuse address-space limits; this is not an OS sandbox or universal memory bound.
+No OCR, network, include following or execution of input TeX occurs. Unsupported
+TeX constructs are located as issues, and affected text is excluded. All formats
+remain untrusted and require comparison with the original and explicit approval.
+
+Extraction returns a full nonblank-line inventory of headings, proposed facts,
+unclassified text and blocked locations, bounded to 10,000 lines/1,000 proposals.
+Blocked values are not echoed in that inventory. Aggregate visible content uses
+the import fragmented-assignment guard. A full line inventory does not guarantee
+semantic completeness. Extractor version 2 adds research/teaching/publication/
+achievement headings. Explicit version 3 classifies only Research, Research
+Experience and Research Projects as `research_description`; proposal order, spans
+and canonical wording stay unchanged. Default 2 and explicit version 1 retain
+existing behavior. New conversational intake explicitly uses 4; old claims are
+never relabeled automatically. Indexed onboarding requires the displayed version,
+preventing silent index reinterpretation.
+
+Explicit extractor 4 retains version 3's supported classifications and adds four
+exact neutral boundaries: Research Interests, Academic Research, Selected Research
+and Professional Memberships. Matching uses existing casefold/trailing-colon
+normalization. The visible heading clears the prior type; subsequent nonlabel text
+remains unclassified until a supported heading. This neither assigns a new fact
+type nor treats interests or memberships as completed research or publications.
+Versions 1/2/3, default 2, source hashes, spans, import identities and stored facts
+remain unchanged. Neutral headings and unclassified text remain in the full
+inventory; classification gaps are independent of `document.incomplete`.
+This exact set does not detect every unsupported heading or join wrapped facts.
+
+`profile group-publication` constructs a complete import manifest for explicitly
+chosen groups of adjacent publication proposals. Repeat `--indexes` for separate
+works, using the original displayed proposal indexes for every group. Both displayed hashes
+and an explicit extractor version are required for every source format. Argument
+shape checks precede document reading; the existing bounded reader checks exact
+source bytes and extraction issues without accessing profile storage. Incomplete
+documents require `--allow-partial`, which does not resolve classification gaps.
+
+The pure `services/publication_grouping.py` re-extracts once with that version, requires
+ascending consecutive publication indexes within each group and whitespace-only intervening text,
+and preserves the complete contiguous evidence span. Only whitespace is normalized
+in the combined value/canonical text; bullets, punctuation and status qualifiers
+remain. The whole result passes one existing complete-facts import preview and size
+limits before output. This helper does not infer that selected fragments describe
+one work, change generic import's semantic review boundary, or persist original
+document provenance.
+
+One `--indexes` occurrence preserves the entire schema-1 output and human response.
+It includes a closed schema-2 `manifest` with all other supported
+proposals unchanged and in order, plus `index_mapping`, `grouped_indexes`,
+`grouped_manifest_index`, original/result counts, original inventory and separate
+unclassified/blocked counts. Inventory indexes still refer to the original
+extraction; mapping rows connect each `original_index` to its `manifest_index`.
+Two or more occurrences use report schema 2, replacing `grouped_indexes` and
+`grouped_manifest_index` with `groups: [{indexes, manifest_index}]`. Groups stay
+in request order; the manifest and complete index map always stay in source order.
+Reversing the request order produces the same manifest and map. Adjacent disjoint
+groups remain separate; duplicated or overlapping groups fail rather than merge.
+The pure plural API accepts 1–500 groups with at most 1,000 total original indexes;
+each group retains the existing 2–1,000 ascending consecutive exact-integer bound.
+The CLI additionally bounds all index arguments to 6,000 characters before parsing.
+Request checks precede document reading; one invalid group refuses the whole result.
+No result is truncated to fit a limit or silently reduced to the last group.
+Only `data.manifest` is valid input to `profile import --retain-all-facts`.
+The helper retains nothing, reads no profile and records no approval. Its fixed
+diagnostic command is `profile.group-publication`; content remains private stdout.
+Human output and fixed failure messages cannot echo blocked content or exceptions.
+
+Focused grouping gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_publication_grouping tests.test_publication_grouping_cli tests.test_neutral_sections tests.test_neutral_sections_cli tests.test_onboarding_cli tests.test_resume_documents tests.test_complete_fact_intake tests.test_logging -v`.
+The shared source/installed onboarding gate exercises single and multiple explicit
+text/PDF/static-TeX groups, reversed request order, distinct qualifiers and complete
+pending imports with unchanged replay, without adding generated
+material PDFs or changing the existing approval flows.
+
+Focused section-boundary gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_neutral_sections tests.test_neutral_sections_cli tests.test_research_intake tests.test_research_cli tests.test_resume_extraction tests.test_resume_documents tests.test_onboarding_cli tests.test_complete_fact_intake -v`.
+The shared source/installed onboarding gate exercises new text/PDF/static-TeX
+boundaries without extra material PDF builds, while preserving the existing
+research, statement, inventory, approval/replay and historical-material checks.
+
+PDF/LaTeX onboarding requires the displayed original-document hash as well as
+the extracted-text hash. Incomplete documents require an explicit `--allow-partial`
+choice; omitted content remains a review gap. These checks bind the current
+selection to the displayed file. The stored import provenance remains exact
+extracted-text evidence/digest plus the registered manifest ingress. Original-file
+hashes, parser versions and extraction issues are intake metadata, not a newly
+persisted original-document provenance contract. No schema migration occurs.
+
+The [complete-inventory operator recipe](PROFILE_SETUP.md#complete-inventory-manifest-for-operators)
+documents the closed manifest projection for explicitly classified source rows,
+preserving every supported proposal and keeping unresolved inventory separate.
+It uses the existing original-document import and dry-run contract; no new
+classifier, helper or storage behavior is introduced.
+
+`--select all` retains all supported proposals under content policy 3; indexed
+onboarding and structured import can explicitly choose it with `--retain-all-facts`.
+Policy 3 removes source-percentage/reconstruction heuristics in every channel,
+including generated metadata whose hashes can accidentally overlap a short fact.
+All typed values, evidence/context checks, restricted/credential/fragment checks,
+opaque metadata rules and per-field/batch size limits remain. Pending review and
+explicit approval remain mandatory. New decisions inherit their import's exact
+policy version. Policy 2 remains the default for old indexed/structured imports,
+and historical review, replay and resolution support both exact integer versions.
+Changing a policy changes the request identity; use a new key for a new request.
+
+`profile interview` is a pure, versioned catalogue with nine topics, three exact
+depth rounds and pages of 1–10 questions. Cursors must belong to the chosen topic
+and round; skip/stop is always allowed. It accepts no answers, accesses no runtime
+and does not claim durable interview progress or completeness. Retaining exact
+answers uses `profile import --source-kind user-statement --retain-all-facts`
+with explicit text/span proposals and separate per-fact approval. Search
+preferences remain separate from career claims.
+
+`jobs sources` recognizes strict supported board/posting routes locally, accounts
+for every input, deduplicates boards and preserves safe unsupported HTTPS sites as
+manual gaps. It accepts up to 256 links/32 unique sources, fetches nothing, and
+never turns an unknown host into automatic network access. Known query/fragment
+discarding is explicit: scope is the entire board, without original URL filters.
+This improves watchlist setup, not aggregate market coverage or source verification.
+
+Focused gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_complete_fact_intake tests.test_resume_extraction tests.test_resume_documents tests.test_profile_interview tests.test_discovery_sources tests.test_onboarding_cli -v`.
+The required material gate includes actual PDF intake tests; provider skips cannot
+verify PDF intake. The synthetic CLI onboarding gate is
+`PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_onboarding.py`.
+Add `--with-materials` for generated Research/Publications sections, unchanged
+qualifiers/mappings, explicit material approval/replay/export and read-only
+historical inventory/eligibility/use audits. This optional path requires TeX and
+is included by the fresh installed pilot. The same checks cover a separate
+no-CV text/stdin profile whose claim and evidence origins are `user_statement`.
+Imported LaTeX is never compiled.
+
+Focused research intake/material/batch gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_research_intake tests.test_research_cli tests.test_research_materials tests.test_research_batches -v`.
+
+### Retained profile inventory
+
+`profile inventory` reads one complete `ProfileService.validated_profile()` snapshot
+through `ProfileInventoryService`, then counts every retained claim by exact type
+and recorded status/approval pair. The default overview includes all nine fixed
+topics and no claim IDs, text, values, evidence, raw types or paths. Unknown types
+remain `other`; existing research imports are never inferred or relabeled.
+
+`--topic` displays only exact claim IDs/types/canonical wording, status/approval,
+origin, scope and sensitivity for that topic. It omits evidence, value JSON, source
+references, artifact IDs and review tokens. Pages default to 20, allow 1–50 and
+preserve existing claim order. All explicit pagination requires a topic. Anchors
+include decided/retired records and remain exact legacy IDs; `--after-json` carries
+nonprinting IDs safely. Before/returned/after counts cover the complete topic;
+a null next anchor ends this pass rather than proving profile completeness.
+
+Request syntax is validated before runtime access. Full profile validation occurs
+before filtering, so an invalid off-page or unrelated-topic managed record blocks
+the read with a fixed integrity error. Transactions, retirement projection and
+read-only file guards remain unchanged. Counts do not resolve evidence for use,
+approve facts, infer answered questions, save interview progress or account for
+unretained source lines. Existing show/interview/review shapes stay compatible.
+
+Focused gate:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_profile_inventory tests.test_profile_inventory_cli tests.test_profile_review_pages tests.test_profile_review_pages_cli tests.test_profile_interview tests.test_statement_import tests.test_statement_lifecycle tests.test_research_intake tests.test_logging -v
+```
+
+Source and installed `check_onboarding.py --with-materials` checks summary privacy,
+exact topic continuation and unchanged runtime bytes/metadata, retaining the same
+PDF, statement, approval and historical material checks. All fixtures are fictional.
+
 ### Structured profile import and review
+
+`profile review --claim-id ID` opens one pending fact shown in retained-profile
+inventory without needing its predecessor in the global queue. For an ID with
+nonprinting characters, pass a safely quoted JSON string through
+`--claim-id-json`. Both forms preserve exact existing nonblank UTF-8 identifiers,
+including legacy spaces, punctuation and NUL; no UUID-only restriction is added.
+The selectors are mutually exclusive with each other and all pagination flags.
+Syntax validation precedes runtime access.
+
+`ProfileService.get_review_item` validates the entire pending queue within one
+read snapshot before selecting its existing item. The result preserves evidence,
+current review token, untrusted status and global pending count; generic pending
+items retain their null token. Missing or nonpending IDs fail without disclosing
+another record. CLI read, conversion and output failures use fixed private errors.
+The selected response keeps `items` (one item), `pending_count` (the whole queue)
+and `read_only: true`, without `page`. It writes no records or review progress
+and grants no approval. Default and paged review contracts remain unchanged.
+
+Focused selection/page/diagnostic gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_profile_review_selection tests.test_profile_review_selection_cli tests.test_profile_review_pages tests.test_profile_review_pages_cli tests.test_logging -v`.
+Shared source and fresh installed onboarding acceptance select an ID from topic
+inventory, compare exact item/evidence/token and total counts, preserve unrelated
+fact omission and source/runtime identity, and refuse malformed, unknown and
+already-decided selections without new approvals or material builds.
+See [chosen-fact review](PROFILE_SETUP.md#review-one-pending-fact) for operator examples.
+
+`profile review --limit N [--after CLAIM_ID]` returns up to N pending facts at a
+time, with N from 1–50.
+The no-option form retains its original full-queue output and ordering. Paged
+JSON adds `page` with `limit`, `returned_count`, `pending_before_count`,
+`pending_after_count` and `next_after`; `pending_count` still counts the entire
+pending queue. The three page counts sum to that total. Earlier counts include
+a still-pending anchor, so reaching the end does not conceal skipped facts.
+The last displayed claim ID continues the pass when later pending facts exist.
+Its durable position survives an approval or rejection; restarting without
+`--after` revisits earlier pending facts. No cursor or review state is stored.
+The complete pending queue and any anchor provenance are validated in one read
+snapshot before slicing. Pagination limits disclosure, not validation cost.
+Per-item review tokens and explicit approval remain unchanged. Invalid syntax is
+rejected before runtime access; unknown anchors return a fixed recovery error.
+Anchors preserve existing nonblank claim IDs, including legacy generic IDs with
+spaces or nonprinting characters. `--after-json JSON_STRING` is mutually exclusive
+with `--after` and decodes a single JSON string before lookup, so a NUL-containing
+legacy ID can cross the process argument boundary. Human continuation commands
+quote printable IDs safely and use this encoded form for nonprinting IDs. The
+JSON response always retains the exact original ID; it never becomes a path.
 
 The current import boundary consumes two separate UTF-8 inputs: exact source text
 and a schema-version-2 proposal manifest. Each option accepts a regular file or
@@ -612,6 +987,40 @@ through the bounded read. There are intentionally no inline arguments for source
 text, canonical text, values, source references, or extraction metadata. The
 opaque idempotency key permits only a bounded identifier alphabet and must not
 contain candidate data.
+
+Structured `profile import` keeps that exact-text default. Explicit
+`--source-format auto|pdf|latex` first uses the same local document adapter as
+extraction/onboarding, with required original hash and partial-extraction choice.
+The manifest's digest and spans then refer to extracted text. This lets an
+operator classify an unresolved extracted line without asking the user to export
+the document. No new persistent original-document authority is implied.
+
+For exact answers supplied by the user, explicitly choose
+`--source-kind user-statement`. The default `--source-kind resume` retains the
+existing behavior and response shape. Statement intake accepts exact UTF-8 text
+from a file or stdin with the same closed manifest; it refuses PDF/LaTeX/auto
+extraction, `--document-sha256` and `--allow-partial` before reading inputs.
+The opt-in CLI response adds `source_type: user_statement`. It stores only the
+selected supported facts/evidence and digest identity, not an interview transcript
+or a saved question cursor. `--retain-all-facts` is the explicit complete-facts
+policy; answering or retaining does not approve the facts.
+
+Focused statement gate:
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src sh scripts/python -W error -m unittest tests.test_statement_import tests.test_statement_cli tests.test_statement_repository tests.test_statement_lifecycle tests.test_statement_materials -v`.
+
+Resume provenance remains request 4 / source identity 1 / record digest 1.
+Statement provenance uses the complete registered combination 5 / 2 / 2, with a
+record digest that binds its source type. Source references use
+`user-statement:sha256:<digest>`, artifacts use
+`profile-user-statement-source:sha256:<digest>`, and the registered ingress is
+`grounded-apply.profile-user-statement.manifest@1`. Review decisions inherit the
+import's digest version. Generic legacy user statements retain their existing
+contract, but cannot impersonate these reserved namespaces. Workflow-owned record
+IDs and claim/evidence markers require managed auditing even when an association
+is missing or a marker changes. A changed origin cannot reuse an existing key.
+Normal pending review, explicit decisions, retirement, resolution and historical
+material checks validate the same provenance; no database or material-version
+migration occurs. These digests provide consistency, not writer authentication.
 
 The manifest must use zero-based, end-exclusive Unicode-codepoint spans. Its
 top-level fields are exactly `schema_version`, `source_sha256`,
@@ -634,8 +1043,10 @@ below are stricter.
 
 Manifest schema version 2 uses a closed, versioned value registry. Vocabulary 1
 retains the career types below. Vocabulary 2 adds the five explicit contact/name
-types; the dispatcher validates against the smallest vocabulary used by each
-workflow. Vocabulary-1 replay identities remain unchanged. There is no generic
+types; vocabulary 3 adds bounded scalar `research_description`. The dispatcher
+validates against the smallest vocabulary used by each workflow. Recorded
+vocabulary 1/2 schemas, replay identities and exact integer version checks remain
+unchanged. There is no generic
 JSON fallback for an unregistered claim type. In this table,
 `TEXT(N)` means non-blank, already-trimmed text with at most `N` Unicode code
 points and no CR/LF or Unicode control, format, surrogate, line-separator, or
@@ -656,6 +1067,7 @@ paragraph-separator code points:
 | `project_contribution` | Exact object `{"project": TEXT(512), "contribution": TEXT(2048), "ownership": LEVEL}`; `LEVEL` is `supported`, `contributed`, `co-led`, `led`, or `owned` |
 | `project_outcome` | Exact object `{"activity": TEXT(512), "before_minutes": INT, "after_minutes": INT}`; minutes are non-boolean integers from 0 through 525,600 |
 | `publication` | `TEXT(2048)` |
+| `research_description` (v3) | `TEXT(2048)`; explicitly classified research prose, with no inferred employment relationship |
 | `skill_use` | `TEXT(256)` |
 | `candidate_name` (v2) | `TEXT(256)`; explicitly supplied display name, not a legal identity inference |
 | `contact_email` (v2) | `TEXT(320)` |
@@ -684,20 +1096,20 @@ heuristic.
 Caller-controlled metadata is limited to 1,048,576 persisted code points per
 batch, including the per-record copies made for each claim and evidence row.
 This is deterministic lexical defense in depth, not a complete semantic, secret,
-or PII classifier. Manifest schema 2, request-identity schema 4, value schema 1 or 2,
-content policy 2, restricted taxonomy 1 plus its canonical SHA-256,
-source-identity 1, span-locator 1, result-manifest 3, record-ID 1, and record-digest
-1 participate in the idempotency request hash and are recorded in the workflow
-audit input.
+or PII classifier. Manifest 2, value vocabulary 1/2/3, content policy 2 or explicit
+complete-facts policy 3, restricted taxonomy 1 plus its canonical SHA-256,
+span-locator 1, result-manifest 3 and record-ID 1 participate in the request hash.
+Request/source-identity/record-digest versions are the origin-specific 4/1/1 or
+5/2/2 combination described above. The workflow audit records these versions.
 That input contains only version identifiers, counts, digests, the registered
 ingress ID, and digest-derived source/artifact references. It includes the
 already hashed idempotency key so the lookup column is redundantly bound to the
 audited input; it contains no raw source, proposed values, selected evidence,
 file path, filename, or raw idempotency key.
 
-Canonical text is limited to 2,048 code points. Each selected evidence item is
+Both policies limit canonical text to 2,048 code points. Each selected evidence item is
 limited to 4,096 code points and 16 lines, and all selected evidence in one batch
-is limited to 65,536 code points. The batch rejects selected spans covering 80%
+is limited to 65,536 code points. **Legacy policy 2 only:** the batch rejects selected spans covering 80%
 or more of the source's alphanumeric content. Exact normalized, case-folded
 whole-source reconstruction is rejected in the raw form and every percent-decode
 layer in each value, canonical-text, evidence, and metadata channel. The same
@@ -719,10 +1131,11 @@ idempotency key.
 Unselected raw source text remains caller-managed and in memory. It is used for
 span and whole-source validation and its digest, but it is not persisted or
 globally sensitive-pattern scanned. A deterministic digest-only artifact stores
-`sha256:<digest>`, byte and Unicode-codepoint sizes, and versioned retention
-metadata; it stores no input path, original filename, or raw source body. Every
-claim/evidence pair references that artifact and the registered
-`grounded-apply.profile-import.manifest@1` ingress identifier. The identifier
+a source-kind-specific digest reference, byte and Unicode-codepoint sizes, and
+versioned retention metadata; it stores no input path, original filename, or raw
+source body. Resume claim/evidence pairs reference that artifact and the registered
+`grounded-apply.profile-import.manifest@1` ingress identifier; user statements use
+the registered identity described above. The identifier
 names the application path that accepted the untrusted manifest; it does not
 assert who produced the proposals. To prevent an answer-only selection from
 hiding a sensitive label, the service screens up to 256 unselected code points
@@ -760,7 +1173,9 @@ sidecars, and unsafe read-only journal state fail unchanged.
 
 Persisted imports contain only `needs_review`/`pending` claims and pending exact
 evidence spans. The public generic claim/evidence service rejects
-`SourceType.IMPORTED_RESUME`; only the import workflow can create those records.
+`SourceType.IMPORTED_RESUME` and reserved managed-statement markers; only the
+import workflow can create those managed records. Existing generic user-statement
+creation remains compatible.
 Claim and evidence UUIDs are deterministically derived from the creating
 workflow plus proposal position. Schema 2 stores a durable association from that
 position to one unique claim/evidence pair and its immutable record digest. A
@@ -828,9 +1243,10 @@ against a writer able to recompute the entire database projection.
 
 Manifest version 1, request-identity versions 1–3, result-manifest versions 1–2,
 content-policy version 1, and the former public `CreateImportProposal`
-constructor are unsupported. Current imports use manifest 2, request identity 4,
-result manifest 3, record digest 1, content policy 2, restricted taxonomy 1, and
-database schema 7. Migration 002 creates the association/decision table but does
+constructor are unsupported. Current resume imports use request identity 4,
+source identity 1 and record digest 1; explicit statement imports use 5/2/2.
+Both use manifest 2, result manifest 3, content policy 2 or explicit complete-facts
+policy 3, restricted taxonomy 1, and database schema 7. Migration 002 creates the association/decision table but does
 not fabricate record digests or associations for earlier imports. Regenerate
 manifest-v1 input; for an earlier manifest-v2 workflow, use a fresh opaque
 idempotency key in disposable synthetic state. There is no automatic policy
@@ -1037,8 +1453,8 @@ value agreement, scalar types, identifiers, bundle/input digests, one-material
 artifact ownership and completed-workflow metadata. Creation, start and finish
 retain their exact original timestamp strings; update ordering uses aware time
 comparison. Harmless JSON formatting, valid offset timestamps and later updates
-remain accepted. Both `approved_text_selection@1` and `@2` keep literal integer
-workflow payload version 1; only `@2` carries the registered presentation mapping.
+remain accepted. `approved_text_selection@1`, `@2` and `@3` keep literal integer
+workflow payload version 1; `@2` and `@3` carry the registered presentation mapping.
 No new payload-size bound is imposed on existing schema-7 material bytes.
 
 Approval-fact, application-use and batch-history audits inherit this linked-build
@@ -1374,6 +1790,13 @@ not a replacement for review.
 
 `docs/SESSION_HANDOFF.md` is the single live checkpoint. `docs/ROADMAP.md` holds
 phase scope; do not create competing status notes.
+
+The handoff's top navigation links directly to current verification, limitations,
+the next task and its first command. Completed older trials and verification are
+preserved in the [September 21 history archive](SESSION_HISTORY_2026-09-21.md).
+That archive describes earlier snapshots; it is not current verification or a
+source of next-task instructions. Keep current contracts and unresolved limits
+in the live handoff.
 
 At session start:
 

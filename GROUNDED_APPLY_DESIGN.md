@@ -6,6 +6,10 @@
 **Status:** Draft for review  
 **Date:** August 10, 2026
 
+> This document describes the full product vision, including unimplemented work.
+> Broader development is paused as of September 29, 2026. Start with the
+> [README](README.md) for the experimental alpha's actual capabilities and limits.
+
 > Naming note: the name is intentionally centered on the product's most important behavior: application materials must be grounded in facts the user has supplied or approved. A web search did not reveal an obvious exact-name conflict, but the GitHub organization/repository name and package name should still be checked immediately before publication.
 
 ---

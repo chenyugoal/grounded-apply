@@ -22,6 +22,8 @@ from grounded_apply.domain import JsonValue
 
 PROFILE_IMPORT_VALUE_SCHEMA_VERSION = 1
 PROFILE_IMPORT_CONTENT_POLICY_VERSION = 2
+PROFILE_IMPORT_COMPLETE_FACTS_POLICY_VERSION = 3
+PROFILE_IMPORT_SUPPORTED_CONTENT_POLICIES = frozenset({2, 3})
 PROFILE_IMPORT_RESTRICTED_TAXONOMY_VERSION = 1
 PROFILE_IMPORT_MAX_SOURCE_BYTES = 16 * 1024 * 1024
 PROFILE_IMPORT_MAX_SELECTED_EVIDENCE_CODEPOINTS = 4096
@@ -241,11 +243,12 @@ _PROFILE_IMPORT_VALUE_SCHEMAS: Mapping[str, _ValueSchema] = MappingProxyType(
         "contact_phone": _scalar_text_schema(64, version=2),
         "contact_location": _scalar_text_schema(256, version=2),
         "contact_url": _scalar_text_schema(1024, version=2),
+        "research_description": _scalar_text_schema(2048, version=3),
     }
 )
 
 if any(
-    schema.version not in {1, 2}
+    schema.version not in {1, 2, 3}
     for schema in _PROFILE_IMPORT_VALUE_SCHEMAS.values()
 ):
     raise RuntimeError("profile import value schemas require a registered version")
@@ -256,6 +259,7 @@ def profile_value_schema_version(claim_types: Sequence[str]) -> int:
 
     Version 1 retains its original definitions and identities. Version 2 adds
     explicitly supplied contact/name fields; it does not infer identity.
+    Version 3 adds explicitly supplied research descriptions.
     """
     try:
         return max((_PROFILE_IMPORT_VALUE_SCHEMAS[t].version for t in claim_types), default=1)
@@ -1175,7 +1179,7 @@ def validate_profile_import_proposal(
     """Validate one proposal's typed value and persisted content fields."""
 
     schema = _PROFILE_IMPORT_VALUE_SCHEMAS.get(claim_type)
-    if type(value_schema_version) is not int or value_schema_version not in {1, 2} or schema is None or schema.version > value_schema_version:
+    if type(value_schema_version) is not int or value_schema_version not in {1, 2, 3} or schema is None or schema.version > value_schema_version:
         raise ValueError("claim type is not allowed for profile import")
     if len(canonical_text) > _MAX_CANONICAL_TEXT_CODEPOINTS:
         raise ValueError("proposal canonical text exceeds the atomic claim limit")
@@ -1412,8 +1416,18 @@ def validate_profile_import_batch(
     spans: tuple[tuple[int, int], ...],
     proposals: tuple[tuple[JsonValue, str, str], ...],
     metadata: tuple[str | None, ...],
+    content_policy_version: int = PROFILE_IMPORT_CONTENT_POLICY_VERSION,
 ) -> None:
-    """Reject a batch that reconstructs most of its source in any content channel."""
+    """Screen content; policy 3 permits explicitly chosen complete fact retention.
+
+    Policy 2 keeps the original source-minimization contract for exact replay.
+    Both policies retain the same restricted-content and metadata defenses.
+    """
+
+    if type(content_policy_version) is not int or content_policy_version not in PROFILE_IMPORT_SUPPORTED_CONTENT_POLICIES:
+        raise ValueError("Unsupported profile import content policy")
+    if not any(character.isalnum() for character in source_text):
+        raise ValueError("profile import source must contain alphanumeric text")
 
     normalized_source = _normalized_document_text(source_text).casefold()
     compact_source = "".join(normalized_source.split())
@@ -1449,6 +1463,12 @@ def validate_profile_import_batch(
         raise ValueError(
             "proposal content contains fragmented sensitive or credential-like value"
         )
+    if content_policy_version == PROFILE_IMPORT_COMPLETE_FACTS_POLICY_VERSION:
+        # Generated digest/ingress metadata can reproduce a one-letter fact
+        # (C or R) by accident. Source-reconstruction heuristics are inapplicable
+        # when complete retention was chosen. Typed size/identifier rules and
+        # restricted/fragmented-content checks still apply to every field.
+        return
     component_channels: list[tuple[str, tuple[str, ...]]] = []
     for channel, raw_components in (
         ("values", raw_value_components),
