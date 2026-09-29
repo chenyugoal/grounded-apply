@@ -208,6 +208,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o644)
         broad = self.root / "broad"
         broad.mkdir(mode=0o755)
+        broad.chmod(0o755)
         with self.assertRaises(BackupError):
             write_private_file(broad / "archive", b"synthetic")
         git = self.root / "git"
