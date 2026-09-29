@@ -1,225 +1,143 @@
 # Session handoff
 
-This is the single live checkpoint. [ROADMAP.md](ROADMAP.md) owns feature scope;
-[README](../README.md) describes the experimental alpha for users.
+The single live development checkpoint. The [README](../README.md) is the user
+entry point, [roadmap](ROADMAP.md) owns scope, and [development guide](DEVELOPMENT.md)
+owns reproducible commands. Older session notes are recoverable through Git
+history rather than maintained as additional status documents.
 
-[Current verification](#current-verification) | [Limits](#limits-and-deferred-work) |
-[Next task](#next-exact-task) | [First command](#first-command)
-
-## Release wrap-up and checkout
+## Current state
 
 - **Updated:** September 29, 2026.
-- **Scope:** finish the existing usable foundation, make the documentation
-  approachable, merge the development branch and publish the repository as an
-  experimental alpha. Broader feature development is paused. No new feature
-  milestone or unattended development is selected.
-- **Starting branch / HEAD:** `codex/phase-0-truth-layer`, `9a3b4bf`, matching
-  origin. Local and remote `main` were `b2fc88e`. The 91 pre-existing changed/new
-  files from the September 21 usability window were preserved and integrated.
-- **Published:** [chenyugoal/grounded-apply](https://github.com/chenyugoal/grounded-apply)
-  is public, with `main` as its default branch. GitHub API and signed-out browser
-  access both confirm visibility. Private vulnerability reporting is enabled.
-- **Integration:** `342a688` preserves the prior implementation plus release docs;
-  `a0bad45` corrects one test fixture; `a7cb8ae` finalizes release scope, evidence
-  and the CI deadline. The development branch was fast-forward merged into `main`
-  and pushed. This final checkpoint change is documentation only; use `git log -1`
-  for its commit. No production/test bytes changed after verified `a0bad45`.
-- **Working tree:** the release closeout is committed on `main`; all prior work
-  is preserved. No feature implementation is in progress in this session. Normal
-  GitHub push-triggered checks use the longer deadline; their incomplete results
-  do not change the explicitly pending Linux support status.
-- **Release positioning:** usable supervised career-profile and application
-  preparation workflow; no demonstrated reduction in active user effort.
-  Public source availability is not completion of the product-acceptance trial.
-- **Program freeze:** this wrap-up changes documentation, one test fixture and
-  the CI deadline (20 to 60 minutes; tests unchanged). Version remains `0.1.0a0`, schema 7, with unchanged production code, dependencies
-  and versioned histories.
-- **Personal state:** no real CV, job-search runtime or sensitive answer was
-  opened. All test inputs and outputs remain fictional and outside Git.
-  The personal LinkedIn draft is outside this repository.
+- **Release:** public experimental alpha, version `0.1.0a0`, schema 7.
+  [GitHub repository](https://github.com/chenyugoal/grounded-apply), default `main`,
+  private vulnerability reporting enabled. No PyPI package or tagged release.
+- **Development:** broader feature work remains paused. This session cleans
+  redundant documentation and removes the fully merged development branch.
+- **Branch audit:** after `git fetch origin --prune`, both
+  `git rev-list --count main..codex/phase-0-truth-layer` and
+  `git rev-list --count main..origin/codex/phase-0-truth-layer` returned zero.
+  No other worktree used the branch. The local tip `a7cb8ae` and remote tip
+  `a0bad45` are preserved in `main`; remote dry-run and actual deletion succeeded,
+  followed by local `git branch -d`. Only `main` remains locally and on origin.
+- **Cleanup:** removed the two September 21 session archives; condensed the
+  roadmap, maintainer guide and reference; retained user guides, design and ADRs.
+  The earlier documents remain available at `b27b140` and in file history.
+- **Working tree:** this documentation cleanup is committed on `main`, based on
+  `b27b140`. Use `git log -1` for its commit and `git status` for later changes.
+  Production code, tests, scripts, dependencies and migrations are unchanged.
+- **Privacy:** all verification uses fictional data outside Git. No personal
+  job-search runtime is part of this handoff.
 
 ## Current verification
 
-The mandatory first command, `git diff --check`, passed. Logs and fictional
-outputs are under `/private/tmp/gapply-public-alpha-verification-20260929`.
-Environment: macOS 26.6.2 arm64, Python 3.12.14, pypdf 6.10.0,
-cryptography 50.0.1, TeX Live 2026. No real candidate runtime was used.
+The resume command `git diff --check` passed. This cleanup's local logs are in
+`/private/tmp/gapply-cleanup-verification-20260929`; temporary logs are supporting
+local evidence, not repository dependencies. Environment: macOS 26.6.2 arm64,
+Python 3.12.14, pypdf 6.10.0, cryptography 50.0.1, TeX Live 2026.
 
-**Full regression: PASS**, 1604 tests, zero skips, 974.405 seconds, exit 0:
-`umask 022; PYTHONDONTWRITEBYTECODE=1 ./scripts/check`.
-Log: `full-suite-corrected.log`. Production/test bytes match `a0bad45`.
-The initial run inherited
-`umask 077` from private-log setup and failed the deliberately unsafe-directory
-fixture: `mkdir(mode=0o755)` became `0700`. It was stopped (exit 130), not counted
-as a pass. The fixture now explicitly sets `0755`; the focused test passes under
-both `077` and `022`, and the whole SnapshotTests class passes. Production refusal
-behavior was correct; no security check was relaxed. The required encryption gate
-also passed under `077` (38 tests, zero skips, 10.549 seconds).
+**Full regression: PASS**, 1,604 tests, zero skips, 974.138 seconds, exit 0.
+All eleven source gates and all three fresh installed-package gates also passed.
+Sequential maximum-capacity verification passed as well. No known local check
+failure remains.
 
-All eleven source gates passed with exit 0. Each uses this exact prefix:
+Full regression command:
+
+```bash
+umask 022
+PYTHONDONTWRITEBYTECODE=1 ./scripts/check
+```
+
+Source gate command prefix:
 `PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/`.
 
-| Script and arguments | Result / seconds |
+| Gate | Result |
 |---|---|
-| `check_onboarding.py --with-materials` | PASS / 61.000 |
-| `check_materials.py` | PASS / 74.696 |
-| `check_backup.py` | PASS / 10.237 |
-| `check_pilot.py` | PASS / 35.537 |
-| `check_workable.py` | PASS / 17.523 |
-| `check_batch.py --with-backup` | PASS / 56.233 |
-| `check_search.py --with-backup` | PASS / 74.705 |
-| `check_schedule.py --with-backup` | PASS / 76.682 |
-| `check_source_window.py --with-backup` | PASS / 29.815 |
-| `check_search_filters.py --with-backup` | PASS / 13.733 |
-| `check_source_rotation.py --with-backup` | PASS / 29.396 |
+| `check_onboarding.py --with-materials` | PASS |
+| `check_materials.py` | PASS |
+| `check_backup.py` | PASS |
+| `check_pilot.py` | PASS |
+| `check_workable.py` | PASS |
+| `check_batch.py --with-backup` | PASS |
+| `check_search.py --with-backup` | PASS |
+| `check_schedule.py --with-backup` | PASS |
+| `check_source_window.py --with-backup` | PASS |
+| `check_search_filters.py --with-backup` | PASS |
+| `check_source_rotation.py --with-backup` | PASS |
 
-Fresh installed base gate, PASS / 9.09 seconds:
+Fresh package command prefix:
+`PYTHONDONTWRITEBYTECODE=1 /private/tmp/gapply-public-alpha-verification-20260929/build-tools/bin/python scripts/check_package.py`.
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 /private/tmp/gapply-public-alpha-verification-20260929/build-tools/bin/python scripts/check_package.py
-```
+| Additional arguments | Result |
+|---|---|
+| None (base installation) | PASS |
+| `--backup-wheelhouse /private/tmp/gapply-public-alpha-verification-20260929/wheelhouse` | PASS |
+| `--pilot-wheelhouse /private/tmp/gapply-public-alpha-verification-20260929/wheelhouse` | PASS |
 
-Fresh installed full pilot, PASS / 395.60 seconds:
+The full installed pilot includes both extras and the above-16-MiB capacity
+smoke. Commands and timings are in `source-gates.jsonl` and `package-gates.jsonl`.
+Reproducible environment setup is in [DEVELOPMENT.md](DEVELOPMENT.md).
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 /private/tmp/gapply-public-alpha-verification-20260929/build-tools/bin/python scripts/check_package.py --pilot-wheelhouse /private/tmp/gapply-public-alpha-verification-20260929/wheelhouse
-```
-
-These build/install outside the checkout and validate both optional extras,
-migrations, onboarding, Workable, lifecycle, batch/search/daily/window/filter/
-rotation and an installed capacity smoke above 16 MiB. Logs: `base-installed.log`
-and `installed-pilot.log`. Installed capacity: 18,980,864-byte database,
-25,308,011-byte archive, two PDFs, no real network requests.
-
-Sequential maximum-capacity gate, PASS / 83.92 seconds:
+Maximum-capacity command, PASS / 83.64 seconds:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_storage_capacity.py --workspace /private/tmp/gapply-public-alpha-verification-20260929/capacity
+PYTHONDONTWRITEBYTECODE=1 sh scripts/python -W error scripts/check_storage_capacity.py --workspace /private/tmp/gapply-cleanup-verification-20260929/capacity
 ```
 
-It restored a 267,415,552-byte database from a 356,554,263-byte archive, audited
-three real PDFs, preserved quiet replay and refused invalid mutations. Peak child
-RSS was 2,438,774,784 bytes (about 2.27 GiB); all four GETs used fictional fixtures.
-Results: `capacity.log` and `capacity/capacity-summary.json`.
+It exactly restored a 267,415,552-byte database from a 356,554,263-byte archive,
+with three real PDFs, quiet replay, historical audits and mutation refusals.
+Peak child RSS was 2,439,462,912 bytes (about 2.27 GiB). All four GETs used
+fictional fixtures; no real network requests occurred. See `capacity.log` and
+`capacity/capacity-summary.json` in the cleanup verification directory.
 
-`actionlint -shellcheck= -pyflakes= .github/workflows/check.yml` passed with
-checksum-verified actionlint 1.7.12. Repository skill validation also passed:
+Documentation review passed: 34 Markdown files, 223 local links and 50 fragments.
+`git diff --check` passed. `actionlint -shellcheck= -pyflakes= .github/workflows/check.yml`
+and repository skill validation passed. Production/test/script/migration and
+dependency files compare unchanged against `b27b140` with `git diff --exit-code`.
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 /private/tmp/gapply-public-alpha-verification-20260929/build-tools/bin/python /Users/chenyu/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/grounded-apply
-```
+Hosted CI at `b27b140` **passed all four jobs**: Ubuntu 24.04 and macOS 15, each
+with Python 3.12 and 3.13. Every job passed the base suite, required encryption,
+base installed package and offline installed backup extra:
+[verified run](https://github.com/chenyugoal/grounded-apply/actions/runs/36638357341).
+The previous Ubuntu timeout is resolved by the longer job deadline. These hosted
+checks do not exercise the complete PDF workflow; local macOS verification does.
 
-Validator-only PyYAML 6.0.3 was installed in the disposable build environment;
-application dependencies are unchanged. Log: `skill-validation.log`. All local documentation links/fragments passed
-(36 Markdown files, 217 links, 55 fragments before this final checkpoint update).
-
-A fresh agent-operated walkthrough followed the public docs on a new fictional
-CV and posting: eight facts retained and approved separately, skipped-fact
-pagination survived resumption, a one-page PDF and grounded Python answer were
-produced, sponsorship remained NeedInfo, and tracking resumed at ready_for_review
-with manual_submission next and no external action. Visual PDF inspection found
-no clipping; contributed ownership and expected graduation were preserved.
-Evidence: `first-use/result.json`, `first-use/commands.jsonl` and
-`first-use/materials/resume.pdf`. This does not measure human effort savings.
-
-Hosted CI for `a0bad45` completed with both macOS 15 jobs (Python 3.12 and 3.13)
-passing the base suite, required encryption and both installed-package gates.
-Both Ubuntu 24.04 jobs were cancelled by the 20-minute deadline, with the explicit
-annotation “The job has exceeded the maximum execution time of 20m0s.” The overall
-run is cancelled, not passed:
-[release checks](https://github.com/chenyugoal/grounded-apply/actions/runs/36635404168).
-The workflow now allows 60 minutes, retaining every test. Its actionlint check
-passed again after the timeout edit. The user explicitly chose the macOS-tested
-experimental alpha with Linux verification pending; no Linux pass is claimed.
-
-The previous complete verification and capability contracts are preserved in the
-[September 21 closeout archive](SESSION_HISTORY_2026-09-21_CLOSEOUT.md).
-The earlier [September 21 history](SESSION_HISTORY_2026-09-21.md) remains unchanged.
-Historical results do not substitute for the current release checks.
-
-Public-data review has scanned all 20 locally reachable commits, 513 unique Git
-blobs, and 254 original tracked/nonignored files. No real credentials, candidate
-records, runtime databases, generated resumes or private archives were found.
-Secret-shaped fixtures use fictional values. Git history contains normal author
-identity metadata and historical maintainer machine paths; publication exposes
-that history. Remote inventory matches the inspected main/development branches;
-there are no tags, releases, pull requests or Actions artifacts to disclose.
-
-Publication was performed after the user explicitly chose the macOS-tested
-experimental alpha with Linux pending. The API verified the expected main SHA
-before changing visibility. It then returned `visibility: public`, `private:
-false`, and default branch `main`. Enabling private vulnerability reporting
-returned HTTP 204; a subsequent read confirmed `enabled: true`. Signed-out GitHub
-browsing shows the Public badge, merged main branch, current README and successfully
-rendered Mermaid diagram. SECURITY.md links the private reporting form.
-
-Remote privacy inventory found only the inspected main/development branches,
-with no tags, releases, open/closed issues, pull requests or Actions artifacts.
-The separate wiki remote did not exist. Downloaded Ubuntu job logs contain no
-unittest failure or error before cancellation (1,055 and 703 completed test lines);
-this is partial progress, not a Linux pass. No GitHub Release/tag or PyPI package
-was created; publication is the source repository.
-
-Final hygiene: `git diff --check` passed; the closeout diff was reviewed. The
-production code, tests, scripts, migrations, dependency manifests and repository
-skill compare identically to `a0bad45` via `git diff --exit-code`. Only release
-documentation and the validated CI deadline differ. All generated verification
-artifacts and the personal LinkedIn draft remain outside Git.
-
-## Delivered scope
-
-- Codex-guided text, selectable-text PDF and static-LaTeX intake; optional
-  questions; complete line inventory; publication grouping; paged fact review.
-- Reusable approved facts with provenance, explicit approval and retirement.
-- Evidence comparisons, exact approved-wording PDF resumes and career answers,
-  bounded batch preparation, exports and manual application history.
-- Configured Greenhouse, Ashby, Lever and Workable boards, bounded Netflix
-  discovery, source planning, saved searches and externally triggered daily runs.
-- Optional encrypted database backup/restore, fixed-schema support export and
-  confirmed whole-portable-home deletion.
-- User-facing README, supported/wishlist table, labeled Mermaid vision schematic,
-  [illustration brief](PRODUCT_VISION.md), and [release notes](../CHANGELOG.md).
+The release privacy audit inspected all then-reachable commits and tracked files
+without finding real credentials, candidate records or runtime artifacts. The
+release's fictional first-use walkthrough produced a reviewed one-page PDF,
+preserved ownership and graduation qualifiers, left sponsorship as `NeedInfo`,
+and stopped at manual submission. It does not measure human effort savings.
+Release verification details remain in Git history at `b27b140`.
 
 ## Limits and deferred work
 
-- Human first-use acceptance and a comparable active-time savings trial remain
-  unmeasured. An agent walkthrough is not a human study.
-- Linux verification remains pending after the hosted 20-minute timeouts.
-  Hosted macOS base/backup/package checks pass on Python 3.12 and 3.13; full local
-  PDF workflow verification uses macOS/Python 3.12.14. Native Windows is absent.
-- No browser safe-fill, automatic submission, semantic rewriting, GUI,
-  email/calendar integration, OCR or DOCX intake. Wishlist items have no schedule.
-- Source accounting does not establish semantic completeness. PDF order, section
-  classification and wrapped publications require review; generic import validates
-  evidence bounds and types, not semantic equivalence of arbitrary proposed text.
-- Discovery covers bounded configured sources; literal location filters can
-  match `Remote` in `Not Remote`. Unknown locations stay unknown. Workable totals
-  and pagination are not established; broader market coverage remains absent.
-- Daily execution requires an authorized external wake-up mechanism. None is
-  installed by the CLI or restarted by this wrap-up.
-- Storage is bounded to a 256 MiB database and 384 MiB encrypted archive.
-  Near-capacity backup/restore previously used about 2.3 GiB of process memory.
-  Source documents, exports and backup copies are separately owned files.
-- Automatic retention, per-record deletion, production document sharing and
-  new-home storage conversion are unfinished. Strict search-checkpoint raw
-  row/JSON custody and complete schedule/workflow custody remain deferred.
-- Filesystem checks are sampled and do not defeat a same-UID process winning a
-  race after the final check. Local storage does not make Codex conversations local.
+- Independent human first-use acceptance and comparative active-time savings
+  remain unmeasured. No browser filling, semantic rewriting, GUI, email/calendar
+  integration, OCR or DOCX intake is implemented.
+- Full PDF integration is verified locally on macOS/Python 3.12.14; native Windows
+  setup and broader PDF integration coverage remain unfinished.
+- Intake requires review of extraction, section classification and wrapped
+  publications. Typed imports and exact evidence bounds do not prove arbitrary
+  proposed text is semantically equivalent to its source.
+- Discovery is bounded to configured sources. Literal location filters can match
+  `Remote` in `Not Remote`; unknown locations remain unknown. Workable pagination
+  and total coverage are not established. Daily runs need an external wake-up.
+- Database snapshots are bounded to 256 MiB and encrypted archives to 384 MiB;
+  near-capacity backup/restore used about 2.3 GiB of memory. Source documents and
+  exports need separate backups. Automatic retention, per-record deletion,
+  production document sharing and conversion remain unfinished.
+- Full search-checkpoint and schedule/workflow historical custody is deferred.
+  Filesystem checks are sampled and cannot defeat every same-user race.
+  Local storage does not make Codex conversations local.
 
 ## Next exact task
 
-**Release wrap-up complete; broader development is paused.** No further feature
-implementation or unattended follow-up is selected. Linux remains pending by
-explicit release scope, and human time savings remain unmeasured.
+**Cleanup complete; broader development stays paused.** No new feature milestone
+or unattended follow-up is selected. Source behavior and supported alpha scope
+are unchanged; the platform documentation now reflects the completed hosted checks.
 
 If the user supplies a final illustration, start with `docs/PRODUCT_VISION.md`,
-check that it preserves current/wishlist labels and human submission, then replace
-the README Mermaid figure with the reviewed asset and accessible alternative text.
-
-If the user requests Linux verification, first inspect the latest main-branch
-[GitHub Actions run](https://github.com/chenyugoal/grounded-apply/actions) and its
-actual conclusion. Do not infer a pass from the longer timeout or retry blindly.
-Keep this platform check bounded; it does not resume wishlist development.
+check current/wishlist labels and human submission, then replace the README
+Mermaid figure with the reviewed asset and accessible alternative text.
 
 ## First command
 
@@ -229,5 +147,5 @@ After the required repository-resume reads:
 git diff --check
 ```
 
-If this fails, inspect the exact file/line before editing. Preserve unrelated
-work and use the current Git state rather than historical checkpoint assumptions.
+Inspect any failure before editing; preserve unfamiliar changes. Use current Git
+state rather than a historical checkpoint to decide what exists.

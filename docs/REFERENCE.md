@@ -1,152 +1,43 @@
 # Grounded Apply reference
 
-Detailed behavior, command examples, and storage contracts moved from the
-[README](../README.md). For a first session, start with the
-[Codex workflow](CODEX_WORKFLOW.md); for current verification evidence, use the
-[single live checkpoint](SESSION_HANDOFF.md). Run commands below from the
-repository root.
+Command behavior, import schemas, and storage contracts for the experimental
+alpha. Start with the [Codex workflow](CODEX_WORKFLOW.md) for conversational use,
+[quickstart](QUICKSTART.md) for setup, or [roadmap](ROADMAP.md) for supported scope
+and unfinished work. Run command examples from the repository root.
 
-Grounded Apply is designed to turn a candidate's approved career history into
-traceable job assessments, application materials, questionnaire answers, and an
-application record. Its central rule is simple:
+## Workflow references
 
-> The system may transform, select, summarize, and reorganize verified
-> information, but it may not invent candidate facts.
+| Task | Guide |
+|---|---|
+| Import, retain and review career facts | [Profile setup](PROFILE_SETUP.md) |
+| Configure and preview public job sources | [Job discovery](JOB_DISCOVERY.md) |
+| Prepare several saved jobs together | [Batch preparation](BATCH_PREPARATION.md) |
+| Save discovery and preparation settings | [Saved searches](SEARCH_RUNS.md) |
+| Trigger and review recurring runs | [Daily searches](DAILY_SEARCHES.md) |
+| Check the verified release scope | [Current checkpoint](SESSION_HANDOFF.md#current-verification) |
 
-## Current status
+`./scripts/gapply brief --json` gives a read-only next-action view across saved
+jobs and applications. It orders work by workflow stage, not hiring probability.
+Response-check suggestions neither send messages nor schedule reminders.
 
-The **Codex-guided application preparation** milestone is implemented and locally
-verified for industry research and engineering workflows. Tell Codex what you want to do;
-it operates the local tools and handles IDs and commands. The repository skill
-and [conversational workflow](CODEX_WORKFLOW.md) cover profile review,
-job comparison, application packs, and resumption. See [the roadmap](ROADMAP.md)
-and live checkpoint for verification status.
+## Storage boundaries
 
-`./scripts/gapply brief --json` provides a read-only next-action view across
-saved jobs and applications. Its ordering follows workflow stage, not fit or
-hiring probability; response-check suggestions neither send messages nor schedule
-reminders. Private facts and application history stay in the existing runtime.
+Current profiles use schema 7. The supported database snapshot limit is 256 MiB;
+`./scripts/gapply doctor --json` reports usage and warns from ninety percent.
+Headroom is not a guarantee that the next operation will fit or that a backup is
+valid. A run that stops for capacity retains prepared drafts in its report.
+Near-capacity encrypted backup and restore used about 2.3 GiB of memory in
+synthetic testing; see [ADR 0011](adr/0011-supported-profile-capacity.md).
+Source documents, exports, configuration and logs are outside the encrypted
+database backup. Keep those files separately if needed.
 
-Grounded Apply now has a **local application pilot**: inventory and retain facts from
-a text, PDF or LaTeX resume, approve them once, save job text and its URL, inspect a requirement
-evidence matrix, produce a traceable PDF and career answers, approve the material,
-and track manually submitted applications. See [the quickstart](QUICKSTART.md)
-for the complete workflow and [ADR 0006](adr/0006-local-application-pilot.md)
-for its bounded scope. The live checkpoint contains the exact release evidence.
-
-It is a command-line tool that Codex can operate with you. Resume tailoring means
-selecting and ordering approved text; it does not write new factual prose.
-Matching retrieves evidence and gaps without claiming fit or predicting hiring.
-Public job discovery now reads configured Greenhouse, Ashby, Lever and Workable boards,
-plus bounded Netflix sitemap and structured-posting reads,
-reports source coverage, and captures immutable snapshots for the existing
-assessment/material workflow. See [job discovery](JOB_DISCOVERY.md).
-[Batch preparation](BATCH_PREPARATION.md) adds shared evidence selection,
-per-job checkpoints, isolated blockers and one draft review queue for saved jobs.
-[Saved searches](SEARCH_RUNS.md) connect configured discovery to that queue:
-agree the sources and evidence selection once, then run or resume the combined
-workflow. Current unchanged drafts and recorded submissions are skipped before
-the preparation limit. Version-2 scopes can exclude titles and filter published
-location text before spending preparation slots, while retaining missing
-locations for review by default. Netflix saved searches advance through bounded
-detail windows across runs. New runs rotate automatic boards and prioritize
-unattempted postings so repeated blockers do not always take the available slots.
-[Daily searches](DAILY_SEARCHES.md) add saved timing,
-bounded recovery, pause/resume and quiet notification delivery. An authorized
-wake-up mechanism must invoke the CLI; it installs no background process.
-For the user-facing setup and daily review, see
-[Set up daily discovery with Codex](DAILY_QUICKSTART.md).
-One-folder review export is available: `searches export --run-id ID
---output-dir /absolute/private/new-review` gathers the run's current PDFs,
-answers, job links and blockers. See [saved-search review](SEARCH_RUNS.md)
-and the live checkpoint for status and limits.
-Model calls and browser fill remain unfinished. Final application submission
-remains a human action. Resume intake accepts text, selectable-text PDFs and static LaTeX; PDF output uses local TeX.
-See [profile setup](PROFILE_SETUP.md) for complete inventory, retention choices and extraction limits.
-
-To find sources without company URLs, ask Codex for public jobs using explicit
-role and optional location terms. `jobs plan-search` creates a bounded plan;
-Codex uses available authorized browsing to check actual links, then configures
-and previews supported feeds. No profile is required. See
-[source finding and its limits](JOB_DISCOVERY.md#start-with-roles-and-locations).
-The planner performs no search itself and does not establish market coverage.
-
-For a public-feed preview without profile storage:
-
-```bash
-./scripts/gapply jobs discover --preset major-tech --title-contains research --dry-run --json
-```
-
-This preset has feed routes for Anthropic and OpenAI, bounded partial Netflix
-discovery, and visible coverage gaps for Google, Apple, Amazon and Meta. A partial result exits with code 2
-and preserves usable results plus per-source status; it is not an empty-success
-signal. Omit `--dry-run` to capture into an already initialized private runtime.
-
-The pilot includes encrypted whole-database backup, confirmed restore into a new
-private home, fixed-schema support export, audited claim withdrawal/replacement,
-and explicit whole-portable-home deletion. External copies and source documents
-remain caller-owned. Full filesystem backup, per-record deletion, automatic
-retention, richer input formats, and hosted OS/interpreter verification remain
-unfinished. Real data belongs only in a private runtime outside the repository;
-development and tests always use fictional data.
-
-The single live checkpoint is [`docs/SESSION_HANDOFF.md`](SESSION_HANDOFF.md).
-It records what is actually implemented, the last verification results, known
-issues, and the next exact task. The longer-term scope in
-[`GROUNDED_APPLY_DESIGN.md`](../GROUNDED_APPLY_DESIGN.md) and
-[`docs/ROADMAP.md`](ROADMAP.md) is planned unless the checkpoint says it is
-implemented and verified.
-
-Daily package storage uses a 256 MiB supported database snapshot limit.
-`./scripts/gapply doctor --json` reports file usage and headroom, with a warning
-from ninety percent. This does not guarantee space for the next run or validate
-a backup; document deduplication and automatic retention remain unfinished.
-When a run reaches a storage reserve after preparing some drafts, its report and
-notification retain those drafts and identify the capacity stop.
-Existing profiles gain the larger allowance without conversion. A synthetic
-255 MiB profile passed daily preparation and exact encrypted restore; backup and
-restore peaked around 2.3 GiB of process memory on the tested host because the
-archive implementation works in memory. This verifies byte capacity, not a fixed
-number of applications or months of history. See [ADR 0011](adr/0011-supported-profile-capacity.md).
-
-Development has started on an isolated helper for exact-byte document sharing;
-it is not used by current profiles. Its tests and conversion boundaries are in
-the [development guide](DEVELOPMENT.md#isolated-material-payload-preparation).
-Migration policy now separates registered storage formats from ordinary profile
-upgrades, preventing future conversion-only steps from running during routine
-initialization. A guarded internal adapter can capture explicitly selected
-schema-4–7 profiles without upgrading or changing their files. Historical
-validation can inspect a current-schema capture through an owned read-only
-in-memory repository. An internal per-material audit checks saved factual text
-and questionnaire drafts against their recorded packets at creation time,
-with strict saved build records, workflow metadata and timestamp bindings;
-later retirement does not authorize current reuse. A separate internal audit
-checks saved approval records against their exact bundles and completed
-workflows, without granting readiness or proving approval-time fact eligibility.
-An additional audit checks emitted facts at both creation and saved approval,
-retaining the original packets and creation-time evidence requirements. It leaves
-unanswered questions untouched and does not establish a valid approval decision.
-The combined internal check also rejects saved approvals with unanswered required
-questions, while preserving optional unanswered questions and unapproved history.
-Ordinary approval/readiness checks use the same strict record validation in one
-read transaction; records must pass before a material can appear ready.
-An explicit application-history audit also checks recorded facts and required
-answers at every readiness and submission event, preserving later-retired history.
-It grants no current readiness or approval.
-Ordinary application reads and the explicit audit also enforce exact record types,
-completed-workflow metadata and replay links, while preserving valid stored JSON formatting.
-An internal inventory audit checks every application and accounts for all of its
-events, submissions and workflows, including otherwise-unreferenced records.
-An explicit batch-history audit checks every saved checkpoint and each distinct
-material's creation facts, preserving unapproved, partial and later-retired drafts.
-Its inventory check accounts for every batch, item, checkpoint, lease and batch
-creation workflow, including otherwise-unreferenced workflows.
-Material inventory separately checks every saved material, claim link, approval
-and build/approval workflow, including material left by interrupted preparation.
-Saved search configurations and run origins also require strict workflow records,
-typed JSON, exact identity bindings and consistent creation/update timestamps.
-Full historical custody, conversion and document sharing remain unfinished;
-current profiles use schema 7.
+Internal preparation for exact-byte document sharing and historical audits exists,
+but production conversion and deduplication are unfinished. Historical validation
+does not authorize current reuse of retired claims or grant material readiness.
+Full search-checkpoint and schedule custody remain unfinished. See
+[ADR 0010](adr/0010-content-addressed-material-storage.md) and the
+[development guide](DEVELOPMENT.md) for the internal boundaries. Ordinary profile
+initialization never applies a conversion-only migration.
 
 ## Standalone location selection
 
@@ -219,7 +110,7 @@ It adds no writes. Presence cannot establish working PDF rendering, complete TeX
 packages/fonts, layout quality or release readiness. See [setup](QUICKSTART.md#start)
 for installation; a batch dependency-failure hint points to this opt-in check.
 
-## Start the local pilot
+## Runtime and material versions
 
 Prerequisite: Python 3.12 or newer. The repository launcher uses `GAPPLY_PYTHON`
 when supplied, otherwise `.venv/bin/python3` when present, otherwise `python3`
@@ -229,8 +120,8 @@ shell activation. The base CLI has no runtime package
 dependencies and does not require installation. Encrypted backup/restore requires
 the optional `backup` extra; PDF generation/verification requires the `materials`
 extra plus `pdflatex`, `lmodern`, `geometry`, `enumitem`, and `needspace`. The
-quickstart explains the isolated environment. The latest local verification is
-macOS/Python 3.12.14; see the checkpoint for platform limits.
+quickstart explains the isolated environment. See the
+[checkpoint](SESSION_HANDOFF.md#current-verification) for verified platforms.
 
 New resumes use a clean sans-serif layout with section rules, compact role and
 education headings, and source-aware bullets. Codex can choose heading, bullet,
@@ -248,45 +139,15 @@ including profiles with unselected research and research used only in answers.
 Stored versions 1 and 2 retain their rendering and replay behavior; old claims
 are not relabeled and old materials are not rebuilt automatically.
 
-```bash
-source .venv/bin/activate
-./scripts/gapply --help
-./scripts/gapply profile extract --help
-./scripts/gapply jobs assess --help
-./scripts/gapply materials build --help
-./scripts/gapply applications transition --help
-```
-
-For development verification:
-
-```bash
-./scripts/check
-./scripts/gapply --help
-./scripts/gapply doctor --json
-./scripts/gapply profile decide --help
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-```
-
-`./scripts/check` is the canonical full gate; the other commands are useful
-individual checks. `uv`, Typer, SQLAlchemy, Alembic,
-Ruff, and Pyright are planned Phase 0 hardening work; their commands are not yet
-supported project checks. See [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) before
-changing the toolchain.
+For setup and installation, use the [quickstart](QUICKSTART.md#start).
+Contributor checks and toolchain status live in the
+[development guide](DEVELOPMENT.md#canonical-commands).
 
 Optional diagnostic events use `./scripts/gapply --log-events doctor --json`.
 Stderr then contains only fixed-schema command events; stdout remains private
 and may include paths or candidate data. No files or telemetry are created.
 Events exclude arguments, exception text, source content, tokens, and keys.
 Use command `--json` to retain normal errors and warnings on stdout in this mode.
-The optional installed-package gate, `python scripts/check_package.py`, is
-documented in the development guide and verifies a fresh wheel installation.
-The configured GitHub Actions matrix runs the synthetic checks and installed
-package gates on Linux/macOS with Python 3.12/3.13. The hosted matrix has not yet
-passed in full; see the handoff for current hosted results and local verification.
-Workflow changes also require `actionlint -shellcheck= -pyflakes=
-.github/workflows/check.yml` with actionlint 1.7.12 installed. This checks GitHub
-workflow expressions separately from the application tests; setup and scope are
-documented in the development guide.
 
 ### Portable data deletion
 
@@ -746,33 +607,6 @@ idempotency key in disposable synthetic state. There is no automatic policy
 migration or reclassification. Unsupported earlier-policy rows remain unusable and
 fail review/decision closed rather than being promoted or repaired.
 
-## Product shape
-
-The accepted architecture is a local-first Python modular monolith with:
-
-- a typed `gapply` CLI as the primary machine contract;
-- a relational, provenance-aware candidate evidence store;
-- deterministic services for truth, permissions, state transitions, validation,
-  and persistence;
-- language models only at language-heavy edges, behind structured adapters;
-- SQLite by default and private artifacts outside the public repository;
-- public job-source adapters, with additional sources and optional local web,
-  model, document, and browser adapters later.
-
-The intended workflow is:
-
-```text
-approved evidence -> claims -> job requirements -> claim packet
-                  -> verified prose -> rendered artifact -> human review
-```
-
-Broader discovery coverage and browser-assisted safe-fill remain
-roadmap work. Resume/PDF generation and manual application tracking are part of
-the local pilot.
-Future browser automation will stop at authentication,
-CAPTCHA, sensitive or legal questions, ambiguous fields, signatures, and final
-submission.
-
 ## Trust and privacy contract
 
 - Every factual output must link to approved claim IDs or an approved,
@@ -791,19 +625,3 @@ submission.
 
 Repository agents and contributors must follow the complete rules in
 [`AGENTS.md`](../AGENTS.md).
-
-## Documentation
-
-- [Set up daily discovery with Codex](DAILY_QUICKSTART.md) — one setup and one daily review
-- [`GROUNDED_APPLY_DESIGN.md`](../GROUNDED_APPLY_DESIGN.md) — full product design
-- [`docs/SESSION_HANDOFF.md`](SESSION_HANDOFF.md) — live resume point
-- [`docs/ROADMAP.md`](ROADMAP.md) — delivery phases and acceptance gates
-- [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) — local workflow and handoff protocol
-- [`docs/adr/0001-local-first-modular-monolith.md`](adr/0001-local-first-modular-monolith.md) — accepted architecture
-
-## Contributing
-
-Start by following the resume protocol in `AGENTS.md`. Keep changes small, add
-synthetic tests for new behavior, preserve unfamiliar working-tree changes, and
-update the live checkpoint at every meaningful stopping point. A feature is not
-implemented until its code exists and its documented verification passes.

@@ -5,8 +5,8 @@ log. [ROADMAP.md](ROADMAP.md) owns feature scope; [SESSION_HANDOFF.md](SESSION_H
 owns current verification results and unresolved failures. A checked-in version
 number or passing local tests alone does not establish release readiness.
 
-The September 29 wrap-up targets publication of the working **experimental
-alpha**, with broader development paused. That narrower source release may
+The September 29 release publishes the working **experimental alpha**, with
+broader development paused. That narrower source release may
 document unfinished product-acceptance work; it must not claim the time-saving
 or independently validated first-use outcome below. Privacy review, functioning
 advertised features, reproducible verification and honest limitations remain

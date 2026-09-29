@@ -57,10 +57,9 @@ The PDF prerequisite check reports presence only and needs no profile.
 See the [setup guide](docs/QUICKSTART.md#start) for optional
 materials, TeX and backup dependencies. PDF input needs `pypdf`; PDF output also
 needs a local TeX installation. The complete PDF workflow is verified locally on
-macOS/Python 3.12.14; hosted macOS 15 checks pass with Python 3.12 and 3.13 for
-the base CLI, encryption and installed packages. **Linux verification is pending**
-after the hosted jobs exceeded their former 20-minute limit. Native Windows
-support is unfinished. See the
+macOS/Python 3.12.14. Hosted checks pass on macOS 15 and Ubuntu 24.04 with Python
+3.12 and 3.13 for the base CLI, encryption and installed packages; those checks
+do not exercise the complete PDF workflow. Native Windows support is unfinished. See the
 [release notes](CHANGELOG.md) for the tested scope and limits.
 
 Already have a profile? Ask Codex, “What should I work on next in my job search?”
@@ -143,7 +142,7 @@ to retain it. See the [privacy and storage reference](docs/REFERENCE.md#trust-an
 | Discover jobs and prepare drafts together | [Saved searches](docs/SEARCH_RUNS.md) |
 | Run and review a daily search | [Daily setup](docs/DAILY_QUICKSTART.md) |
 | Understand backup, deletion, and import contracts | [Detailed reference](docs/REFERENCE.md) |
-| Resume development | [Next task](docs/SESSION_HANDOFF.md#next-exact-task) · [Current verification](docs/SESSION_HANDOFF.md#current-verification) |
+| Develop or verify a change | [Development guide](docs/DEVELOPMENT.md) · [Current checkpoint](docs/SESSION_HANDOFF.md) |
 | Contribute or prepare a release | [Contributing](CONTRIBUTING.md) · [Release readiness](docs/RELEASE_READINESS.md) |
 
 Read the [design](GROUNDED_APPLY_DESIGN.md) for the longer-term direction and

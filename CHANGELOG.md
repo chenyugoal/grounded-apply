@@ -5,7 +5,7 @@
 Grounded Apply provides a supervised, Codex-guided workflow for building a
 reviewed career profile, preparing evidence-backed resumes and career answers,
 and recording applications submitted by the user. Broader feature development
-is paused. This is a macOS-tested source-checkout release, not a package published
+is paused. This is a source-checkout release; no package has been published
 to PyPI. Publication and exact verification status belong in the
 [live checkpoint](docs/SESSION_HANDOFF.md).
 
@@ -23,10 +23,10 @@ to PyPI. Publication and exact verification status belong in the
 
 ### Limits
 
-- The full workflow passes locally on macOS/Python 3.12.14. Hosted macOS 15
-  base/backup/package checks pass on Python 3.12 and 3.13. Ubuntu verification is
-  pending: both jobs exceeded their former 20-minute limit. The CI limit is now
-  60 minutes, with the tests unchanged; pending runs are not counted as passes.
+- The full workflow passes locally on macOS/Python 3.12.14. Hosted macOS 15 and
+  Ubuntu 24.04 base/backup/package checks pass on Python 3.12 and 3.13 in the
+  [release run](https://github.com/chenyugoal/grounded-apply/actions/runs/36638357341).
+  That matrix does not exercise the complete PDF workflow. Native Windows is unfinished.
 - There is no demonstrated reduction in active user effort and no completed
   independent human first-use acceptance trial. Setup and review can be substantial.
 - No browser filling, autonomous submission, semantic rewriting, GUI, email
