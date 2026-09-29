@@ -189,9 +189,12 @@ dependency wheels, and all synthetic runtime state stay in runner temporary
 directories. Checkout/setup actions are pinned by commit, permissions are
 read-only, checkout credentials are not persisted, and no artifacts or runtime
 logs are uploaded. This is ordinary `pull_request` CI, not privileged
-`pull_request_target` execution. The hosted matrix has not yet passed in full;
-see SESSION_HANDOFF for the reported job results and pending correction. Local
-results cannot establish a successful hosted run of a patched revision.
+`pull_request_target` execution. On release code `a0bad45`, both macOS jobs pass;
+both Ubuntu jobs exceeded the former 20-minute deadline. The workflow now permits
+60 minutes without removing tests. Linux verification remains pending, and the
+public alpha is explicitly macOS-tested. Full PDF integration verification is
+local to macOS/Python 3.12.14; this hosted workflow does not install TeX. See
+SESSION_HANDOFF for exact results. A pending run is not a successful hosted check.
 
 When editing the workflow, also run the workflow expression validation command
 above. Passing application tests do not validate GitHub's workflow syntax. Use

@@ -1,11 +1,11 @@
 # Release notes
 
-## 0.1.0a0 — Experimental alpha candidate
+## 0.1.0a0 — Experimental alpha (September 29, 2026)
 
 Grounded Apply provides a supervised, Codex-guided workflow for building a
 reviewed career profile, preparing evidence-backed resumes and career answers,
 and recording applications submitted by the user. Broader feature development
-is paused. This is a source-checkout release candidate, not a package published
+is paused. This is a macOS-tested source-checkout release, not a package published
 to PyPI. Publication and exact verification status belong in the
 [live checkpoint](docs/SESSION_HANDOFF.md).
 
@@ -23,8 +23,10 @@ to PyPI. Publication and exact verification status belong in the
 
 ### Limits
 
-- Verification is local to macOS/Python 3.12.14 unless the checkpoint records
-  additional results. The full hosted platform matrix is still unverified.
+- The full workflow passes locally on macOS/Python 3.12.14. Hosted macOS 15
+  base/backup/package checks pass on Python 3.12 and 3.13. Ubuntu verification is
+  pending: both jobs exceeded their former 20-minute limit. The CI limit is now
+  60 minutes, with the tests unchanged; pending runs are not counted as passes.
 - There is no demonstrated reduction in active user effort and no completed
   independent human first-use acceptance trial. Setup and review can be substantial.
 - No browser filling, autonomous submission, semantic rewriting, GUI, email
@@ -44,3 +46,7 @@ Schema remains version 7; this wrap-up adds no migration. Original import and
 material histories retain their versioned behavior. New conversational intake
 uses extractor 4 explicitly while the CLI default remains 2. Keep personal
 profiles outside Git and use the documented backup and upgrade procedures.
+
+The wrap-up changes no production behavior. One test fixture now sets its
+deliberately unsafe permissions explicitly so a restrictive shell umask cannot
+invalidate the test setup.

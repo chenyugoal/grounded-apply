@@ -8,8 +8,9 @@ working-tree checkpoint and next exact task.
 The public-facing scope is an experimental, supervised application-preparation
 tool. The sections below preserve implemented work and unfinished ideas; “next”
 and “planned” describe design order, not scheduled commitments. Active-user-time
-savings, independent first-use acceptance, and the full hosted platform matrix
-remain unverified. No browser filling or automatic submission is implemented.
+savings and independent human first-use acceptance remain unverified. This release
+is macOS-tested; Linux verification is pending after hosted timeouts. No browser
+filling or automatic submission is implemented.
 
 ## Status rules
 
@@ -270,7 +271,7 @@ facts and provenance without placing private data in the repository.
 | Content-free diagnostic logging | Implemented | Opt-in fixed-schema JSONL excludes caller content; failure, interruption, ambiguous-commit recovery, and broken-sink tests pass; no file logs or telemetry |
 | Backup, export, deletion, and retention | Implemented for bounded pilot; broader lifecycle planned | Encrypted complete-database backup/restore includes job/material/application state. Fixed-schema support export and confirmed whole-portable-home deletion pass the CLI lifecycle gate. External source files/exports/backups remain caller-owned. Full filesystem backup, per-record deletion and automatic retention remain planned |
 | Installed-package verification | Implemented locally | Source/wheel install, bundled migrations 001–007, both optional extras, full pilot and batch/search/daily/window gates pass in a fresh offline environment; latest run used local Python 3.12.14 |
-| CI interpreter/OS matrix | In progress | User-reported results after the workflow fix: macOS 15/Python 3.12 and 3.13 plus Ubuntu 24.04/Python 3.13 pass; Ubuntu/Python 3.12 exposed a concurrent schema-validation race. The local correction still needs a full hosted run |
+| CI interpreter/OS matrix | In progress | Release code `a0bad45` passes the hosted macOS 15/Python 3.12 and 3.13 base, encryption and package checks. Both Ubuntu 24.04 jobs exceeded the old 20-minute deadline; Linux verification remains pending. The deadline is now 60 minutes, with no tests removed. Full PDF workflow verification remains local to macOS/Python 3.12.14 |
 | Synthetic candidate/job fixtures and adversarial corpus | In progress | One synthetic profile plus adversarial schema, all nine taxonomy-category positives, explicit lexical false-positive controls, secret, percent-encoding, fragmentation, whole-source, padding, mutation, and no-write import cases exist; broader candidate/job corpus remains |
 
 Phase 0 exits only when the canonical commands pass from a clean checkout, real

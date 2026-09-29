@@ -16,7 +16,8 @@ jobs:
   check:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The full synthetic suite exceeds 20 minutes on hosted Linux runners.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

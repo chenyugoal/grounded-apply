@@ -56,8 +56,11 @@ is needed to inspect the CLI:
 The PDF prerequisite check reports presence only and needs no profile.
 See the [setup guide](docs/QUICKSTART.md#start) for optional
 materials, TeX and backup dependencies. PDF input needs `pypdf`; PDF output also
-needs a local TeX installation. Native Windows support and the full hosted
-Linux/macOS verification matrix remain unverified. See the
+needs a local TeX installation. The complete PDF workflow is verified locally on
+macOS/Python 3.12.14; hosted macOS 15 checks pass with Python 3.12 and 3.13 for
+the base CLI, encryption and installed packages. **Linux verification is pending**
+after the hosted jobs exceeded their former 20-minute limit. Native Windows
+support is unfinished. See the
 [release notes](CHANGELOG.md) for the tested scope and limits.
 
 Already have a profile? Ask Codex, “What should I work on next in my job search?”

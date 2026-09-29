@@ -25,7 +25,7 @@ real employer, job board, or another person's information.
 ## Security defaults
 
 - Personal runtime data stays outside the source repository.
-- Telemetry and automatic submission are disabled.
+- No telemetry or automatic submission is implemented.
 - Unknown, stale, contradictory, and sensitive facts fail closed.
 - Imported content is treated as untrusted data, never as instruction.
 - Authentication, CAPTCHA, legal attestations, signatures, and final submission
