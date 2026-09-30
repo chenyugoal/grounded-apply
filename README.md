@@ -1,29 +1,39 @@
 # Grounded Apply
 
+![Grounded Apply product vision: with Codex, turn your experience into approved career memory, discover and compare jobs, prepare evidence-linked applications, and track outcomes. You review and make the final submission; missing information returns to you for an approved memory update.](product-vision.png)
+
+*[Product vision](docs/PRODUCT_VISION.md): the complete experience we envision.
+The current alpha's capabilities are described below.*
+
 **A local-first job-search assistant that keeps your applications grounded in facts.**
 
-Build a reusable career profile, find roles on public company boards, and prepare
-resumes and answers using facts you have reviewed. Codex handles the commands;
-you review the facts and materials, choose where to apply, and submit.
+Build a career profile you can reuse, find roles on public company boards, and
+prepare resumes and answers from facts you approve. Work through conversation
+with Codex: you decide what is remembered, review each application, and make the
+final submission.
 
 **Status: experimental alpha · broader development paused.** The supervised local
-workflow is implemented and tested on macOS with Python 3.12. It is useful for
-reviewed application preparation, but it has not demonstrated lower user effort
-in a comparative trial. Expect setup and review work. This repository shares the
-working foundation and its unfinished design, with no promised delivery schedule.
+workflow is tested on macOS with Python 3.12. Expect setup and review work;
+independent first-use acceptance and time savings have not been measured.
+The [roadmap](docs/ROADMAP.md) records unfinished work without a delivery schedule.
 
 ## What you can do
 
-- See retained facts by topic, review chosen facts or batches, and reuse approved evidence.
-- Start from text, PDF or LaTeX, keep wrapped publications together, or use guided questions.
-- Find public company boards from role/location preferences, then discover jobs on
-  Greenhouse, Ashby, Lever, Workable and Netflix routes, with location filters and visible gaps.
-- Compare quoted job requirements with your evidence and see missing information.
-- Prepare traceable PDF resumes with research context and career answers, individually or as a batch.
-- Resume saved searches, review new drafts, and track applications you submit.
+- **Build your career memory.** Bring your current resume/CV as a selectable-text
+  PDF, paste text, or answer guided questions. Choose what to retain, then review
+  and approve facts individually or in batches.
+- **Discover opportunities.** Start with role and location preferences, find
+  public company boards, and search supported Greenhouse, Ashby, Lever, Workable
+  and Netflix sources with visible coverage gaps.
+- **Compare requirements with evidence.** See which approved facts relate to a
+  role and where information is missing.
+- **Prepare application materials.** Select and order approved wording into
+  traceable PDF resumes and career answers, for one job or a batch.
+- **Pick up where you left off.** Resume saved searches and draft queues, review
+  new materials, and record the progress of applications you submit.
 
-Resume preparation selects and orders approved wording. Missing or unsupported
-facts become questions. The tool does not invent achievements or predict hiring.
+Missing or unsupported facts become questions. The tool does not invent
+achievements or predict hiring outcomes.
 
 ## Get started with Codex
 
@@ -53,52 +63,25 @@ is needed to inspect the CLI:
 ./scripts/gapply doctor --materials --json
 ```
 
-The PDF prerequisite check reports presence only and needs no profile.
-See the [setup guide](docs/QUICKSTART.md#start) for optional
-materials, TeX and backup dependencies. PDF input needs `pypdf`; PDF output also
-needs a local TeX installation. The complete PDF workflow is verified locally on
-macOS/Python 3.12.14. Hosted checks pass on macOS 15 and Ubuntu 24.04 with Python
-3.12 and 3.13 for the base CLI, encryption and installed packages; those checks
-do not exercise the complete PDF workflow. Native Windows support is unfinished. See the
-[release notes](CHANGELOG.md) for the tested scope and limits.
+The prerequisite check reports presence only and needs no profile. PDF input
+needs `pypdf`; PDF output also needs local TeX. Follow the
+[setup guide](docs/QUICKSTART.md#start) for materials and optional encrypted-backup
+dependencies.
+
+The complete PDF workflow is verified locally on macOS/Python 3.12.14. Hosted
+checks cover the base CLI, encryption and installed packages on macOS 15 and
+Ubuntu 24.04 with Python 3.12/3.13; they do not verify the complete PDF workflow.
+Native Windows support is unfinished. See the [release notes](CHANGELOG.md).
 
 Already have a profile? Ask Codex, “What should I work on next in my job search?”
 For recurring discovery, use the [daily setup guide](docs/DAILY_QUICKSTART.md).
 
-## The product we envisioned
+## Current scope and roadmap
 
-One conversation to maintain a career memory, discover relevant work, and review
-prepared applications. New answers would improve that memory only with your
-approval. The full vision includes capabilities that are still on the wishlist:
+The illustration brings the full vision together. Here is what the alpha
+supports today and what remains unfinished:
 
-```mermaid
-flowchart LR
-    U[You + Codex] --> P[(Approved career facts)]
-    J[Public job sources] --> D[Discover + compare]
-    P --> D
-    D --> M[Prepare resumes + answers]
-    P --> M
-    M --> R[Your review]
-    R --> S[You submit]
-    S --> T[Track applications manually]
-    R --> Q[Missing facts? Ask you]
-    Q -->|Explicit approval| P
-    R -.-> B[Browser safe-fill · wishlist]
-    B -.-> S
-    T -.-> L[Email updates + reviewed feedback · wishlist]
-    L -.-> U
-```
-
-Solid paths describe the current supervised workflow; dashed paths are the future
-vision. Tracking currently requires manual updates. Even in the full vision,
-login, sensitive answers, signatures, and final submission remain human actions.
-The [figure brief](docs/PRODUCT_VISION.md) describes the intended schematic.
-
-## Roadmap and wishlist
-
-This is a record of scope, not a promise to finish every item.
-
-| Area | Supported today | Wishlist / unfinished |
+| Area | Supported today | Not yet available |
 |---|---|---|
 | Career memory | Text, selectable-text PDF and static LaTeX intake; reviewed facts; optional guided questions | OCR, DOCX, richer interpretation and saved interview progress |
 | Discovery | Configured Greenhouse, Ashby, Lever and Workable boards; bounded Netflix discovery; Codex-assisted source finding | Broader coverage, more connectors and cross-source deduplication |
@@ -109,27 +92,29 @@ This is a record of scope, not a promise to finish every item.
 | Data care | Private local storage; optional encrypted database backup/restore; whole-portable-home deletion | Document deduplication, automatic retention and larger-history performance |
 
 See the [detailed roadmap](docs/ROADMAP.md) for engineering status and the
-[release acceptance guide](docs/RELEASE_READINESS.md) for uncompleted product validation.
+[release acceptance guide](docs/RELEASE_READINESS.md) for outstanding product validation.
 
 ## Know the boundaries
 
-Discovery covers configured sources; it does not match the market coverage of
-LinkedIn or Indeed. You can also supply job text and its URL. Daily searches need
+Discovery covers configured sources, with incomplete coverage and explicit gaps.
+For unsupported sources, you can supply job text and its URL. Daily searches need
 an authorized external wake-up mechanism; the CLI installs no background process.
-Browser filling, automatic semantic rewriting, and outbound messages are not
-available. Final submission is always your action.
+Application status updates are manual. Login, sensitive answers, legal
+attestations, signatures, and final submission remain your actions.
 
 PDF/LaTeX extraction needs review, especially for wrapped publications, reading
-order and unsupported sections. Storage is bounded to a 256 MiB database;
-backup/restore near that limit used about 2.3 GiB of memory in synthetic testing.
-Keep external source files and exported copies separately backed up.
+order and unsupported sections. Backup and automated workflows support databases
+up to 256 MiB; backup/restore near that limit used about 2.3 GiB of memory in
+synthetic testing. Keep external source files and exported copies separately
+backed up.
 
 Your profile is stored locally, outside Git. Selected evidence and history are
 retained in the private database; original source files and exported copies are
 separate. Content shown to Codex is subject to your Codex configuration—local
 storage does not mean the conversation stays on your device. Sensitive answers
 are never inferred, and permission to use an answer is separate from permission
-to retain it. See the [privacy and storage reference](docs/REFERENCE.md#trust-and-privacy-contract).
+to retain it. Learning means reviewed memory and retrieval, not training a model
+on your CV. See the [privacy and storage reference](docs/REFERENCE.md#trust-and-privacy-contract).
 
 ## Documentation
 

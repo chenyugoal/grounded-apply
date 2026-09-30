@@ -11,6 +11,11 @@ in the [daily quickstart](DAILY_QUICKSTART.md) and [operator reference](REFERENC
 The [session handoff](SESSION_HANDOFF.md) records current verification; Git history
 preserves earlier checkpoints.
 
+The README opens with [`product-vision.png`](../product-vision.png), an
+illustration of the complete intended experience. Keep its
+[vision brief](PRODUCT_VISION.md) aligned with the image and describe supported
+capabilities separately in the README and roadmap.
+
 ## Prerequisites
 
 - Python 3.12 or newer, a POSIX shell and Git.

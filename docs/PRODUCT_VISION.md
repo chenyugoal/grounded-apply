@@ -1,7 +1,8 @@
-# Grounded Apply: product vision and figure brief
+# Grounded Apply: product vision
 
-This describes the envisioned product. The [README](../README.md) distinguishes
-the working experimental alpha from the wishlist. This is not a product screenshot.
+This describes the complete experience shown in the
+[README illustration](../product-vision.png). The [README](../README.md) and
+[roadmap](ROADMAP.md) separately describe the experimental alpha's current scope.
 
 ## One sentence
 
@@ -18,34 +19,47 @@ and application answers. Every candidate fact links back to approved evidence.
 Missing information becomes a question; an answer enters memory only with your
 permission. You review the package, receive visible browser-filling assistance,
 and submit it yourself. Application tracking, optional email/calendar connections,
-and feedback would help the assistant support the next application.
+and reviewed feedback help the assistant support the next application.
 
 “Learning” means reviewed memory and retrieval, not training a model on your CV.
 Local storage does not mean content shown in a Codex conversation stays on-device.
 
-## Suggested schematic
+## Illustration direction
 
-Use a wide, simple editorial diagram with six stages:
+Use a wide, approachable editorial illustration with six connected scenes:
 
 **Your experience → Approved career memory → Discover and compare jobs → Prepare
 applications → Human review and submission → Track and improve.**
 
-Place **You + Codex** above the workflow. Put a small local-database symbol under
-career memory. Job boards feed discovery. Show a resume and answer cards at
-preparation, then a human approval checkpoint before submission. Add a feedback
-arrow from **Missing information → Ask you → Approve memory update** back to the
-profile. Use fictional placeholder content only.
+Place **You + Codex** above the scenes as a shared conversational layer. Use a
+light background, generous whitespace, restrained colors and short labels that
+remain readable at README width. Show people, documents and small cards, joined
+by a gentle path with secondary arrows.
 
-Use solid outlines for existing capabilities: reviewed career facts, bounded
-public-board discovery, evidence comparisons, PDF/answer preparation, draft
-queues, and manually updated application history. Use dashed outlines labeled
-**Wishlist** for richer matching, browser safe-fill, email/calendar updates and
-feedback learning. Label the whole image **Product vision — partly implemented**.
+Put a small local-database symbol beneath approved career memory, with subtle
+links to source documents. Job boards feed a shortlist with explanations of fit,
+gaps and uncertainty. A resume and answer cards retain evidence links. Show the
+person reviewing the package alongside assisted browser fields and making the
+final submission. Tracking includes optional, permission-based email/calendar
+connections, follow-ups, interview preparation and reviewed feedback.
 
-Keep text short. Show trust through a few evidence links and approval marks;
-avoid an architecture diagram crowded with implementation components. Never
-depict automatic final submission or an assistant inventing achievements.
+Below the main path, connect **Missing information → Ask you → Approve memory
+update** back to approved career memory. Outcomes and reviewed feedback inform
+the next search; any new remembered candidate fact still needs human approval.
 
-The Mermaid schematic in the README can be replaced with an illustration using
-this brief while retaining the implemented/wishlist distinction and readable
-alternative text.
+Present one coherent experience with a consistent visual treatment. Label it
+**Product vision**, with the title **Grounded Apply** and subtitle **Your
+experience. Truthful applications. You in control.** Keep implementation status
+in the surrounding README text; the illustration uses no completion labels or
+separate styles for current and future capabilities.
+
+Use the footer **Approved facts · Evidence-linked materials · You make the final
+submission**. Communicate trust through evidence links, approval marks and human
+review. Use fictional placeholder content only. Never imply invented
+achievements, automatic consent to storing answers, autonomous submission, model
+training on a CV, or an entirely offline experience.
+
+The source image is [`product-vision.png`](../product-vision.png), embedded near
+the beginning of the README with descriptive alternative text. It is a product
+vision illustration, not a screenshot, architecture diagram or implementation
+roadmap.
