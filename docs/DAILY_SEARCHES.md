@@ -138,8 +138,6 @@ Surface execution or validation failures even when a failure prevented
 saving a notification; never turn an unavailable report into "nothing changed."
 State the local-host sleep/offline
 limitation; a daily policy is not a promise that a powered-off computer will run.
-The temporary development heartbeat in this task is separate from a user's
-personal job-search schedule.
 
 Automated storage remains bounded at 256 MiB. Notification state and event limits stop
 visibly when full; they do not authorize deleting history. Broader job coverage,
@@ -153,10 +151,13 @@ If a reserve is reached after some packages were committed, execution reports
 notification. A pre-child capacity stop does not invent a child run. Capacity
 handling does not override lease, pause, expiry or clock checks.
 
-A synthetic workload and restored continuation completed twenty daily runs and
-200 PDFs, reaching 16,023,552 allocated database bytes. The next run refused
+Under the former 16 MiB storage limit, a synthetic workload and restored
+continuation completed twenty daily runs and 200 PDFs, reaching 16,023,552
+allocated database bytes. The next run refused
 before fetching or creating an occurrence: 753,664 bytes of file headroom was
 less than the schedule's 768 KiB reserve. All existing artifacts, read-only
 review and encrypted restore passed. This is a measured fixture boundary, not
 a general twenty-day capacity or retention policy. Package size and history
-growth vary. Long-term storage needs a separate design.
+growth vary. The current 256 MiB limit and its separate capacity verification
+are described in [ADR 0011](adr/0011-supported-profile-capacity.md). Long-term
+storage needs a separate design.

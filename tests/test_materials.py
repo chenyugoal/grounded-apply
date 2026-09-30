@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import shutil
 import tempfile
 import unittest
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 

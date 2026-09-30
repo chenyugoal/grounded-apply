@@ -58,7 +58,6 @@ _PROFILE_IMPORT_REVIEW_WORKFLOW = "profile_import_review_decision"
 _MAX_IMPORT_PROPOSALS = 1000
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
-_PROFILE_IMPORT_SOURCE_REF_PATTERN = re.compile(r"sha256:(?P<digest>[0-9a-f]{64})")
 _LINE_BREAK_PATTERN = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 PROFILE_IMPORT_MANIFEST_SCHEMA_VERSION = 2

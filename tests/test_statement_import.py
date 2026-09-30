@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from grounded_apply.domain import (
-    ApprovalStatus, ClaimStatus, ClaimUsePolicy, NeedInfo, Resolved, Sensitivity,
+    ApprovalStatus, ClaimUsePolicy, NeedInfo, Resolved, Sensitivity,
     SourceType, to_jsonable,
 )
 from grounded_apply.repositories import RepositoryError, SQLiteRepository

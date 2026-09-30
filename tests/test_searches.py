@@ -14,7 +14,6 @@ from uuid import NAMESPACE_URL, uuid5
 from grounded_apply.repositories import RepositoryError, SQLiteRepository
 from grounded_apply.services.applications import ApplicationService
 from grounded_apply.services.batches import BatchService
-from grounded_apply.services.jobs import JobService
 from grounded_apply.services.materials import MaterialService
 from grounded_apply.services.profile_lifecycle import ProfileLifecycleService
 from grounded_apply.services.searches import (

@@ -15,4 +15,5 @@ user tables.
 
 Migration files must not contain transaction control or set `user_version`.
 The initializer wraps each file, its ledger entry, and its version update in one
-transaction so an unsuccessful upgrade rolls back completely.
+transaction so an unsuccessful migration rolls back completely. Earlier
+successful migrations in the same upgrade remain committed.

@@ -8,7 +8,6 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
 
 try:
     from scripts.check_schedule import ScheduleCLI

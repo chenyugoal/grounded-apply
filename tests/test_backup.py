@@ -17,7 +17,7 @@ from grounded_apply.cli import main
 from grounded_apply.config import resolve_runtime_paths
 from grounded_apply.repositories import SQLiteRepository
 from grounded_apply.repositories.backup_crypto import (
-    FernetBackupCipher, _MAGIC, _SCOPE, _validate_canonical_token,
+    FernetBackupCipher, _MAGIC, _validate_canonical_token,
 )
 from grounded_apply.repositories.backup_files import (
     LocalBackupStorage, read_private_file, write_private_file,

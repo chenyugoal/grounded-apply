@@ -231,7 +231,8 @@ stable IDs and deterministic policy functions. Relational records remain the
 source of truth; retrieval indexes cannot replace provenance or policy checks.
 
 `uv`, Typer, SQLAlchemy, Alembic, Ruff and Pyright remain planned hardening, not
-prerequisites or supported checks. Adopt them only with working configuration and
+prerequisites or supported checks. No Ruff or Pyright configuration is maintained
+until those tools are adopted. Adopt them only with working configuration and
 verification, updating this matrix, README, AGENTS and the handoff together.
 
 ## Truth, privacy and runtime safety

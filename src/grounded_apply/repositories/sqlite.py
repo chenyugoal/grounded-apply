@@ -31,7 +31,6 @@ from grounded_apply.config import (
 from ._schema import (
     LATEST_SCHEMA_VERSION,
     FutureSchemaError,
-    MigrationError,
     SchemaError,
     default_migrations_directory,
     initialize_schema,

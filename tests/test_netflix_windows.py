@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 from grounded_apply.services.discovery import DiscoveryErrorCode, DiscoveryService, SourceSpec
 from grounded_apply.services.source_windows import (
-    NETFLIX_WINDOW_POLICY, NetflixCursor, NetflixWindowProgress, finish_netflix_window,
+    NetflixCursor, NetflixWindowProgress, finish_netflix_window,
     plan_netflix_window, validate_netflix_cursor, validate_netflix_window_progress,
 )
 from tests.test_discovery import FakeTransport, FixedTransportError

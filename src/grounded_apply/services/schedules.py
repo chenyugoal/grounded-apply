@@ -23,7 +23,7 @@ from grounded_apply.services.schedule_notifications import (
 from grounded_apply.services.schedule_policy import MAX_DATE, MIN_DATE, DailyOccurrence, due_instant, latest_due, next_due, validate_schedule_manifest
 from grounded_apply.services.searches import RepositoryFactory, SearchLeaseActiveError, SearchService
 from grounded_apply.services.workflow import (
-    canonical, digest, existing_workflow, finish_workflow, hash_bytes, opaque,
+    digest, existing_workflow, finish_workflow, hash_bytes, opaque,
     request_input, start_workflow, validate_workflow,
 )
 
